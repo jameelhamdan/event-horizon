@@ -93,3 +93,40 @@ def run_forecast_task() -> int:
 def score_forecasts_task() -> int:
     from services.forecasting.service import score_forecasts
     return score_forecasts()
+
+
+# ── Backfill tasks ─────────────────────────────────────────────────────────────
+
+def backfill_history_task(
+    source_code: str,
+    start_date: datetime,
+    end_date: datetime,
+    top_n: int = 10,
+) -> dict:
+    """
+    Backfill top-N articles per ISO week for a source.
+
+    Enqueue with job_timeout=-1 (no cap) since multi-year backtracks can take
+    longer than the standard 30-minute task timeout.
+
+    Returns {'weeks': int, 'fetched': int, 'saved': int}.
+    """
+    import core.models as m
+    from services.data.historical import HistoricalBackfillService
+
+    source = m.Source.objects.get(code=source_code)
+    service = HistoricalBackfillService(
+        source=source,
+        start_date=start_date,
+        end_date=end_date,
+        top_n=top_n,
+        delay_seconds=0.5,
+    )
+
+    total_weeks = total_fetched = total_saved = 0
+    for result in service.run():
+        total_weeks += 1
+        total_fetched += result.fetched
+        total_saved += result.saved
+
+    return {'weeks': total_weeks, 'fetched': total_fetched, 'saved': total_saved}

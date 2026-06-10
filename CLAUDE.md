@@ -107,6 +107,8 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │   ├── data/           # Ingestion — DataService, ArticleDatum
 │   │   │   ├── __init__.py     # exports DataService
 │   │   │   ├── base.py         # ArticleDatum TypedDict
+│   │   │   ├── historical.py   # HistoricalBackfillService, TelegramHistoricalService,
+│   │   │   │                   # RSSHistoricalService, RankedArticle, WeekResult
 │   │   │   └── sources/
 │   │   │       ├── rss.py          # RSSService (feedparser)
 │   │   │       └── telegram.py     # TelegramService (Telethon)
@@ -514,6 +516,29 @@ command: sh -c "python manage.py setup_schedule && rqscheduler --url $${REDIS_UR
 2. Add a `scheduler.schedule(...)` or `scheduler.cron(...)` call in `api/core/management/commands/setup_schedule.py` — pass `queue='heavy'` for NLP/LLM jobs
 3. Restart the `scheduler` Docker service to apply
 
+### Backfill historical data for a source
+
+```bash
+# Dry run first to check coverage
+python manage.py backfill_history <source_code> \
+    --start-date 2022-01-01 --end-date 2025-01-01 --dry-run
+
+# Run the backfill (top 10 per week, 1s delay between weeks)
+python manage.py backfill_history <source_code> \
+    --start-date 2022-01-01 --end-date 2025-01-01 --top-n 10
+
+# Resume after interruption (checkpoint in Django cache)
+python manage.py backfill_history <source_code> \
+    --start-date 2022-01-01 --end-date 2025-01-01 --resume
+
+# Then process the new articles through the NLP pipeline
+python manage.py process_articles --limit 5000
+```
+
+Telegram sources rank by engagement (`views + forwards*3 + reactions*2`).
+RSS sources rank by LLM significance score (batch of 30 headlines per call).
+Service code: `api/services/data/historical.py` — `HistoricalBackfillService`.
+
 ### Add a new stream data type
 
 1. Create `api/services/streams/<name>.py` extending `BaseStream`
@@ -569,6 +594,7 @@ command: sh -c "python manage.py setup_schedule && rqscheduler --url $${REDIS_UR
 | Forex stream | `api/services/streams/forex.py` |
 | RSS ingestion | `api/services/data/sources/rss.py` |
 | Telegram ingestion | `api/services/data/sources/telegram.py` |
+| Historical backfill | `api/services/data/historical.py` → `HistoricalBackfillService` |
 | Forecasting service | `api/services/forecasting/service.py` |
 | Event→symbol routing | `api/services/forecasting/routing.py` |
 | API views | `api/api/views/` |
@@ -788,6 +814,11 @@ python manage.py bootstrap_static_points
 
 # Generate Telegram session string for a source (interactive, run once per source)
 python manage.py telegram_session <source_code>
+
+# Backfill historical top-N articles per week from a source
+python manage.py backfill_history <source_code> --start-date 2022-01-01 --end-date 2025-01-01
+python manage.py backfill_history <source_code> --start-date 2022-01-01 --end-date 2025-01-01 --dry-run
+python manage.py backfill_history <source_code> --start-date 2022-01-01 --end-date 2025-01-01 --top-n 10 --resume
 
 # Generate newsletter for a date
 python manage.py generate_newsletter --date 2025-03-08

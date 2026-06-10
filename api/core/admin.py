@@ -1,3 +1,4 @@
+import datetime
 from datetime import timedelta
 
 from django.contrib import admin, messages
@@ -42,6 +43,7 @@ class EventResource(resources.ModelResource):
 @admin.register(models.Source)
 class SourceAdmin(ImportExportModelAdmin):
     resource_classes = [SourceResource]
+    change_list_template = "admin/core/source/change_list.html"
     list_display = ["code", "name", "type", "author_slug", "is_enabled", "created_on"]
     list_filter = ["type", "is_enabled"]
     search_fields = ["name", "code", "author_slug"]
@@ -50,6 +52,73 @@ class SourceAdmin(ImportExportModelAdmin):
         if obj:
             return [*self.readonly_fields, "code"]
         return self.readonly_fields
+
+    def changelist_view(self, request, extra_context=None):
+        if request.method == "POST" and "pipeline_action" in request.POST:
+            return self._handle_backfill_action(request)
+        extra_context = extra_context or {}
+        extra_context["backfill_sources"] = models.Source.objects.filter(
+            is_enabled=True,
+            type__in=[models.SourceType.TELEGRAM, models.SourceType.RSS],
+        ).order_by("name")
+        return super().changelist_view(request, extra_context=extra_context)
+
+    def _handle_backfill_action(self, request):
+        from services.queue import enqueue
+        from services.tasks import backfill_history_task
+
+        source_code = request.POST.get("backfill_source", "").strip()
+        start_raw = request.POST.get("backfill_start", "").strip()
+        end_raw = request.POST.get("backfill_end", "").strip()
+        top_n = max(1, min(100, int(request.POST.get("backfill_top_n") or 10)))
+
+        if not source_code or not start_raw or not end_raw:
+            self.message_user(request, "Source, start date, and end date are all required.", messages.ERROR)
+            return redirect(request.path)
+
+        try:
+            start_date = datetime.datetime(
+                *map(int, start_raw.split("-")), tzinfo=datetime.timezone.utc
+            )
+            end_date = datetime.datetime(
+                *map(int, end_raw.split("-")), tzinfo=datetime.timezone.utc
+            )
+        except (ValueError, TypeError):
+            self.message_user(request, "Invalid date format — use YYYY-MM-DD.", messages.ERROR)
+            return redirect(request.path)
+
+        if start_date >= end_date:
+            self.message_user(request, "Start date must be before end date.", messages.ERROR)
+            return redirect(request.path)
+
+        try:
+            source = models.Source.objects.get(code=source_code)
+        except models.Source.DoesNotExist:
+            self.message_user(request, f'Source "{source_code}" not found.', messages.ERROR)
+            return redirect(request.path)
+
+        weeks = (end_date - start_date).days // 7 + 1
+
+        # Backfills can run for hours on multi-year ranges — use unlimited timeout.
+        enqueue(
+            backfill_history_task,
+            source_code,
+            start_date,
+            end_date,
+            top_n,
+            queue="heavy",
+            job_timeout=-1,
+        )
+        self.message_user(
+            request,
+            (
+                f'Backfill enqueued for "{source.name}" '
+                f'({start_date.date()} → {end_date.date()}, ~{weeks} weeks, top-{top_n}/week). '
+                f'Monitor progress at /admin/django-rq/.'
+            ),
+            messages.SUCCESS,
+        )
+        return redirect(request.path)
 
 
 @admin.register(models.Article)

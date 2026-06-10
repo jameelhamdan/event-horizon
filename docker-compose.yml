@@ -1,6 +1,5 @@
 services:
   frontend:
-    container_name: frontend
     build:
       context: ./ui
       args:
@@ -13,7 +12,6 @@ services:
       - ./frontend_dist:/frontend_dist
 
   nginx:
-    container_name: nginx
     image: nginx:alpine
     restart: always
     ports:
@@ -29,7 +27,6 @@ services:
         condition: service_started
 
   cloudflared:
-    container_name: cloudflared
     image: cloudflare/cloudflared:latest
     restart: always
     command: tunnel --no-autoupdate run
@@ -40,7 +37,6 @@ services:
         condition: service_started
 
   api:
-    container_name: api
     build: ./api
     restart: always
     command: ./release.sh uvicorn app.asgi:application --host 0.0.0.0 --port 8000 --workers 4
@@ -55,7 +51,6 @@ services:
       - ./.static:/app/.static
 
   worker-heavy:
-    container_name: worker-heavy
     build: ./api
     restart: always
     command: sh -c "python manage.py rqworker heavy"
@@ -67,7 +62,6 @@ services:
       - ./media_data:/app/media
 
   worker-light:
-    container_name: worker-light
     build: ./api
     restart: always
     command: sh -c "python manage.py rqworker default"
@@ -79,7 +73,6 @@ services:
       - ./media_data:/app/media
 
   scheduler:
-    container_name: scheduler
     build: ./api
     restart: always
     command: sh -c "python manage.py setup_schedule && rqscheduler --url $${REDIS_URL:-redis://redis:6379/0}"
@@ -91,12 +84,10 @@ services:
       - ./media_data:/app/media
 
   redis:
-    container_name: redis
     image: redis:7-alpine
     restart: always
 
   mongo:
-    container_name: mongo
     image: mongo:8.2
     restart: always
     ports:
