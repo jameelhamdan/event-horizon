@@ -8,7 +8,6 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     replaces = [
-        ('auth', '0001_initial'),
         ('auth', '0002_alter_user_groups_alter_user_is_active_and_more'),
     ]
 

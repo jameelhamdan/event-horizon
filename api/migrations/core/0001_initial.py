@@ -118,7 +118,6 @@ def unload_static_points(apps, schema_editor):
 class Migration(migrations.Migration):
 
     replaces = [
-        ('core', '0001_initial'),
         ('core', '0002'),
         ('core', '0003'),
         ('core', '0004'),

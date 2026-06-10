@@ -1,13 +1,4 @@
 services:
-  certbot:
-    container_name: certbot
-    image: certbot/certbot
-    restart: unless-stopped
-    volumes:
-      - ./certbot/www:/var/www/certbot
-      - ./certbot/conf:/etc/letsencrypt
-    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --quiet; sleep 12h & wait $${!}; done;'"
-
   frontend:
     container_name: frontend
     build:
@@ -26,15 +17,11 @@ services:
     image: nginx:alpine
     restart: always
     ports:
-      - "80:80"
-      - "443:443"
+      - "192.168.2.17:80:80"
     volumes:
       - ./frontend_dist:/usr/share/nginx/html:ro
       - ./.static:/django_static:ro
       - ./nginx/templates:/etc/nginx/templates:ro
-      - ./certbot/www:/var/www/certbot:ro
-      - ./certbot/conf:/etc/letsencrypt:ro
-    env_file: .env
     depends_on:
       frontend:
         condition: service_completed_successfully
@@ -56,7 +43,7 @@ services:
     container_name: api
     build: ./api
     restart: always
-    command: bash -c "./release.sh && uvicorn app.asgi:application --host 0.0.0.0 --port 8000 --workers 4"
+    command: ./release.sh uvicorn app.asgi:application --host 0.0.0.0 --port 8000 --workers 4
     expose:
       - "8000"
     depends_on:
@@ -121,4 +108,4 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512m
+          memory: 1g

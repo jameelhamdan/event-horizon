@@ -7,7 +7,6 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     replaces = [
-        ('newsletter', '0001_initial'),
         ('newsletter', '0002_body_field'),
     ]
 

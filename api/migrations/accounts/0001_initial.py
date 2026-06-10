@@ -1,7 +1,5 @@
 import accounts.models
-import django.contrib.auth.models
 import django_mongodb_backend.fields
-import qsessions.models
 import logging
 from django.db import migrations, models
 
@@ -21,17 +19,10 @@ def initialize_data(apps, schema_editor):
 
 class Migration(migrations.Migration):
 
-    replaces = [
-        ('accounts', '0001_initial'),
-        ('accounts', '0002_group_session'),
-        ('accounts', '0003_alter_user_groups_alter_user_user_permissions'),
-    ]
-
     initial = True
 
     dependencies = [
         ('auth', '0001_initial'),
-        ('qsessions', '0002_session_created_at'),
     ]
 
     operations = [
@@ -80,37 +71,6 @@ class Migration(migrations.Migration):
             },
             managers=[
                 ('objects', accounts.models.UserManager()),
-            ],
-        ),
-        migrations.CreateModel(
-            name='Group',
-            fields=[],
-            options={
-                'verbose_name': 'group',
-                'verbose_name_plural': 'groups',
-                'proxy': True,
-                'indexes': [],
-                'constraints': [],
-            },
-            bases=('auth.group',),
-            managers=[
-                ('objects', django.contrib.auth.models.GroupManager()),
-            ],
-        ),
-        migrations.CreateModel(
-            name='Session',
-            fields=[],
-            options={
-                'verbose_name': 'session',
-                'verbose_name_plural': 'sessions',
-                'abstract': False,
-                'proxy': True,
-                'indexes': [],
-                'constraints': [],
-            },
-            bases=('qsessions.session',),
-            managers=[
-                ('objects', qsessions.models.SessionManager()),
             ],
         ),
         migrations.RunPython(initialize_data, migrations.RunPython.noop),

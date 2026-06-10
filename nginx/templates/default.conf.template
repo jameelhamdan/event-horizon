@@ -3,43 +3,9 @@ upstream api_backend {
     keepalive 32;
 }
 
-# HTTP — ACME challenge + redirect to HTTPS
 server {
     listen 80;
-    server_name ${DOMAIN} www.${DOMAIN};
-
-    location /.well-known/acme-challenge/ {
-        root /var/www/certbot;
-        try_files $uri =404;
-    }
-
-    location / {
-        return 301 https://${DOMAIN}$request_uri;
-    }
-}
-
-# HTTPS www → non-www redirect
-server {
-    listen 443 ssl;
-    server_name www.${DOMAIN};
-
-    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
-    include             /etc/letsencrypt/options-ssl-nginx.conf;
-    ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
-
-    return 301 https://${DOMAIN}$request_uri;
-}
-
-# HTTPS — TLS termination, backend proxy + React SPA
-server {
-    listen 443 ssl;
-    server_name ${DOMAIN};
-
-    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
-    include             /etc/letsencrypt/options-ssl-nginx.conf;
-    ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
+    server_name _;
 
     root /usr/share/nginx/html;
     index index.html;

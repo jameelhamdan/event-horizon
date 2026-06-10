@@ -6,7 +6,6 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     replaces = [
-        ('contenttypes', '0001_initial'),
         ('contenttypes', '0002_alter_contenttype_options'),
     ]
 
