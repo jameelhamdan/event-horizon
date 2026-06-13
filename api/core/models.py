@@ -7,7 +7,6 @@ from django_mongodb_backend.managers import MongoManager
 
 
 class SourceType(models.TextChoices):
-    TELEGRAM = 'telegram'
     WEBSITE = 'website'
     API = 'api'
     RSS = 'rss'
@@ -18,9 +17,7 @@ class SourceType(models.TextChoices):
 
     @classmethod
     def headers_keys(cls):
-        return [
-            (cls.TELEGRAM.value, ['TELEGRAM_API_ID', 'TELEGRAM_API_HASH', 'TELEGRAM_SESSION']),
-        ]
+        return []
 
 
 class Source(models.Model):
@@ -29,7 +26,7 @@ class Source(models.Model):
     name = models.CharField(max_length=128, help_text=_('Display name of the source'))
     description = models.TextField(blank=True)
     url = models.URLField(max_length=255, default='', blank=True, help_text=_('URL of the source, used in website and RSS feeds'))
-    author_slug = models.CharField(max_length=255, default='', blank=True, help_text=_('Author of the source, used in telegram as channel username'))
+    author_slug = models.CharField(max_length=255, default='', blank=True, help_text=_('Author/slug of the source'))
     headers = models.JSONField(default=dict, blank=True)
     is_enabled = models.BooleanField(default=True, help_text=_('Uncheck to disable fetching from this source'))
 

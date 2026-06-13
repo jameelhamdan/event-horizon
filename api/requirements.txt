@@ -17,7 +17,6 @@ sentry-sdk
 # Ingestion
 requests>=2.32.5
 feedparser>=6.0
-telethon>=1.36
 transformers>=5.3
 sentence-transformers>=3.0
 vaderSentiment>=3.3

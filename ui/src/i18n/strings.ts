@@ -181,7 +181,7 @@ export const UI: Record<Language, UIStrings> = {
       "A real-time intelligence platform that turns raw news into a global conflict picture.",
     aboutWhatWeDoTitle: "What we do",
     aboutWhatWeDo:
-      `${constants.APP_NAME} monitors hundreds of news sources — Telegram channels, wire feeds, and regional outlets — and uses natural language processing to extract, classify, and geolocate events as they happen. The result is an interactive live map where you can explore ongoing conflicts, protests, disasters, and political developments anywhere in the world.`,
+      `${constants.APP_NAME} monitors hundreds of news sources — wire feeds, RSS, and regional outlets — and uses natural language processing to extract, classify, and geolocate events as they happen. The result is an interactive live map where you can explore ongoing conflicts, protests, disasters, and political developments anywhere in the world.`,
     aboutLegendTitle: "Category legend",
     aboutContactTitle: "Contact",
     aboutContactFooter:
@@ -190,7 +190,7 @@ export const UI: Record<Language, UIStrings> = {
     contactLabelData: "Source & data requests",
     contactLabelPress: "Press & media",
     contactNoteData:
-      "Want us to track a specific region, outlet, or Telegram channel? Send us the details.",
+      "Want us to track a specific region, outlet, or news feed? Send us the details.",
     contactNotePress:
       "For media use of our data or map embeds, please reach out before publishing.",
     categoryDescs: {
@@ -321,7 +321,7 @@ export const UI: Record<Language, UIStrings> = {
       "منصة استخبارات آنية تحول الأخبار الخام إلى صورة شاملة للنزاعات العالمية.",
     aboutWhatWeDoTitle: "ما نفعله",
     aboutWhatWeDo:
-      `ترصد ${constants.APP_NAME} مئات المصادر الإخبارية — قنوات تيليغرام ووكالات الأنباء والمنافذ الإقليمية — وتستخدم معالجة اللغة الطبيعية لاستخلاص الأحداث وتصنيفها وتحديد مواقعها الجغرافية فور وقوعها. والنتيجة خريطة تفاعلية حية يمكنك من خلالها استكشاف النزاعات والاحتجاجات والكوارث والتطورات السياسية في أي مكان من العالم.`,
+      `ترصد ${constants.APP_NAME} مئات المصادر الإخبارية — وكالات الأنباء وخلاصات RSS والمنافذ الإقليمية — وتستخدم معالجة اللغة الطبيعية لاستخلاص الأحداث وتصنيفها وتحديد مواقعها الجغرافية فور وقوعها. والنتيجة خريطة تفاعلية حية يمكنك من خلالها استكشاف النزاعات والاحتجاجات والكوارث والتطورات السياسية في أي مكان من العالم.`,
     aboutLegendTitle: "دليل التصنيفات",
     aboutContactTitle: "تواصل معنا",
     aboutContactFooter:
@@ -330,7 +330,7 @@ export const UI: Record<Language, UIStrings> = {
     contactLabelData: "طلبات المصادر والبيانات",
     contactLabelPress: "الإعلام والصحافة",
     contactNoteData:
-      "هل تريد منا تتبع منطقة أو منفذ إعلامي أو قناة تيليغرام معينة؟ أرسل لنا التفاصيل.",
+      "هل تريد منا تتبع منطقة أو منفذ إعلامي أو خلاصة إخبارية معينة؟ أرسل لنا التفاصيل.",
     contactNotePress:
       "لاستخدام بياناتنا أو تضمين خرائطنا إعلامياً، يرجى التواصل معنا قبل النشر.",
     categoryDescs: {

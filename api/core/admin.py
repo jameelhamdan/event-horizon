@@ -59,7 +59,7 @@ class SourceAdmin(ImportExportModelAdmin):
         extra_context = extra_context or {}
         extra_context["backfill_sources"] = models.Source.objects.filter(
             is_enabled=True,
-            type__in=[models.SourceType.TELEGRAM, models.SourceType.RSS],
+            type__in=[models.SourceType.RSS],
         ).order_by("name")
         return super().changelist_view(request, extra_context=extra_context)
 

@@ -1,12 +1,7 @@
 """
 Historical backfill — fetch top-N articles per ISO week from a source.
 
-Two parallel strategies, one per source type:
-
-  TelegramHistoricalService
-    Uses Telethon iter_messages() to page the full message history — no 200-
-    message cap.  Ranks by native engagement: views + forwards*3 + reactions*2.
-    Captures engagement counts in Article.extra_data for downstream use.
+Strategy (per source type):
 
   RSSHistoricalService
     Discovers historical article URLs via the source domain's sitemap
@@ -80,145 +75,6 @@ def iter_weeks(
     while current < end:
         yield current, current + datetime.timedelta(weeks=1)
         current += datetime.timedelta(weeks=1)
-
-
-# ---------------------------------------------------------------------------
-# Telegram historical strategy
-# ---------------------------------------------------------------------------
-
-class TelegramHistoricalService:
-    """
-    Parallel to TelegramService.  Key differences:
-
-    - Uses client.iter_messages() (generator, unlimited pagination) instead of
-      client.get_messages() (single call, 200-message cap).
-    - Accepts a (week_start, week_end) window rather than a "since" cutoff.
-    - Captures msg.views / msg.forwards / msg.reactions and stores them in
-      extra_data so the engagement signal is queryable after import.
-    """
-
-    def __init__(self, source: 'core.models.Source') -> None:
-        self._source = source
-        self._channel = source.author_slug
-
-        api_id_raw = source.get_header('TELEGRAM_API_ID')
-        api_hash = source.get_header('TELEGRAM_API_HASH')
-        session_str = source.get_header('TELEGRAM_SESSION', '')
-
-        if not api_id_raw or not api_hash:
-            raise HistoricalServiceError(
-                f'Source "{source.code}" is missing TELEGRAM_API_ID / TELEGRAM_API_HASH in headers.'
-            )
-        if not session_str:
-            raise HistoricalServiceError(
-                f'Source "{source.code}" is missing TELEGRAM_SESSION in headers. '
-                'Run: python manage.py telegram_session <source_code>'
-            )
-        try:
-            self._api_id = int(api_id_raw)
-        except (TypeError, ValueError):
-            raise HistoricalServiceError(
-                f'TELEGRAM_API_ID for source "{source.code}" must be an integer.'
-            )
-        self._api_hash = api_hash
-        self._session_str = session_str
-
-    def fetch_week(
-        self,
-        week_start: datetime.datetime,
-        week_end: datetime.datetime,
-    ) -> list[RankedArticle]:
-        """
-        Return all messages in [week_start, week_end) as RankedArticle instances
-        sorted by engagement score descending.
-        """
-        from telethon.sync import TelegramClient
-        from telethon.sessions import StringSession
-        from telethon.errors import ChannelPrivateError, UsernameNotOccupiedError
-
-        client = TelegramClient(
-            StringSession(self._session_str),
-            self._api_id,
-            self._api_hash,
-            system_version='4.16.30-vxCUSTOM',
-        )
-
-        try:
-            client.connect()
-        except Exception as exc:
-            raise HistoricalServiceError(f'Telegram connect failed: {exc}')
-
-        if not client.is_user_authorized():
-            client.disconnect()
-            raise HistoricalServiceError(
-                f'Session for source "{self._source.code}" is not authorised. '
-                'Re-run: python manage.py telegram_session <source_code>'
-            )
-
-        try:
-            return self._collect(client, week_start, week_end)
-        except (ChannelPrivateError, UsernameNotOccupiedError) as exc:
-            raise HistoricalServiceError(f'Telegram channel error: {exc}')
-        finally:
-            client.disconnect()
-
-    def _collect(
-        self,
-        client,
-        week_start: datetime.datetime,
-        week_end: datetime.datetime,
-    ) -> list[RankedArticle]:
-        results: list[RankedArticle] = []
-
-        # iter_messages with reverse=False starts just before offset_date and
-        # pages backwards in time.  We break once we pass week_start.
-        for msg in client.iter_messages(
-            self._channel,
-            offset_date=week_end,
-            reverse=False,
-        ):
-            msg_date: datetime.datetime = msg.date
-            if msg_date.tzinfo is None:
-                msg_date = msg_date.replace(tzinfo=datetime.timezone.utc)
-
-            if msg_date < week_start:
-                break
-
-            if not msg.text or not msg.text.strip():
-                continue
-
-            views = msg.views or 0
-            forwards = msg.forwards or 0
-            reactions = 0
-            if msg.reactions:
-                for reaction in msg.reactions.results:
-                    reactions += reaction.count
-
-            score = float(views + forwards * 3 + reactions * 2)
-            content = msg.text.strip()
-
-            datum = ArticleDatum(
-                source_url=f'https://t.me/{self._channel}/{msg.id}',
-                author=self._channel,
-                author_slug=self._channel,
-                title=content[:200],
-                content=content,
-                published_on=msg_date,
-                extra_data={
-                    'message_id': msg.id,
-                    'channel': self._channel,
-                    'views': views,
-                    'forwards': forwards,
-                    'reactions': reactions,
-                },
-            )
-            results.append(RankedArticle(datum=datum, score=score, rank_signal='engagement'))
-
-        logger.info(
-            'TelegramHistorical channel=%r week=%s collected=%d',
-            self._channel, week_start.date(), len(results),
-        )
-        return results
 
 
 # ---------------------------------------------------------------------------
@@ -482,13 +338,11 @@ class HistoricalBackfillService:
 
     def _build_strategy(self):
         import core.models as m
-        if self.source.type == m.SourceType.TELEGRAM:
-            return TelegramHistoricalService(self.source)
         if self.source.type == m.SourceType.RSS:
             return RSSHistoricalService(self.source)
         raise HistoricalServiceError(
             f'No historical strategy for source type "{self.source.type}". '
-            'Supported: telegram, rss.'
+            'Supported: rss.'
         )
 
     def run(

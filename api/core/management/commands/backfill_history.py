@@ -1,15 +1,14 @@
 """
 Backfill top-N historical articles per ISO week from a single source.
 
-Each week's candidates are fetched via the source-type strategy
-(TelegramHistoricalService or RSSHistoricalService), ranked by their
-score (engagement for Telegram, LLM significance for RSS), and the top-N
+Each week's candidates are fetched via the RSS historical strategy
+(RSSHistoricalService), ranked by LLM significance score, and the top-N
 are saved via Article.objects.get_or_create — fully idempotent.
 
 Examples:
 
-    # Telegram source — 3 years, top 10 per week
-    python manage.py backfill_history my_tg_channel \\
+    # RSS source — 3 years, top 10 per week
+    python manage.py backfill_history my_rss_feed \\
         --start-date 2022-01-01 --end-date 2025-01-01
 
     # RSS source — 6 months, top 5 per week, dry run first
@@ -18,7 +17,7 @@ Examples:
         --top-n 5 --dry-run
 
     # Resume an interrupted run (checkpoint stored in Django cache)
-    python manage.py backfill_history my_tg_channel \\
+    python manage.py backfill_history my_rss_feed \\
         --start-date 2022-01-01 --end-date 2025-01-01 --resume
 
 After a backfill, process newly imported articles through the NLP pipeline:
@@ -36,7 +35,7 @@ class Command(BaseCommand):
         parser.add_argument(
             'source_code',
             type=str,
-            help='Source.code to backfill (must be of type telegram or rss)',
+            help='Source.code to backfill (must be of type rss)',
         )
         parser.add_argument(
             '--start-date',

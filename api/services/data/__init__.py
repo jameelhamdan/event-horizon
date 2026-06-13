@@ -22,10 +22,6 @@ class DataService:
 
     @classmethod
     def get_data_client(cls, source: core.models.Source) -> 'BaseClientService':
-        if source.type == core.models.SourceType.TELEGRAM:
-            from . import telegram
-            return telegram.TelegramService(source)
-
         if source.type == core.models.SourceType.RSS:
             from . import rss
             return rss.RSSService(source)
