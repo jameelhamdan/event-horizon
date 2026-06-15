@@ -94,8 +94,8 @@ services:
       - "27017:27017"
     env_file: .env.db
     volumes:
-      - ./mongo/data:/data/db
-      - ./mongo/config:/data/configdb
+      - /tank/conflictradar-live/mongo/data:/data/db
+      - /tank/conflictradar-live/mongo/config:/data/configdb
     deploy:
       resources:
         limits:

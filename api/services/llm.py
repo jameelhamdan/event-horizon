@@ -118,7 +118,12 @@ class OllamaLLMService:
     def chat(self, messages: list[dict], **kwargs) -> str:
         """
         Send a chat request to Ollama.
-        kwargs may include temperature (float).
+        kwargs may include temperature (float) and think (bool).
+
+        think defaults to False: for hybrid reasoning models (e.g. qwen3) this
+        disables the <think>...</think> reasoning pass, which is pure wasted
+        latency for our structured analysis tasks (classification, translation,
+        topic matching). Pass think=True to opt back in.
         Raises LLMError on failure.
         """
         options = {}
@@ -131,6 +136,7 @@ class OllamaLLMService:
                     'model': self._model,
                     'messages': messages,
                     'stream': False,
+                    'think': kwargs.get('think', False),
                     **(({'options': options}) if options else {}),
                 },
                 timeout=60,

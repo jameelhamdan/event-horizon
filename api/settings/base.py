@@ -238,7 +238,7 @@ OPENROUTER_MODELS = config('OPENROUTER_MODELS', default='openrouter/free')
 
 # Ollama — used when LLM_BACKEND=ollama
 OLLAMA_BASE_URL = config('OLLAMA_BASE_URL', default='')   # e.g. http://my-server:11434
-OLLAMA_MODEL = config('OLLAMA_MODEL', default='qwen3')
+OLLAMA_MODEL = config('OLLAMA_MODEL', default='qwen3:4b')
 
 # ── RQ / django-rq ────────────────────────────────────────────────────────────
 _REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')

@@ -286,9 +286,18 @@ class RSSHistoricalService:
         try:
             llm = get_llm_service()
             raw = llm.chat([{'role': 'user', 'content': prompt}])
-            raw = re.sub(r'^```(?:json)?\s*', '', raw.strip())
+            raw = re.sub(r'^```(?:json)?\s*', '', (raw or '').strip())
             raw = re.sub(r'\s*```$', '', raw)
-            data = json.loads(raw)
+            # Models sometimes wrap the array in prose ("Here is the JSON: [...]")
+            # or return nothing at all — isolate the array before parsing.
+            match = re.search(r'\[.*\]', raw, re.DOTALL)
+            if not match:
+                logger.warning(
+                    'LLM batch score returned no JSON array (%r); defaulting to 5.0',
+                    raw[:120],
+                )
+                return default
+            data = json.loads(match.group(0))
             score_map = {item['i']: float(item['score']) for item in data}
             return [score_map.get(i + 1, 5.0) for i in range(len(entries))]
         except LLMError as exc:
