@@ -1,0 +1,50 @@
+{% extends "admin/change_list.html" %}
+
+{% block content %}
+<div style="margin: 12px 0; padding: 12px; background: #f6f6f6; border: 1px solid #ddd;">
+  <h2 style="margin-top:0;">Forecast evaluation — two heads (vs. naive baselines)</h2>
+  {% if metrics_error %}
+    <p style="color:#a00;">Metrics unavailable: {{ metrics_error }}</p>
+  {% elif metrics_report %}
+    <table style="border-collapse: collapse; width: 100%; font-size: 12px;">
+      <thead>
+        <tr style="background:#e8e8e8; text-align:left;">
+          <th style="padding:4px;">Symbol / Horizon</th>
+          <th style="padding:4px;">Vol acc</th>
+          <th style="padding:4px;">Vol baseline (normal)</th>
+          <th style="padding:4px;">Vol macro-F1</th>
+          <th style="padding:4px;">Mag acc</th>
+          <th style="padding:4px;">Mag baseline (flat)</th>
+          <th style="padding:4px;">Mag macro-F1</th>
+          <th style="padding:4px;">down F1</th>
+          <th style="padding:4px;">Abstain %</th>
+          <th style="padding:4px;">n</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for key, m in metrics_report.items %}
+        <tr style="border-top:1px solid #ddd;">
+          <td style="padding:4px;"><strong>{{ key }}</strong></td>
+          <td style="padding:4px;">{{ m.volatility.accuracy|default:"—" }}</td>
+          <td style="padding:4px;">{{ m.volatility.baseline_always_normal|default:"—" }}</td>
+          <td style="padding:4px;">{{ m.volatility.macro_f1|default:"—" }}</td>
+          <td style="padding:4px;">{{ m.magnitude.accuracy|default:"—" }}</td>
+          <td style="padding:4px;">{{ m.magnitude.baseline_always_flat|default:"—" }}</td>
+          <td style="padding:4px;">{{ m.magnitude.macro_f1|default:"—" }}</td>
+          <td style="padding:4px;">{{ m.magnitude.down_f1|default:"—" }}</td>
+          <td style="padding:4px;">{{ m.magnitude.abstention_rate|default:"—" }}</td>
+          <td style="padding:4px;">{{ m.volatility.n|default:"0" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p style="font-size:11px;color:#666;margin-top:8px;">
+      Volatility is the headline head (more learnable). An accuracy that does not beat
+      its baseline is noise. The <code>down</code> class is the known failure mode — watch its F1.
+    </p>
+  {% else %}
+    <p>No scored forecasts yet. Run the pipeline and <code>score_forecasts</code> first.</p>
+  {% endif %}
+</div>
+{{ block.super }}
+{% endblock %}

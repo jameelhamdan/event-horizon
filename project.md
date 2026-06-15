@@ -1,6 +1,6 @@
 # Project: conflictradar.live
 
-Live geopolitical event detection and mapping system. Ingests news from Telegram channels, runs NLP analysis, clusters articles into geolocated events, and displays them on an interactive world map. Sends a daily AI-written email briefing to subscribers.
+Live geopolitical event detection and mapping system. Ingests news from RSS feeds and web sources, runs NLP analysis, clusters articles into geolocated events, and displays them on an interactive world map. Sends a daily AI-written email briefing to subscribers.
 
 ---
 
@@ -8,7 +8,7 @@ Live geopolitical event detection and mapping system. Ingests news from Telegram
 
 ### Functional
 
-1. **Data Ingestion** — fetch articles from Telegram channels and web sources on a schedule
+1. **Data Ingestion** — fetch articles from RSS feeds and web sources on a schedule
 2. **NLP Processing** — extract locations, sentiment, intensity, and category from each article
 3. **Event Aggregation** — cluster articles by location + time + category into Event objects
 4. **REST API** — serve events, sources, and newsletters to the frontend via DRF
@@ -65,7 +65,7 @@ Redis (:6379)         RQ job queues + Django cache (geocode + sessions)
 ### Stage 1 — fetch_data (every 10m, timeout 30m)
 
 - Reads all configured `Source` objects
-- Fetches new messages via Telethon (Telegram) or HTTP requests
+- Fetches new articles via feedparser (RSS) or HTTP requests
 - Deduplicates by content hash
 - Writes raw `Article` objects to MongoDB
 
@@ -121,16 +121,16 @@ All responses are serialized by DRF. Dates are ISO 8601 UTC strings.
 
 ### Source
 
-Configuration for a data source (Telegram channel, RSS feed).
+Configuration for a data source (RSS feed, web source).
 
 | Field | Type | Notes |
 | ----- | ---- | ----- |
 | code | CharField | Unique identifier |
-| type | SourceType | TELEGRAM, RSS, API, … |
+| type | SourceType | RSS, WEBSITE, API, … |
 | name | CharField | Display name |
 | url | URLField | Optional |
-| author_slug | CharField | Telegram channel username |
-| headers | JSONField | Credentials (TELEGRAM_API_ID, etc.) |
+| author_slug | CharField | Author/slug of the source |
+| headers | JSONField | Optional per-source credentials/headers |
 
 ### Article
 

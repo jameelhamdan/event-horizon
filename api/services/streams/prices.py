@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_STOCKS = 'SPY,QQQ,^GSPC,^FTSE,^GDAXI,^N225,000001.SS'
 DEFAULT_COMMODITIES = 'GC=F,CL=F,NG=F,ZW=F,ZC=F,SI=F'
 DEFAULT_BONDS = '^TNX,^TYX'
+# Volatility / risk-sentiment gauge — part of the indicator panel (plan §"Indicator panel").
+DEFAULT_INDICES = '^VIX,DX-Y.NYB'
 
 COINGECKO_IDS = {
     'bitcoin':  ('BTC-USD', 'Bitcoin'),
@@ -34,6 +36,7 @@ YAHOO_NAMES = {
     'GC=F': 'Gold', 'CL=F': 'Crude Oil', 'NG=F': 'Natural Gas',
     'ZW=F': 'Wheat', 'ZC=F': 'Corn', 'SI=F': 'Silver',
     '^TNX': 'US 10Y Treasury', '^TYX': 'US 30Y Treasury',
+    '^VIX': 'Volatility Index', 'DX-Y.NYB': 'US Dollar Index',
 }
 
 YAHOO_STREAM_KEY = {
@@ -42,6 +45,7 @@ YAHOO_STREAM_KEY = {
     'GC=F': 'commodity', 'CL=F': 'commodity', 'NG=F': 'commodity',
     'ZW=F': 'commodity', 'ZC=F': 'commodity', 'SI=F': 'commodity',
     '^TNX': 'bond', '^TYX': 'bond',
+    '^VIX': 'index', 'DX-Y.NYB': 'index',
 }
 
 HEADERS = {
@@ -128,12 +132,15 @@ class PriceStream(BaseStream):
         stocks_raw = getattr(settings, 'PRICE_SYMBOLS_STOCKS', DEFAULT_STOCKS)
         commodities_raw = getattr(settings, 'PRICE_SYMBOLS_COMMODITIES', DEFAULT_COMMODITIES)
         bonds_raw = getattr(settings, 'PRICE_SYMBOLS_BONDS', DEFAULT_BONDS)
+        indices_raw = getattr(settings, 'PRICE_SYMBOLS_INDICES', DEFAULT_INDICES)
 
         yahoo_symbols = [
             s.strip() for s in (
-                stocks_raw + ',' + commodities_raw + ',' + bonds_raw
+                stocks_raw + ',' + commodities_raw + ',' + bonds_raw + ',' + indices_raw
             ).split(',') if s.strip()
         ]
+        # Dedupe while preserving order (DX-Y.NYB may appear via env in multiple lists)
+        yahoo_symbols = list(dict.fromkeys(yahoo_symbols))
 
         records = []
         for symbol in yahoo_symbols:

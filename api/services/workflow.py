@@ -132,6 +132,7 @@ class Workflow:
             features = cleaner.clean(doc)
             article.entities = features.entities
             article.sentiment = features.sentiment
+            article.finbert_sentiment = features.finbert_sentiment
             article.location = features.location
             article.latitude = features.latitude
             article.longitude = features.longitude
@@ -144,7 +145,7 @@ class Workflow:
 
             # Best-effort: fetch og:image if no banner set yet and URL is reachable
             update_fields = [
-                'entities', 'sentiment', 'location', 'latitude', 'longitude',
+                'entities', 'sentiment', 'finbert_sentiment', 'location', 'latitude', 'longitude',
                 'event_intensity', 'category', 'sub_category', 'processed_on',
                 'extra_data', 'translations',
             ]
@@ -222,8 +223,12 @@ class Workflow:
 
             representative = max(group, key=lambda a: a.event_intensity or 0)
             sentiments = [a.sentiment for a in group if a.sentiment is not None]
+            finbert_sentiments = [a.finbert_sentiment for a in group if a.finbert_sentiment is not None]
             intensities = [a.event_intensity for a in group if a.event_intensity is not None]
             avg_sentiment = round(sum(sentiments) / len(sentiments), 4) if sentiments else None
+            avg_finbert_sentiment = (
+                round(sum(finbert_sentiments) / len(finbert_sentiments), 4) if finbert_sentiments else None
+            )
             base_intensity = round(sum(intensities) / len(intensities), 4) if intensities else None
             # Corroboration boost: more articles covering the same event → higher importance.
             # Saturates at 10 articles (+0.3 max), capped at 1.0.
@@ -231,12 +236,21 @@ class Workflow:
             avg_intensity = round(min((base_intensity or 0) + corroboration_boost, 1.0), 4) if base_intensity is not None else None
 
             started_at = min(a.published_on for a in group)
+            latest_article_at = max(a.published_on for a in group)
             article_ids = [str(a.id) for a in group]
             source_codes = list({a.source_code for a in group})
 
             categories = [a.category for a in group if a.category]
             category = max(set(categories), key=categories.count) if categories else 'general'
             sub_categories = sorted({a.sub_category for a in group if a.sub_category})
+
+            # Deterministic affected-indicator weights (plan §2). Prefer FinBERT
+            # (news-domain) sentiment for the signed amplification, fall back to VADER.
+            from services.forecasting.routing import route_event_to_weighted_symbols
+            route_sentiment = avg_finbert_sentiment if avg_finbert_sentiment is not None else avg_sentiment
+            affected_indicators = route_event_to_weighted_symbols(
+                category, location, [], sub_categories, route_sentiment,
+            )
 
             # Average lat/lon across all articles that have coordinates
             lats = [a.latitude for a in group if a.latitude is not None]
@@ -281,12 +295,15 @@ class Workflow:
                     latitude=lat,
                     longitude=lng,
                     started_at=started_at,
+                    latest_article_at=latest_article_at,
                     article_count=len(group),
                     avg_sentiment=avg_sentiment,
+                    avg_finbert_sentiment=avg_finbert_sentiment,
                     avg_intensity=avg_intensity,
                     article_ids=article_ids,
                     source_codes=source_codes,
                     sub_categories=sub_categories,
+                    affected_indicators=affected_indicators,
                     translations=event_translations,
                 )
                 created_count += 1
@@ -296,12 +313,15 @@ class Workflow:
                 event.category = category
                 event.latitude = lat
                 event.longitude = lng
+                event.latest_article_at = latest_article_at
                 event.article_count = len(group)
                 event.avg_sentiment = avg_sentiment
+                event.avg_finbert_sentiment = avg_finbert_sentiment
                 event.avg_intensity = avg_intensity
                 event.article_ids = article_ids
                 event.source_codes = source_codes
                 event.sub_categories = sub_categories
+                event.affected_indicators = affected_indicators
                 event.translations = event_translations
                 event.save()
                 updated_count += 1
@@ -463,12 +483,24 @@ class Workflow:
         # is unnecessary and would reduce recall.
         batch_results = llm_matcher.match_batch(events, all_active_topics)
 
+        from services.forecasting.routing import route_event_to_weighted_symbols
         tagged = 0
         for event in events:
             result = batch_results.get(str(event.pk), {})
             event.topics = result
             event.topic_slugs = list(result.keys())
-            event.save(update_fields=['topics', 'topic_slugs'])
+            # Re-route now that topic slugs are known — topics carry the highest-signal
+            # routing rules, so affected_indicators improves once an event is tagged.
+            route_sentiment = (
+                event.avg_finbert_sentiment
+                if event.avg_finbert_sentiment is not None
+                else event.avg_sentiment
+            )
+            event.affected_indicators = route_event_to_weighted_symbols(
+                event.category, event.location_name, event.topic_slugs,
+                event.sub_categories or [], route_sentiment,
+            )
+            event.save(update_fields=['topics', 'topic_slugs', 'affected_indicators'])
             tagged += 1
 
         logger.info('[topics] tag_events_with_topics done — %d event(s) processed', tagged)

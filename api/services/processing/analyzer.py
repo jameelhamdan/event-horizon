@@ -5,15 +5,16 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-_CATEGORIES = {'conflict', 'protest', 'disaster', 'political', 'economic', 'crime', 'general'}
+# Two-level taxonomy (plan §Concepts) — top-level stays small, sub-category does the work.
+# protest → political/protest-policy; crime → conflict (terrorism/insurgency) or general.
+_CATEGORIES = {'conflict', 'disaster', 'economic', 'political', 'health', 'general'}
 
 _SUB_CATEGORIES: dict[str, set[str]] = {
-    'conflict':  {'airstrike', 'ground_offensive', 'naval', 'siege', 'ceasefire', 'casualties', 'other'},
-    'protest':   {'rally', 'riot', 'strike', 'blockade', 'march', 'other'},
-    'disaster':  {'earthquake', 'flood', 'wildfire', 'explosion', 'epidemic', 'storm', 'other'},
-    'political': {'election', 'coup', 'legislation', 'diplomacy', 'sanction', 'other'},
-    'economic':  {'trade', 'inflation', 'energy', 'markets', 'fiscal', 'supply_chain', 'other'},
-    'crime':     {'murder', 'fraud', 'corruption', 'trafficking', 'arrest', 'other'},
+    'conflict':  {'war', 'airstrike', 'insurgency', 'terrorism', 'border-clash', 'other'},
+    'disaster':  {'earthquake', 'flood', 'storm', 'wildfire', 'industrial-accident', 'other'},
+    'economic':  {'monetary-policy', 'energy', 'trade', 'tariffs', 'labor', 'markets', 'sanctions', 'other'},
+    'political': {'election', 'legislation', 'diplomacy', 'leadership-change', 'protest-policy', 'other'},
+    'health':    {'outbreak', 'pandemic', 'healthcare-system', 'other'},
     'general':   {'other'},
 }
 
@@ -23,7 +24,7 @@ with a single valid JSON object — no markdown, no explanation, just JSON.
 
 Schema:
 {
-  "category":     one of: conflict | protest | disaster | political | economic | crime | general,
+  "category":     one of: conflict | disaster | economic | political | health | general,
   "sub_category": sub-category slug for the chosen category (see list below), or null,
   "country":      country name in English as a string, or null if not determinable,
   "city":         city or region name in English as a string, or null if not determinable,
@@ -43,37 +44,38 @@ Schema:
   }
 }
 
-Category and sub-category definitions:
+Category and sub-category definitions (two-level taxonomy — pick the best top-level,
+then the most specific sub-category):
 
-- conflict  [airstrike | ground_offensive | naval | siege | ceasefire | casualties | other]
-    Armed conflict, military attack, war, frontline operations.
+- conflict  [war | airstrike | insurgency | terrorism | border-clash | other]
+    Armed conflict, military attack, war, frontline operations, terrorism.
     USE THIS whenever a deliberate armed or military action is involved — including missile
-    strikes, drone attacks, artillery shelling, airstrikes, cross-border attacks, or clashes
-    between two nations or armed groups — even if the outcome involves explosions, fires,
-    casualties, or mass destruction. An event where Country A attacks Country B is ALWAYS
-    conflict, never disaster.
+    strikes, drone attacks, artillery shelling, airstrikes, cross-border attacks, clashes
+    between two nations or armed groups, or terrorist attacks — even if the outcome involves
+    explosions, fires, casualties, or mass destruction. An event where Country A attacks
+    Country B is ALWAYS conflict, never disaster.
 
-- protest   [rally | riot | strike | blockade | march | other]
-    Demonstration, civil unrest, uprising, civilian strike.
-
-- disaster  [earthquake | flood | wildfire | explosion | epidemic | storm | other]
+- disaster  [earthquake | flood | storm | wildfire | industrial-accident | other]
     Natural catastrophe (earthquake, flood, storm, wildfire) or a purely accidental
     industrial/infrastructure event (factory explosion, chemical spill, pipeline leak)
     where there is NO deliberate military or armed aggressor.
     IMPORTANT: If an explosion, fire, or mass-casualty event was caused by a military
     strike, bombing, or armed attack, use conflict — not disaster.
 
-- political [election | coup | legislation | diplomacy | sanction | other]
-    Government decisions, diplomatic summits, elections, coups, sanctions.
+- economic  [monetary-policy | energy | trade | tariffs | labor | markets | sanctions | other]
+    Finance, central-bank/interest-rate decisions, trade and tariffs, labor, markets,
+    energy policy, economic sanctions.
 
-- economic  [trade | inflation | energy | markets | fiscal | supply_chain | other]
-    Finance, trade, markets, energy policy.
+- political [election | legislation | diplomacy | leadership-change | protest-policy | other]
+    Government decisions, diplomatic summits, elections, legislation, leadership changes,
+    coups, and protests/civil unrest (use protest-policy for demonstrations and strikes).
 
-- crime     [murder | fraud | corruption | trafficking | arrest | other]
-    Police investigations, criminal acts not involving military actors.
+- health    [outbreak | pandemic | healthcare-system | other]
+    Disease outbreaks, epidemics/pandemics, public-health and healthcare-system news.
 
 - general   [other]
-    Anything that does not clearly fit the above categories.
+    Anything that does not clearly fit the above categories (including ordinary crime not
+    involving military actors).
 
 Decision rule — conflict vs disaster:
   Ask: "Was this caused by a deliberate armed/military action?"

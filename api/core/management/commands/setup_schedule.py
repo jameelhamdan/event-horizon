@@ -18,6 +18,8 @@ import django_rq
 from django.core.management.base import BaseCommand
 from rq_scheduler import Scheduler
 
+from services.forecasting import is_enabled as forecasting_enabled
+
 
 def _minutes(env_var: str, default: str) -> int:
     return int(os.getenv(env_var, default)) * 60
@@ -46,6 +48,7 @@ class Command(BaseCommand):
             run_forecast_task,
             score_forecasts_task,
             tag_topics_task,
+            train_forecaster_task,
         )
 
         conn = django_rq.get_connection('default')
@@ -85,19 +88,31 @@ class Command(BaseCommand):
         forecast_interval = _minutes('FORECAST_INTERVAL_MINUTES', '300')
         score_interval    = _minutes('FORECAST_SCORE_INTERVAL_MINUTES', '300')
 
+        forecasting_on = forecasting_enabled()
+
         heavy.schedule(now, process_articles_task,  interval=process_interval,   repeat=None, timeout=_interval_timeout(process_interval))
         heavy.schedule(now, aggregate_events_task,  interval=aggregate_interval, repeat=None, timeout=_interval_timeout(aggregate_interval))
         heavy.schedule(now, tag_topics_task,        interval=tag_interval,       repeat=None, timeout=_interval_timeout(tag_interval))
         heavy.schedule(now, discover_topics_task,   interval=discover_interval,  repeat=None, timeout=_interval_timeout(discover_interval))
-        heavy.schedule(now, run_forecast_task,      interval=forecast_interval,  repeat=None, timeout=_interval_timeout(forecast_interval))
-        heavy.schedule(now, score_forecasts_task,   interval=score_interval,     repeat=None, timeout=_interval_timeout(score_interval))
+        # Forecasting (run + score) — skipped entirely when FORECASTING_ENABLED is off.
+        if forecasting_on:
+            heavy.schedule(now, run_forecast_task,    interval=forecast_interval, repeat=None, timeout=_interval_timeout(forecast_interval))
+            heavy.schedule(now, score_forecasts_task, interval=score_interval,    repeat=None, timeout=_interval_timeout(score_interval))
 
         # ── Cron jobs (heavy — daily LLM runs) ────────────────────────────────
         refresh_hour    = int(os.getenv('TOPICS_REFRESH_HOUR', '4'))
         newsletter_hour = int(os.getenv('NEWSLETTER_GENERATE_HOUR', '6'))
+        train_hour      = int(os.getenv('FORECAST_TRAIN_HOUR', '3'))
         heavy.cron(f'0 {refresh_hour} * * *',    refresh_topics_task,      repeat=None, timeout=cron_timeout)
         heavy.cron(f'0 {newsletter_hour} * * *', generate_newsletter_task, repeat=None, timeout=cron_timeout)
+        # v2 retrain — daily; no-op if lightgbm/numpy unavailable. Skipped when off.
+        if forecasting_on:
+            heavy.cron(f'0 {train_hour} * * *',  train_forecaster_task,    repeat=None, timeout=cron_timeout)
 
+        # rq-scheduler keeps a single shared job registry (not split per queue), so
+        # report the total actually registered — robust to the forecasting toggle.
+        total = sum(1 for _ in heavy.get_jobs())
+        note = '' if forecasting_on else ' (forecasting disabled)'
         self.stdout.write(self.style.SUCCESS(
-            'Schedule registered: 5 light interval jobs + 6 heavy interval jobs + 2 heavy cron jobs.'
+            f'Schedule registered: {total} scheduled job(s).{note}'
         ))

@@ -1,11 +1,13 @@
 export type Category =
   | "conflict"
-  | "protest"
   | "disaster"
-  | "political"
   | "economic"
-  | "crime"
+  | "political"
+  | "health"
   | "general"
+  // legacy flat categories — still present in pre-redesign data
+  | "protest"
+  | "crime"
 
 export interface Topic {
   id: string
@@ -47,6 +49,8 @@ export interface EventSummary {
   started_at: string
   topics?: Record<string, number>
   topic_slugs?: string[]
+  avg_finbert_sentiment?: number | null
+  affected_indicators?: AffectedIndicator[]
 }
 
 export interface Article {
@@ -76,7 +80,12 @@ export interface EventsResponse {
   count: number
 }
 
-export type StreamKey = "stock" | "crypto" | "commodity" | "forex" | "bond"
+export type StreamKey = "stock" | "crypto" | "commodity" | "forex" | "bond" | "index"
+
+export interface AffectedIndicator {
+  symbol: string
+  weight: number
+}
 
 export interface PriceTick {
   id: string
@@ -180,6 +189,13 @@ export interface NewsletterDetail extends NewsletterSummary {
 
 export type ForecastDirection = "up" | "down" | "neutral"
 
+export type MagnitudeBucket =
+  | "strong_down" | "down" | "flat" | "up" | "strong_up" | ""
+
+export type VolatilityBucket = "calm" | "normal" | "elevated" | ""
+
+export type Reliability = "high" | "med" | "low" | ""
+
 export interface Forecast {
   id: string
   symbol: string
@@ -188,6 +204,13 @@ export interface Forecast {
   horizon_hours: number
   direction: ForecastDirection
   confidence: number
+  // Two-head bucketed prediction + scored actuals
+  magnitude_bucket: MagnitudeBucket
+  actual_bucket: MagnitudeBucket
+  volatility_bucket: VolatilityBucket
+  actual_volatility_bucket: VolatilityBucket
+  reliability: Reliability
+  abstained: boolean
   predicted_value: number | null
   actual_value: number | null
   model_name: string

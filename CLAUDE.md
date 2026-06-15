@@ -12,7 +12,7 @@ This file gives Claude everything needed to write correct, consistent code for t
 | Task queue | django-rq + Redis (two queues: `default`/light and `heavy`) |
 | Scheduling | rq-scheduler (`setup_schedule` management command) |
 | Storage | MongoDB 8 |
-| Ingestion | Telethon (Telegram) + feedparser (RSS) + requests |
+| Ingestion | feedparser (RSS) + requests |
 | NLP | spaCy (NER) + sentence-transformers + VADER + geopy |
 | LLM | Anthropic Claude (via `services/llm.py`; provider configurable via `LLM_PROVIDER`) |
 | Frontend | React 19 + Vite + react-router-dom + react-leaflet (TypeScript) |
@@ -51,7 +51,6 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │       ├── retroactive_tag_topic.py # Enqueues retroactive_tag_topic_task
 │   │       ├── fetch_stream.py         # One-off stream fetch (prices/notam/earthquakes/forex)
 │   │       ├── bootstrap_static_points.py # Seeds exchanges, ports, central banks
-│   │       ├── telegram_session.py     # Generates Telegram session string for a source
 │   │       ├── setup_schedule.py       # Registers all periodic jobs with rq-scheduler
 │   │       └── e2e_pipeline.py         # End-to-end pipeline test → JSON report
 │   ├── accounts/           # Custom User model + Session + Group proxies
@@ -107,11 +106,9 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │   ├── data/           # Ingestion — DataService, ArticleDatum
 │   │   │   ├── __init__.py     # exports DataService
 │   │   │   ├── base.py         # ArticleDatum TypedDict
-│   │   │   ├── historical.py   # HistoricalBackfillService, TelegramHistoricalService,
-│   │   │   │                   # RSSHistoricalService, RankedArticle, WeekResult
-│   │   │   └── sources/
-│   │   │       ├── rss.py          # RSSService (feedparser)
-│   │   │       └── telegram.py     # TelegramService (Telethon)
+│   │   │   ├── historical.py   # HistoricalBackfillService, RSSHistoricalService,
+│   │   │   │                   # RankedArticle, WeekResult
+│   │   │   └── rss.py          # RSSService (feedparser)
 │   │   ├── forecasting/    # LLM market forecasting
 │   │   │   ├── service.py      # run_forecasts(), score_forecasts()
 │   │   │   ├── features.py     # build_feature_vector() — price + news features
@@ -204,7 +201,7 @@ This is a real-time global event intelligence platform. Key feature areas:
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-source ingestion** | RSS feeds (feedparser) + Telegram channels (Telethon) → Article objects |
+| **Multi-source ingestion** | RSS feeds (feedparser) + web sources (requests) → Article objects |
 | **NLP pipeline** | spaCy NER + VADER sentiment + geopy geocoding + LLM category/sub-category + i18n translations |
 | **Event aggregation** | Articles bucketed by (location, category, day) + semantic sub-clustering (multilingual sentence-transformers) |
 | **Global topic tracking** | Wikipedia Portal:Current_events scraped daily → LLM-enriched topics → LLM semantic matching to events |
@@ -535,7 +532,6 @@ python manage.py backfill_history <source_code> \
 python manage.py process_articles --limit 5000
 ```
 
-Telegram sources rank by engagement (`views + forwards*3 + reactions*2`).
 RSS sources rank by LLM significance score (batch of 30 headlines per call).
 Service code: `api/services/data/historical.py` — `HistoricalBackfillService`.
 
@@ -592,8 +588,7 @@ Service code: `api/services/data/historical.py` — `HistoricalBackfillService`.
 | NOTAM stream | `api/services/streams/notam.py` |
 | Earthquake stream | `api/services/streams/earthquakes.py` |
 | Forex stream | `api/services/streams/forex.py` |
-| RSS ingestion | `api/services/data/sources/rss.py` |
-| Telegram ingestion | `api/services/data/sources/telegram.py` |
+| RSS ingestion | `api/services/data/rss.py` |
 | Historical backfill | `api/services/data/historical.py` → `HistoricalBackfillService` |
 | Forecasting service | `api/services/forecasting/service.py` |
 | Event→symbol routing | `api/services/forecasting/routing.py` |
@@ -629,7 +624,7 @@ Service code: `api/services/data/historical.py` — `HistoricalBackfillService`.
 
 ```
 fetch_articles_task (every 10m, default queue, timeout 30m)
-  └─ RSSService (feedparser) / TelegramService (Telethon) → Article objects in MongoDB
+  └─ RSSService (feedparser) / requests → Article objects in MongoDB
 
 process_articles_task (every 60m, heavy queue, timeout 30m)
   └─ spaCy NER + VADER sentiment + geopy geocoding → Article metadata
@@ -710,6 +705,7 @@ Stream tasks (default queue, independent of pipeline):
 | `EARTHQUAKE_FETCH_INTERVAL_MINUTES` | `5` | fetch_earthquakes_task period |
 | `EARTHQUAKE_MIN_MAGNITUDE` | `3.0` | USGS minimum magnitude filter |
 | `FOREX_FETCH_INTERVAL_MINUTES` | `15` | fetch_forex_task period |
+| `FORECASTING_ENABLED` | `true` | Master switch for forecasting (run/score/train). When false, those jobs are neither scheduled nor executed (no-op) |
 | `FORECAST_INTERVAL_MINUTES` | `60` | run_forecast_task base period (×5 = 300m) |
 | `FORECAST_SCORE_INTERVAL_MINUTES` | `60` | score_forecasts_task base period (×5 = 300m) |
 | `NEWSLETTER_GENERATE_HOUR` | `6` | Hour (UTC) for daily newsletter generation |
@@ -754,7 +750,6 @@ Stream tasks (default queue, independent of pipeline):
 - **`tag_events_with_topics` uses LLM**: `LLMTopicMatcher` sends batches of 10 events per LLM call; `retroactive_tag_topic` still uses the fast keyword-based `TopicMatcher`.
 - **`refresh_topics` runs LLM enrichment**: `Workflow._enrich_topics()` calls the LLM after scraping to generate proper descriptions and expand keywords (batches of 30). Falls back silently — topics are upserted with raw scraped metadata if LLM is unavailable.
 - **LLM responses: always strip code fences**: use `re.sub(r'^```(?:json)?\s*', '', r)` + `re.sub(r'\s*```$', '', r)` before `json.loads()`. All LLM-calling code in the project does this — do not omit it in new code.
-- **Telegram session setup**: run `python manage.py telegram_session <source_code>` once interactively to generate the session string; it is stored in `Source.headers.TELEGRAM_SESSION`
 - **Static points bootstrap**: run `python manage.py bootstrap_static_points` once to seed `StaticPoint` (exchanges, ports, central banks)
 
 ---
@@ -811,9 +806,6 @@ python manage.py fetch_stream forex
 
 # Seed static reference points (run once)
 python manage.py bootstrap_static_points
-
-# Generate Telegram session string for a source (interactive, run once per source)
-python manage.py telegram_session <source_code>
 
 # Backfill historical top-N articles per week from a source
 python manage.py backfill_history <source_code> --start-date 2022-01-01 --end-date 2025-01-01

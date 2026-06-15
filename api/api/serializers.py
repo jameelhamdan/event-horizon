@@ -60,7 +60,9 @@ class EventSerializer(serializers.ModelSerializer):
             'started_at',
             'article_count',
             'avg_sentiment',
+            'avg_finbert_sentiment',
             'avg_intensity',
+            'affected_indicators',
             'source_codes',
             'source_names',
             'topics',
@@ -174,6 +176,9 @@ class ForecastSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'symbol', 'stream_key', 'generated_at', 'horizon_hours',
             'direction', 'confidence', 'predicted_value', 'actual_value',
+            'magnitude_bucket', 'actual_bucket',
+            'volatility_bucket', 'actual_volatility_bucket',
+            'reliability', 'abstained',
             'model_name', 'reasoning', 'event_ids', 'feature_vector',
         ]
 

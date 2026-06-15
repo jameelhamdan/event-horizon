@@ -58,6 +58,8 @@ class ArticleCleaner:
         analysis = self._analyzer.analyze(document.full_text)
 
         sentiment = round(self._vader.polarity_scores(document.full_text)['compound'], 4)
+        from services.processing import finbert
+        finbert_sentiment = finbert.score(document.full_text)
         entity_density = min(len(entities) / 8.0, 1.0)
         event_intensity = round(entity_density * 0.65 + abs(sentiment) * 0.35, 4)
 
@@ -67,6 +69,7 @@ class ArticleCleaner:
             id=document.id,
             entities=entities,
             sentiment=sentiment,
+            finbert_sentiment=finbert_sentiment,
             location=location,
             latitude=analysis.latitude,
             longitude=analysis.longitude,
@@ -82,8 +85,10 @@ class ArticleCleaner:
             return []
         texts = [doc.full_text for doc in documents]
         ner_batch = self._ner(texts, batch_size=16)
+        from services.processing import finbert
+        finbert_batch = finbert.score_batch(texts)
         results = []
-        for doc, raw_entities in zip(documents, ner_batch):
+        for doc, raw_entities, finbert_sentiment in zip(documents, ner_batch, finbert_batch):
             entities = [{'text': e['word'], 'label': e['entity_group']} for e in raw_entities]
             analysis = self._analyzer.analyze(doc.full_text)
             sentiment = round(self._vader.polarity_scores(doc.full_text)['compound'], 4)
@@ -94,6 +99,7 @@ class ArticleCleaner:
                 id=doc.id,
                 entities=entities,
                 sentiment=sentiment,
+                finbert_sentiment=finbert_sentiment,
                 location=location,
                 latitude=analysis.latitude,
                 longitude=analysis.longitude,

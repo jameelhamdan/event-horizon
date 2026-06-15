@@ -52,13 +52,17 @@ class Source(models.Model):
 
 
 class EventCategory(models.TextChoices):
+    # Two-level taxonomy top-level (plan §Concepts). Sub-category does the work.
     CONFLICT = 'conflict', _('Conflict')
-    PROTEST = 'protest', _('Protest')
     DISASTER = 'disaster', _('Disaster')
-    POLITICAL = 'political', _('Political')
     ECONOMIC = 'economic', _('Economic')
-    CRIME = 'crime', _('Crime')
+    POLITICAL = 'political', _('Political')
+    HEALTH = 'health', _('Health')
     GENERAL = 'general', _('General')
+    # Legacy flat categories — retained only so pre-redesign data still validates.
+    # New data is never assigned these (protest→political, crime→conflict).
+    PROTEST = 'protest', _('Protest')
+    CRIME = 'crime', _('Crime')
 
 
 class Article(models.Model):
@@ -83,7 +87,11 @@ class Article(models.Model):
 
     # NLP fields — populated by process_articles
     entities = models.JSONField(default=list, blank=True)
+    # sentiment = VADER compound [-1, 1]; retained for social/short text (plan §0).
     sentiment = models.FloatField(null=True, blank=True)
+    # FinBERT signed sentiment [-1, 1] for news article text (domain-matched).
+    # Both scores are exposed as separate downstream features; never the predictor.
+    finbert_sentiment = models.FloatField(null=True, blank=True)
     location = models.CharField(max_length=255, null=True, blank=True)
     event_intensity = models.FloatField(null=True, blank=True)
     category = models.CharField(
@@ -150,11 +158,20 @@ class Event(models.Model):
 
     # Temporal
     started_at = models.DateTimeField(help_text=_('Timestamp of the earliest article'))
+    # Event-time for all as-of/point-in-time filtering = max(published_on) over the
+    # constituent articles (plan §2). No article published after a forecast time t may
+    # contribute to an event used at t — the as-of cut is on this field, not the day bucket.
+    latest_article_at = models.DateTimeField(null=True, blank=True)
 
     # Aggregated metrics
     article_count = models.IntegerField(default=1)
-    avg_sentiment = models.FloatField(null=True, blank=True)
+    avg_sentiment = models.FloatField(null=True, blank=True)          # VADER mean over articles
+    avg_finbert_sentiment = models.FloatField(null=True, blank=True)  # FinBERT mean over articles
     avg_intensity = models.FloatField(null=True, blank=True)
+
+    # Deterministically-routed market indicators this event plausibly moves.
+    # Format: [{"symbol": "GC=F", "weight": 0.42}, ...] (weight signed; see routing.py)
+    affected_indicators = models.JSONField(default=list, blank=True)
 
     # References
     article_ids = models.JSONField(default=list)
@@ -182,6 +199,7 @@ class Event(models.Model):
         ordering = ['-started_at']
         indexes = [
             models.Index(fields=['started_at']),
+            models.Index(fields=['latest_article_at'], name='core_event_latest__idx'),
             models.Index(fields=['category']),
             models.Index(fields=['location_name']),
         ]
@@ -435,6 +453,7 @@ class ArticleFeatures:
     id: str
     entities: list[dict]    # [{text: str, label: str}]
     sentiment: float        # VADER compound score [-1, 1]
+    finbert_sentiment: float | None  # FinBERT signed sentiment [-1, 1], news-domain
     location: str | None    # 'City, Country' from LLM analysis
     latitude: float | None  # from geonamescache city lookup
     longitude: float | None # from geonamescache city lookup
@@ -451,14 +470,57 @@ class ForecastDirection(models.TextChoices):
     NEUTRAL = 'neutral', _('Neutral')
 
 
+class MagnitudeBucket(models.TextChoices):
+    STRONG_DOWN = 'strong_down', _('Strong down')
+    DOWN        = 'down',        _('Down')
+    FLAT        = 'flat',        _('Flat')
+    UP          = 'up',          _('Up')
+    STRONG_UP   = 'strong_up',   _('Strong up')
+
+
+class VolatilityBucket(models.TextChoices):
+    CALM     = 'calm',     _('Calm')
+    NORMAL   = 'normal',   _('Normal')
+    ELEVATED = 'elevated', _('Elevated')
+
+
+class Reliability(models.TextChoices):
+    HIGH = 'high', _('High')
+    MED  = 'med',  _('Medium')
+    LOW  = 'low',  _('Low')
+
+
+# Supported prediction horizons (hours). 1h is crypto-only (24/7 instruments).
+HORIZON_HOURS = (1, 24, 168)
+
+
 class Forecast(models.Model):
-    """LLM-generated directional market forecast for a given asset."""
+    """Market forecast for one (symbol, horizon, run).
+
+    Two prediction heads (plan §3b): ``magnitude_bucket`` (direction, 5-class) and
+    ``volatility_bucket`` (realized-vol regime, 3-class — the more learnable head).
+    One row per (symbol, horizon_hours, generated_at) even though the LLM emits a
+    single multi-horizon JSON per call — the response is split into rows.
+    """
     symbol          = models.CharField(max_length=32)
     stream_key      = models.CharField(max_length=32)
     generated_at    = models.DateTimeField()
-    horizon_hours   = models.IntegerField(default=4)
+    horizon_hours   = models.IntegerField(default=24)  # 1 / 24 / 168
+
+    # Legacy direction head (kept for backward compatibility / quick display)
     direction       = models.CharField(max_length=16, choices=ForecastDirection.choices)
     confidence      = models.FloatField()
+
+    # Two-head bucketed prediction + scored actuals
+    magnitude_bucket        = models.CharField(max_length=16, choices=MagnitudeBucket.choices, blank=True)
+    actual_bucket           = models.CharField(max_length=16, choices=MagnitudeBucket.choices, blank=True)
+    volatility_bucket       = models.CharField(max_length=16, choices=VolatilityBucket.choices, blank=True)
+    actual_volatility_bucket = models.CharField(max_length=16, choices=VolatilityBucket.choices, blank=True)
+
+    # Decision-support gating (plan §3b — v1 is decision-support, may abstain)
+    reliability     = models.CharField(max_length=8, choices=Reliability.choices, blank=True)
+    abstained       = models.BooleanField(default=False)
+
     predicted_value = models.FloatField(null=True, blank=True)
     actual_value    = models.FloatField(null=True, blank=True)
     model_name      = models.CharField(max_length=128)
@@ -471,12 +533,13 @@ class Forecast(models.Model):
     class Meta:
         ordering = ['-generated_at']
         indexes = [
+            models.Index(fields=['symbol', 'horizon_hours', 'generated_at'], name='core_foreca_symbol_hzn_idx'),
             models.Index(fields=['symbol', 'generated_at']),
             models.Index(fields=['stream_key']),
             models.Index(fields=['generated_at']),
         ]
 
     def __str__(self):
-        return f'{self.symbol} {self.direction} @ {self.generated_at:%Y-%m-%d %H:%M}'
+        return f'{self.symbol} {self.magnitude_bucket or self.direction} +{self.horizon_hours}h @ {self.generated_at:%Y-%m-%d %H:%M}'
 
 

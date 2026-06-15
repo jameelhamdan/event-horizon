@@ -62,12 +62,14 @@ export function RingShape({ size = 16, color = "currentColor" }: ShapeProps) {
 
 export const CATEGORY_SHAPE: Record<Category, ComponentType<ShapeProps>> = {
   conflict: TriangleShape,
-  protest: DiamondShape,
   disaster: StarShape,
-  political: SquareShape,
   economic: CircleShape,
-  crime: HexagonShape,
+  political: SquareShape,
+  health: HexagonShape,
   general: RingShape,
+  // legacy
+  protest: DiamondShape,
+  crime: HexagonShape,
 }
 
 export function categoryShapeComponent(cat: string): ComponentType<ShapeProps> {
@@ -81,6 +83,7 @@ const SHAPE_PATHS: Record<string, (color: string, stroke: string) => string> = {
     `<polygon points="16,2 19,13 30,16 19,19 16,30 13,19 2,16 13,13" fill="${c}" ${s}/>`,
   political: (c, s) => `<rect x="3" y="3" width="26" height="26" rx="3" fill="${c}" ${s}/>`,
   economic: (c, s) => `<circle cx="16" cy="16" r="13" fill="${c}" ${s}/>`,
+  health: (c, s) => `<polygon points="12,2 20,2 20,12 30,12 30,20 20,20 20,30 12,30 12,20 2,20 2,12 12,12" fill="${c}" ${s}/>`,
   crime: (c, s) => `<polygon points="16,2 28,9 28,23 16,30 4,23 4,9" fill="${c}" ${s}/>`,
   general: (c, _) =>
     `<circle cx="16" cy="16" r="13" fill="${c}" opacity="0.4"/><circle cx="16" cy="16" r="7" fill="${c}"/>`,
@@ -104,12 +107,14 @@ export function categoryShapeSvg(
 
 export const CATEGORY_COLOR: Record<Category, string> = {
   conflict: "#e05252",
-  protest: "#e09652",
   disaster: "#e0c852",
-  political: "#7c9ef8",
   economic: "#52c8a0",
-  crime: "#c852c8",
+  political: "#7c9ef8",
+  health: "#5bc8e0",
   general: "#888888",
+  // legacy
+  protest: "#e09652",
+  crime: "#c852c8",
 }
 
 export function categoryColor(cat: string): string {

@@ -99,6 +99,35 @@ export default function EventCard({ event, selected, onSelect, onTopicClick, act
         </div>
       )}
 
+      {event.affected_indicators && event.affected_indicators.length > 0 && (
+        <div className="mb-[0.4rem] flex flex-wrap items-center gap-[0.3rem]">
+          <span className="text-[0.62rem] uppercase tracking-[0.04em] text-app-text-ghost">
+            {t.affectedIndicators}
+          </span>
+          {event.affected_indicators
+            .slice()
+            .sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight))
+            .slice(0, 4)
+            .map((ind) => {
+              const positive = ind.weight >= 0
+              return (
+                <span
+                  key={ind.symbol}
+                  title={`${ind.symbol}: ${ind.weight.toFixed(2)}`}
+                  className="rounded border px-[0.4rem] py-[0.05rem] font-mono text-[0.64rem] leading-[1.4]"
+                  style={{
+                    color: positive ? "#52c8a0" : "#e05252",
+                    borderColor: positive ? "#2a4a3e" : "#4a2a2e",
+                    background: positive ? "#16241e" : "#241616",
+                  }}
+                >
+                  {ind.symbol} {positive ? "+" : ""}{ind.weight.toFixed(2)}
+                </span>
+              )
+            })}
+        </div>
+      )}
+
       <Button
         onClick={toggleArticles}
         variant="link"

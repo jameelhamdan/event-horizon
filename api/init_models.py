@@ -12,4 +12,7 @@ pipeline("token-classification", model="dslim/bert-base-NER", aggregation_strate
 print("Downloading paraphrase-multilingual-MiniLM-L12-v2...")
 SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
 
+print("Downloading ProsusAI/finbert...")
+pipeline("text-classification", model="ProsusAI/finbert", top_k=None, truncation=True, max_length=512)
+
 print("All models downloaded.")

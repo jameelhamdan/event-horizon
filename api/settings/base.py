@@ -224,6 +224,10 @@ CACHES = {
 
 TASK_QUEUE_ENABLED = config('TASK_QUEUE_ENABLED', default=False, cast=bool)
 
+# Master switch for the forecasting subsystem (LLM + v2 quant model). When false,
+# run/score/train forecast jobs are neither scheduled nor executed (they no-op).
+FORECASTING_ENABLED = config('FORECASTING_ENABLED', default=True, cast=bool)
+
 # LLM backend — 'openrouter' (default) or 'ollama'
 LLM_BACKEND = config('LLM_BACKEND', default='openrouter')
 

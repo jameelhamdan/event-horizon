@@ -1,6 +1,6 @@
 # conflictradar.live
 
-Live geopolitical event map with a daily AI-written email briefing. Ingests news from Telegram channels, runs NLP analysis, clusters articles into geolocated events, and displays them on an interactive Leaflet map.
+Live geopolitical event map with a daily AI-written email briefing. Ingests news from RSS feeds and web sources, runs NLP analysis, clusters articles into geolocated events, and displays them on an interactive Leaflet map.
 
 See [project.md](project.md) for full requirements and architecture. See [CLAUDE.md](CLAUDE.md) for developer conventions and recipes.
 
@@ -13,7 +13,7 @@ See [project.md](project.md) for full requirements and architecture. See [CLAUDE
 | Backend | Django 6 + DRF + django-mongodb-backend |
 | Task queue | Redis + RQ + django-rq |
 | Storage | MongoDB 8 |
-| Ingestion | Telethon (Telegram) + requests |
+| Ingestion | feedparser (RSS) + requests |
 | NLP | spaCy NER + VADER sentiment + geopy geocoding |
 | Email | AWS SES (prod) / SMTP (dev) |
 | Newsletter | LLM-generated daily briefing → subscriber list |
@@ -115,7 +115,7 @@ EMAIL_PROVIDER=smtp
 
 ```text
 fetch_data        (every 10m, timeout 30m)
-  └─ Telethon / requests → Article objects in MongoDB
+  └─ feedparser (RSS) / requests → Article objects in MongoDB
 
 process_articles  (every 10m, timeout 30m)
   └─ spaCy NER — named entity extraction
@@ -148,7 +148,7 @@ backend/
   services/
     cleaning/    ArticleCleaner — spaCy NER + VADER + categorization
     location/    Geocoder — Nominatim via geopy, Django cache
-    data/        Ingestion — Telethon + HTTP
+    data/        Ingestion — RSS (feedparser) + HTTP
     email/       Email service — AWS SES (prod) or SMTP (dev)
     llm/         LLM service — newsletter generation
   settings/      Django configuration

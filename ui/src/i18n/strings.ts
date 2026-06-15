@@ -41,6 +41,7 @@ export interface UIStrings {
     commodity: string
     forex: string
     bond: string
+    index: string
   }
   pastBriefings: string
   selectBriefing: string
@@ -81,10 +82,21 @@ export interface UIStrings {
   // Forecast panel
   marketForecasts: string
   forecastSentiment: string
+  forecastFinbert: string
   forecastMomentum1h: string
   forecastRelatedEvents: string
   forecastActual: string
   forecastHorizon: (n: number) => string
+  forecastHorizonShort: (n: number) => string
+  forecastMagnitude: string
+  forecastVolatility: string
+  forecastReliability: string
+  forecastAbstained: string
+  forecastPredicted: string
+  affectedIndicators: string
+  magnitudeBuckets: Record<string, string>
+  volatilityBuckets: Record<string, string>
+  reliabilityLabels: Record<string, string>
   // Map — static point labels
   pointTypeLabels: Record<string, string>
   mapTimezone: string
@@ -170,6 +182,7 @@ export const UI: Record<Language, UIStrings> = {
       commodity: "Commodities",
       forex: "Forex",
       bond: "Bonds",
+      index: "Indices",
     },
     pastBriefings: "Past briefings",
     selectBriefing: "Select a briefing on the left to read.",
@@ -221,11 +234,36 @@ export const UI: Record<Language, UIStrings> = {
     switchToEnglish: "Switch to English",
     noEventsFiltered: "No events match the current filters.",
     marketForecasts: "Market Forecasts",
-    forecastSentiment: "Sentiment:",
+    forecastSentiment: "VADER:",
+    forecastFinbert: "FinBERT:",
     forecastMomentum1h: "1h Δ:",
     forecastRelatedEvents: "Related events:",
     forecastActual: "Actual:",
     forecastHorizon: (n) => `${n}h horizon`,
+    forecastHorizonShort: (n) => (n === 1 ? "1h" : n === 24 ? "1d" : n === 168 ? "1w" : `${n}h`),
+    forecastMagnitude: "Direction",
+    forecastVolatility: "Volatility",
+    forecastReliability: "Reliability",
+    forecastAbstained: "Abstained",
+    forecastPredicted: "Predicted:",
+    affectedIndicators: "Affected indicators",
+    magnitudeBuckets: {
+      strong_down: "Strong ↓",
+      down: "Down",
+      flat: "Flat",
+      up: "Up",
+      strong_up: "Strong ↑",
+    },
+    volatilityBuckets: {
+      calm: "Calm",
+      normal: "Normal",
+      elevated: "Elevated",
+    },
+    reliabilityLabels: {
+      high: "High",
+      med: "Med",
+      low: "Low",
+    },
     pointTypeLabels: {
       exchange: "Stock Exchange",
       commodity_exchange: "Commodity Exchange",
@@ -310,6 +348,7 @@ export const UI: Record<Language, UIStrings> = {
       commodity: "سلع",
       forex: "فوركس",
       bond: "سندات",
+      index: "مؤشرات",
     },
     pastBriefings: "النشرات السابقة",
     selectBriefing: "اختر نشرة من القائمة للقراءة.",
@@ -361,11 +400,36 @@ export const UI: Record<Language, UIStrings> = {
     switchToEnglish: "Switch to English",
     noEventsFiltered: "لا توجد أحداث تطابق الفلاتر الحالية.",
     marketForecasts: "توقعات الأسواق",
-    forecastSentiment: "المشاعر:",
+    forecastSentiment: "VADER:",
+    forecastFinbert: "FinBERT:",
     forecastMomentum1h: "تغيير ١س:",
     forecastRelatedEvents: "أحداث ذات صلة:",
     forecastActual: "الفعلي:",
     forecastHorizon: (n) => `أفق ${n} س`,
+    forecastHorizonShort: (n) => (n === 1 ? "١س" : n === 24 ? "١ي" : n === 168 ? "١أ" : `${n}س`),
+    forecastMagnitude: "الاتجاه",
+    forecastVolatility: "التقلب",
+    forecastReliability: "الموثوقية",
+    forecastAbstained: "امتنع",
+    forecastPredicted: "المتوقع:",
+    affectedIndicators: "المؤشرات المتأثرة",
+    magnitudeBuckets: {
+      strong_down: "هبوط قوي ↓",
+      down: "هبوط",
+      flat: "ثابت",
+      up: "صعود",
+      strong_up: "صعود قوي ↑",
+    },
+    volatilityBuckets: {
+      calm: "هادئ",
+      normal: "عادي",
+      elevated: "مرتفع",
+    },
+    reliabilityLabels: {
+      high: "عالية",
+      med: "متوسطة",
+      low: "منخفضة",
+    },
     pointTypeLabels: {
       exchange: "بورصة الأسهم",
       commodity_exchange: "بورصة السلع",

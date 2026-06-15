@@ -6,7 +6,7 @@ import { useLanguage } from "../../contexts/LanguageContext"
 import type { PriceTick, StreamKey } from "../../types"
 import { cn } from "@/lib/utils"
 
-const STREAM_KEYS: StreamKey[] = ["stock", "crypto", "commodity", "forex", "bond"]
+const STREAM_KEYS: StreamKey[] = ["stock", "crypto", "commodity", "forex", "bond", "index"]
 
 function changeColorClass(pct: number | null): string {
   if (pct == null) return "text-app-text-muted"

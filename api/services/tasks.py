@@ -84,15 +84,48 @@ def fetch_forex_task() -> int:
 
 
 # ── Forecasting tasks ──────────────────────────────────────────────────────────
+# All three entrypoints short-circuit when the subsystem is switched off via
+# FORECASTING_ENABLED, so manual/admin triggers honour the flag too — not just the
+# scheduler. The gate lives in services.forecasting (single source of truth).
 
 def run_forecast_task() -> int:
+    from services.forecasting import is_enabled
+    if not is_enabled():
+        return 0
     from services.forecasting.service import run_forecasts
     return run_forecasts()
 
 
 def score_forecasts_task() -> int:
+    from services.forecasting import is_enabled
+    if not is_enabled():
+        return 0
     from services.forecasting.service import score_forecasts
     return score_forecasts()
+
+
+def train_forecaster_task() -> dict:
+    """Train the v2 quantitative classifier per (symbol, horizon). Heavy queue.
+
+    Degrades gracefully — returns an error marker if lightgbm/numpy are absent so
+    the v1 LLM remains the operative predictor.
+    """
+    from services.forecasting import is_enabled
+    if not is_enabled():
+        return {'disabled': True}
+    from services.forecasting.model import train
+    from services.forecasting.service import DEFAULT_SYMBOLS, _horizons_for
+
+    results: dict = {}
+    for symbol, stream_key in DEFAULT_SYMBOLS:
+        for _label, hours in _horizons_for(stream_key):
+            try:
+                results[f'{symbol}|{hours}h'] = train(symbol, hours)
+            except RuntimeError as exc:
+                return {'error': str(exc)}
+            except Exception as exc:  # noqa: BLE001
+                results[f'{symbol}|{hours}h'] = {'error': str(exc)}
+    return results
 
 
 # ── Backfill tasks ─────────────────────────────────────────────────────────────

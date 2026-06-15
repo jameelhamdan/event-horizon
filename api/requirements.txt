@@ -35,6 +35,13 @@ markdown>=3.7
 # Stream data fetching (prices, forex, NOTAM, earthquakes)
 yfinance>=1.2.0
 
+# v2 quantitative forecaster (optional — training/predict degrade gracefully if absent)
+lightgbm>=4.3.0
+# numpy is imported directly by services/forecasting/model.py (train + predict).
+# It also arrives transitively via lightgbm/torch/transformers; pinned here so the
+# direct import is an explicit, declared dependency.
+numpy>=1.26,<3.0
+
 # PyTorch CPU-only (avoids pulling CUDA binaries)
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.10.0+cpu

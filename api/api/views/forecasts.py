@@ -46,8 +46,10 @@ class ForecastListView(APIView):
 class ForecastLatestView(APIView):
     """
     GET /api/forecasts/latest/
-    Returns the most recent forecast per symbol.
-    Query params: stream_key
+    Returns the most recent forecast per (symbol, horizon).
+    Multi-horizon (1h/1d/1w): each symbol yields one row per applicable horizon,
+    so deduping on symbol alone would silently drop horizons.
+    Query params: stream_key, symbol
     """
 
     def get(self, request):
@@ -55,14 +57,19 @@ class ForecastLatestView(APIView):
 
         if stream_key := request.query_params.get('stream_key'):
             qs = qs.filter(stream_key=stream_key)
+        if symbol := request.query_params.get('symbol'):
+            qs = qs.filter(symbol=symbol)
 
-        seen: set[str] = set()
+        # qs is ordered by -generated_at (model Meta), so the first time we see a
+        # (symbol, horizon) pair it is the most recent forecast for that pair.
+        seen: set[tuple[str, int]] = set()
         latest: list = []
         for fc in qs:
-            if fc.symbol not in seen:
-                seen.add(fc.symbol)
+            key = (fc.symbol, fc.horizon_hours)
+            if key not in seen:
+                seen.add(key)
                 latest.append(fc)
-            if len(seen) >= 50:
+            if len(latest) >= 150:
                 break
 
         data = {'results': ForecastSerializer(latest, many=True).data}
