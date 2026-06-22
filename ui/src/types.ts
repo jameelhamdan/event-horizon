@@ -102,6 +102,12 @@ export interface PricesLatestResponse {
   results: PriceTick[]
 }
 
+export interface PriceHistoryResponse {
+  symbol: string
+  results: PriceTick[]
+  count: number
+}
+
 export interface GeoJSONFeature {
   type: "Feature"
   geometry: { type: string; coordinates: unknown } | null
@@ -189,40 +195,24 @@ export interface NewsletterDetail extends NewsletterSummary {
 
 export type ForecastDirection = "up" | "down" | "neutral"
 
-export type MagnitudeBucket =
-  | "strong_down" | "down" | "flat" | "up" | "strong_up" | ""
-
-export type VolatilityBucket = "calm" | "normal" | "elevated" | ""
-
-export type Reliability = "high" | "med" | "low" | ""
-
+// Placeholder forecast — the prediction layer is being reworked; the API currently
+// returns a neutral / 0% diff per symbol.
 export interface Forecast {
-  id: string
   symbol: string
   stream_key: string
   generated_at: string
   horizon_hours: number
   direction: ForecastDirection
-  confidence: number
-  // Two-head bucketed prediction + scored actuals
-  magnitude_bucket: MagnitudeBucket
-  actual_bucket: MagnitudeBucket
-  volatility_bucket: VolatilityBucket
-  actual_volatility_bucket: VolatilityBucket
-  reliability: Reliability
-  abstained: boolean
-  predicted_value: number | null
-  actual_value: number | null
-  model_name: string
-  reasoning: string
-  event_ids: string[]
-  feature_vector: Record<string, unknown>
+  predicted_change_pct: number
+  current_value: number | null
+  placeholder: boolean
 }
 
 export interface ForecastsResponse {
   results: Forecast[]
   count: number
 }
+
 
 export type SSEEvent =
   | { type: "connected" }

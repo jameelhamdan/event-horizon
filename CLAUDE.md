@@ -13,8 +13,8 @@ This file gives Claude everything needed to write correct, consistent code for t
 | Scheduling | rq-scheduler (`setup_schedule` management command) |
 | Storage | MongoDB 8 |
 | Ingestion | feedparser (RSS) + requests |
-| NLP | spaCy (NER) + sentence-transformers + VADER + geopy |
-| LLM | Anthropic Claude (via `services/llm.py`; provider configurable via `LLM_PROVIDER`) |
+| NLP | HuggingFace NER (dslim/bert-base-NER) + LLM category/geo + sentence-transformers + VADER + FinBERT + geonamescache |
+| LLM | Multi-provider via `services/llm.py` — `g4f` (default, headless Docker proxy), `openrouter`, `ollama`; per-use-case routing + fallback chains in `settings.LLM_ROUTES` |
 | Frontend | React 19 + Vite + react-router-dom + react-leaflet (TypeScript) |
 | Real-time | Server-Sent Events (SSE) over Redis pub/sub |
 | Email | AWS SES (newsletter + confirmation emails) |
@@ -40,7 +40,7 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   ├── core/               # Django app — data models + management commands
 │   │   ├── apps.py         # name='core', label='core'
 │   │   ├── models.py       # Source, Article, Event, Topic, PriceTick, NotamZone,
-│   │   │                   # NotamRecord, EarthquakeRecord, StaticPoint, Forecast
+│   │   │                   # NotamRecord, EarthquakeRecord, StaticPoint
 │   │   ├── admin.py        # Admin for all core models (pipeline action buttons, import/export)
 │   │   └── management/commands/
 │   │       ├── fetch_data.py           # Enqueues fetch_articles_task
@@ -67,7 +67,7 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │       │                   # NotamHistoryView, EarthquakeListView, StaticPointListView,
 │   │       │                   # TopicListView, TopicDetailView, TopicEventsView,
 │   │       │                   # SSEStreamView
-│   │       ├── forecasts.py    # ForecastListView, ForecastLatestView
+│   │       ├── forecasts.py     # ForecastListView, ForecastLatestView (placeholder — neutral/0)
 │   │       └── newsletter.py   # SubscribeView, ConfirmView, UnsubscribeView,
 │   │                           # NewsletterListView, NewsletterLatestView, NewsletterDetailView
 │   ├── newsletter/         # Django app — newsletter models + admin + tasks
@@ -86,7 +86,7 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │   ├── workflow.py     # Workflow class — orchestrates pipeline steps
 │   │   ├── llm.py          # LLM client wrapper (provider-agnostic)
 │   │   ├── processing/     # NLP processing pipeline
-│   │   │   ├── analyzer.py     # Article analysis (NER via spaCy, VADER sentiment, geocoding)
+│   │   │   ├── analyzer.py     # Article analysis (LLM category/sub-category, geonamescache geocoding, i18n)
 │   │   │   ├── cleaner.py      # Text normalization
 │   │   │   └── clustering.py   # SemanticClusterer — sentence-transformers
 │   │   ├── topics/         # Topic management
@@ -109,10 +109,9 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │   │   ├── historical.py   # HistoricalBackfillService, RSSHistoricalService,
 │   │   │   │                   # RankedArticle, WeekResult
 │   │   │   └── rss.py          # RSSService (feedparser)
-│   │   ├── forecasting/    # LLM market forecasting
-│   │   │   ├── service.py      # run_forecasts(), score_forecasts()
-│   │   │   ├── features.py     # build_feature_vector() — price + news features
-│   │   │   └── routing.py      # route_event_to_symbols() — maps events to symbols
+│   │   ├── forecasting/    # Market forecasting (prediction layer removed — being reworked)
+│   │   │   └── routing.py      # route_event_to_weighted_symbols() — event→symbol routing,
+│   │   │                       # feeds Event.affected_indicators (live pipeline)
 │   │   ├── newsletter/     # Newsletter generation + sending
 │   │   │   ├── generator.py    # generate_newsletter() — LLM-based section writer
 │   │   │   └── sender.py       # send_newsletter() — Markdown→HTML, SES
@@ -159,7 +158,7 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │   │   ├── events.ts   # fetchEvents(), fetchEventDetail()
 │   │   │   ├── newsletter.ts  # fetchNewsletters(), subscribeNewsletter()
 │   │   │   ├── streams.ts  # fetchPrices(), fetchNotams(), fetchEarthquakes(),
-│   │   │   │               # fetchStaticPoints(), fetchForecasts()
+│   │   │   │               # fetchStaticPoints(), fetchForecasts() (placeholder)
 │   │   │   └── topics.ts   # fetchTopics(), fetchTopicDetail()
 │   │   ├── components/
 │   │   │   ├── layout.tsx          # SiteHeader — nav, language toggle
@@ -173,7 +172,7 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │   │   │   ├── EventCard.tsx       # Topic badges; onTopicClick prop
 │   │   │   │   ├── EventList.tsx       # Passes topic props down
 │   │   │   │   ├── EventUI.tsx         # CategoryBadge, EventMeta, useLocalizedField
-│   │   │   │   ├── ForecastPanel.tsx   # LLM market forecast display
+│   │   │   │   ├── ForecastPanel.tsx   # Placeholder — neutral forecast list (rework pending)
 │   │   │   │   ├── MapView.tsx         # L.divIcon category markers + all map layers
 │   │   │   │   └── PriceTicker.tsx     # Real-time SSE price table
 │   │   │   ├── topics/
@@ -202,17 +201,16 @@ This is a real-time global event intelligence platform. Key feature areas:
 | Feature | Description |
 |---------|-------------|
 | **Multi-source ingestion** | RSS feeds (feedparser) + web sources (requests) → Article objects |
-| **NLP pipeline** | spaCy NER + VADER sentiment + geopy geocoding + LLM category/sub-category + i18n translations |
+| **NLP pipeline** | HuggingFace NER (bert-base-NER) + LLM category/sub-category + VADER & FinBERT sentiment + geonamescache geocoding + i18n translations |
 | **Event aggregation** | Articles bucketed by (location, category, day) + semantic sub-clustering (multilingual sentence-transformers) |
 | **Global topic tracking** | Wikipedia Portal:Current_events scraped daily → LLM-enriched topics → LLM semantic matching to events |
 | **Stream data** | Real-time prices (Yahoo Finance + CoinGecko), NOTAMs (aviationweather.gov), earthquakes (USGS), forex (ECB) |
-| **LLM market forecasting** | Directional predictions (up/down/neutral) with feature vectors → scored against actuals |
 | **Daily newsletter** | LLM-generated per-category summaries → Markdown → HTML → AWS SES to subscribers |
 | **Subscriber management** | Double opt-in email confirmation, token-based unsubscribe |
 | **Interactive Leaflet map** | Event markers + NOTAM overlay + earthquake layer + static reference points |
 | **Real-time SSE** | Redis pub/sub → Server-Sent Events → PriceTicker + NOTAM/earthquake notifications |
 | **Dual-language UI** | English + Arabic translations (LLM-generated at process time; toggled via LanguageContext) |
-| **Two-queue workers** | `default` queue (light I/O: fetch, prices, notam, earthquakes, forex) + `heavy` queue (NLP/LLM: process, aggregate, tag, forecast) |
+| **Two-queue workers** | `default` queue (light I/O: fetch, prices, notam, earthquakes, forex) + `heavy` queue (NLP/LLM: process, aggregate, tag) |
 | **Admin pipeline panel** | Custom Django admin actions for manual pipeline triggers (fetch/process/aggregate/run-all) |
 
 ---
@@ -267,7 +265,7 @@ This is a real-time global event intelligence platform. Key feature areas:
 
 ### Tasks / Background Jobs
 
-All task functions live in `services/tasks.py` (pipeline + streams + topics + forecasting) and `newsletter/tasks.py`. They are **plain Python functions** — no decorator.
+All task functions live in `services/tasks.py` (pipeline + streams + topics) and `newsletter/tasks.py`. They are **plain Python functions** — no decorator.
 
 - Enqueue: `from services.queue import enqueue; enqueue(my_task, arg1, kwarg=val)`
 - Task names follow the `*_task` suffix convention
@@ -302,8 +300,6 @@ All periodic jobs are registered by the `setup_schedule` management command (`ap
 | `aggregate_events_task` | 60m | `AGGREGATE_INTERVAL_MINUTES` |
 | `tag_topics_task` | 75m | `TAG_TOPICS_INTERVAL_MINUTES` |
 | `discover_topics_task` | 150m | `DISCOVER_TOPICS_INTERVAL_MINUTES` |
-| `run_forecast_task` | 300m | `FORECAST_INTERVAL_MINUTES` |
-| `score_forecasts_task` | 300m | `FORECAST_SCORE_INTERVAL_MINUTES` |
 
 **Cron jobs (heavy queue):**
 
@@ -366,13 +362,26 @@ command: sh -c "python manage.py setup_schedule && rqscheduler --url $${REDIS_UR
 
 ### Forecasting
 
-`api/services/forecasting/`:
-- `service.py` — `run_forecasts()`: builds feature vector per symbol, calls LLM with structured prompt, stores `Forecast` object; `score_forecasts()`: fills `actual_value` once horizon elapses
-- `features.py` — `build_feature_vector(symbol, at_time)`: price momentum (1h/24h), news sentiment mean/std, event intensity, category counts, routed event IDs
-- `routing.py` — `route_event_to_symbols(category, location, topic_slugs)`: maps event attributes to affected market symbols (e.g. conflict + Ukraine → wheat, energy)
-- Default symbols: GC=F (gold), CL=F (oil), NG=F (natural gas), ZW=F (wheat), BTC-USD, ETH-USD, SPY, DX-Y.NYB, ^TNX
-- `Forecast` model fields: `symbol`, `stream_key`, `direction` (up/down/neutral), `confidence`, `predicted_value`, `actual_value`, `reasoning`, `event_ids`, `feature_vector`
-- API: `GET /api/forecasts/` (filter by symbol/stream_key/horizon), `GET /api/forecasts/latest/` (latest per symbol)
+> **The market-forecasting prediction layer has been removed and is being reworked from
+> scratch.** Gone: the `Forecast` model, `service.py`/`features.py`/`buckets.py`/
+> `calibration.py`/`metrics.py`/`arima.py`, the `run_forecast_task`/`score_forecasts_task`
+> jobs, and the `FORECASTING_ENABLED`/`FORECAST_METHOD` settings. **Do not reintroduce
+> them ad-hoc** — the rework will redefine the model/tasks.
+
+**Placeholder forecast (current state):** so the UI forecast surface keeps working, the
+`/api/forecasts/` + `/api/forecasts/latest/` endpoints are back as a **model-free
+placeholder** (`api/api/views/forecasts.py`). They synthesize one *neutral / 0%-diff*
+forecast per symbol from the latest `PriceTick` — nothing is stored, no tasks/scoring.
+Serializer: `ForecastSerializer` (a plain `serializers.Serializer`, not model-backed) with
+fields `symbol, stream_key, generated_at, horizon_hours, direction ('neutral'),
+predicted_change_pct (0.0), current_value, placeholder (true)`. UI: `ForecastPanel.tsx`
+renders the neutral list under the "Forecasts" sidebar tab; `fetchForecasts()` in
+`api/streams.ts`; `Forecast`/`ForecastsResponse` types in `types.ts`.
+
+The reusable, deterministic event→symbol router survives and runs inside the live event
+pipeline (NOT part of the removed/placeholder prediction layer):
+- `api/services/forecasting/routing.py` — `route_event_to_weighted_symbols(category, location, topic_slugs, sub_categories, sentiment)`: maps event attributes to affected market symbols with deterministic weights (e.g. conflict + Ukraine → wheat, energy). Populates `Event.affected_indicators` during `aggregate_events` and `tag_topics`.
+- Panel symbols: GC=F (gold), CL=F (oil), NG=F (natural gas), ZW=F (wheat), DX-Y.NYB, ^TNX, ^VIX, SPY, BTC-USD, ETH-USD
 
 ### Topics
 
@@ -402,7 +411,7 @@ command: sh -c "python manage.py setup_schedule && rqscheduler --url $${REDIS_UR
 
 ### NLP / Processing
 
-- `services/processing/analyzer.py` — main article processing: spaCy NER (entity extraction), VADER sentiment, geopy geocoding, LLM category + sub-category, LLM i18n translations (en + ar)
+- `services/processing/analyzer.py` — LLM category + sub-category assignment, geonamescache geocoding, LLM i18n translations (en + ar). NER (dslim/bert-base-NER) + VADER run in `cleaner.py`; FinBERT in `finbert.py`
 - `services/processing/cleaner.py` — HTML tag removal, whitespace normalization, non-ASCII handling
 - `services/processing/clustering.py` — semantic event grouping (see above)
 - `ArticleDocument` and `ArticleFeatures` dataclasses live in `core/models.py`
@@ -430,8 +439,8 @@ command: sh -c "python manage.py setup_schedule && rqscheduler --url $${REDIS_UR
 | GET | `/api/topics/` | Topics list; params: `active`, `current`, `top_level`, `category`, `date`, `parent`, `source`, `month`, `year` |
 | GET | `/api/topics/<slug>/` | Topic detail |
 | GET | `/api/topics/<slug>/events/` | Events tagged with topic; params: `start`, `end`, `limit` |
-| GET | `/api/forecasts/` | LLM forecasts; params: `symbol`, `stream_key`, `horizon` (hours), `limit` |
-| GET | `/api/forecasts/latest/` | Latest forecast per symbol; param: `stream_key` |
+| GET | `/api/forecasts/` | Placeholder forecasts (neutral/0 per symbol); params: `symbol`, `stream_key` |
+| GET | `/api/forecasts/latest/` | Placeholder; same neutral payload as above |
 | GET | `/api/sse/` | Server-Sent Events stream (prices, NOTAMs, earthquakes) |
 | POST | `/api/newsletter/subscribe/` | Subscribe; body: `{"email": "..."}` — rate limited 5/hour |
 | GET | `/api/newsletter/confirm/<token>/` | Confirm subscription via token |
@@ -590,7 +599,6 @@ Service code: `api/services/data/historical.py` — `HistoricalBackfillService`.
 | Forex stream | `api/services/streams/forex.py` |
 | RSS ingestion | `api/services/data/rss.py` |
 | Historical backfill | `api/services/data/historical.py` → `HistoricalBackfillService` |
-| Forecasting service | `api/services/forecasting/service.py` |
 | Event→symbol routing | `api/services/forecasting/routing.py` |
 | API views | `api/api/views/` |
 | API serializers | `api/api/serializers.py` |
@@ -627,7 +635,7 @@ fetch_articles_task (every 10m, default queue, timeout 30m)
   └─ RSSService (feedparser) / requests → Article objects in MongoDB
 
 process_articles_task (every 60m, heavy queue, timeout 30m)
-  └─ spaCy NER + VADER sentiment + geopy geocoding → Article metadata
+  └─ bert-base-NER + VADER & FinBERT sentiment + geonamescache geocoding → Article metadata
      LLM: category + sub-category assignment
      LLM: English + Arabic translations → Article.translations
 
@@ -657,9 +665,6 @@ Stream tasks (default queue, independent of pipeline):
   fetch_notams_task (15m)      → NotamZone (upsert) + NotamRecord (append) + Redis sse:notams
   fetch_earthquakes_task (5m)  → EarthquakeRecord + Redis sse:earthquakes
   fetch_forex_task (15m)       → PriceTick (stream_key='forex')
-
-  run_forecast_task (300m)     → Forecast (LLM directional predictions)
-  score_forecasts_task (300m)  → fills actual_value on elapsed forecasts
 ```
 
 ---
@@ -676,6 +681,7 @@ Stream tasks (default queue, independent of pipeline):
 | `nginx` | reverse proxy | 80, 443 |
 | `redis` | broker + cache + SSE pub/sub | — |
 | `mongo` | database | 27017 |
+| `g4f` | gpt4free OpenAI-compatible LLM proxy (`hlohaus789/g4f:latest-slim`) | 1337 (internal) |
 | `cloudflared` | Cloudflare Tunnel (optional) | — |
 
 ---
@@ -691,8 +697,12 @@ Stream tasks (default queue, independent of pipeline):
 | `DOMAIN` | `localhost` | Public hostname for nginx + Let's Encrypt |
 | `ENV_NAME` | `development` | Shown in X-App-Version header |
 | `TASK_QUEUE_ENABLED` | `false` | If false, `enqueue()` calls functions synchronously (no Redis needed) |
-| `LLM_PROVIDER` | `anthropic` | LLM service provider (anthropic / openai) |
-| `ANTHROPIC_API_KEY` | — | API key for Anthropic Claude |
+| `OPENROUTER_API_KEYS` | — | OpenRouter keys, comma-separated (rotated round-robin per request) |
+| `OPENROUTER_MODELS` | `openrouter/free` | OpenRouter model (first value used) |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
+| `OLLAMA_MODEL` | `qwen3:4b` | Ollama model name |
+| `G4F_BASE_URL` | `http://localhost:1337/v1` | g4f local proxy URL (`g4f api`) |
+| `G4F_MODEL` | `gpt-4o-mini` | g4f model name |
 | `FETCH_INTERVAL_MINUTES` | `10` | fetch_articles_task period |
 | `PROCESS_INTERVAL_MINUTES` | `10` | process_articles_task base period (×6 for heavy queue = 60m) |
 | `AGGREGATE_INTERVAL_MINUTES` | `10` | aggregate_events_task base period (×6 = 60m) |
@@ -705,10 +715,16 @@ Stream tasks (default queue, independent of pipeline):
 | `EARTHQUAKE_FETCH_INTERVAL_MINUTES` | `5` | fetch_earthquakes_task period |
 | `EARTHQUAKE_MIN_MAGNITUDE` | `3.0` | USGS minimum magnitude filter |
 | `FOREX_FETCH_INTERVAL_MINUTES` | `15` | fetch_forex_task period |
-| `FORECASTING_ENABLED` | `true` | Master switch for forecasting (run/score/train). When false, those jobs are neither scheduled nor executed (no-op) |
-| `FORECAST_INTERVAL_MINUTES` | `60` | run_forecast_task base period (×5 = 300m) |
-| `FORECAST_SCORE_INTERVAL_MINUTES` | `60` | score_forecasts_task base period (×5 = 300m) |
 | `NEWSLETTER_GENERATE_HOUR` | `6` | Hour (UTC) for daily newsletter generation |
+| `NEWSLETTER_ENABLED` | `true` | Feature flag — gates newsletter generation/send (schedule + task) |
+| `STREAM_PRICES_ENABLED` | `true` | Feature flag — gates the prices stream (schedule + task) |
+| `STREAM_NOTAM_ENABLED` | `true` | Feature flag — gates the NOTAM stream |
+| `STREAM_EARTHQUAKE_ENABLED` | `true` | Feature flag — gates the earthquakes stream |
+| `STREAM_FOREX_ENABLED` | `true` | Feature flag — gates the forex stream |
+| `FINBERT_ENABLED` | `true` | When false, FinBERT model is not loaded; sentiment falls back to `None` (saves ~500 MB RAM) |
+| `API_THROTTLE_ANON` | `120/min` | DRF anonymous rate limit for the public read API |
+| `HEALTH_CHECK_INTERVAL_MINUTES` | `30` | `pipeline_health_task` period (logs warnings on stale outputs) |
+| `HEALTH_ARTICLE_STALE_MIN` / `HEALTH_PRICE_STALE_MIN` / `HEALTH_QUAKE_STALE_MIN` | `180` / `60` / `360` | Staleness thresholds for the health monitor |
 | `JOB_TIMEOUT_SECONDS` | `1800` | RQ job timeout (30m) — passed to `enqueue()` and `setup_schedule` |
 | `AWS_ACCESS_KEY_ID` | — | AWS SES credentials |
 | `AWS_SECRET_ACCESS_KEY` | — | AWS SES credentials |
@@ -750,6 +766,7 @@ Stream tasks (default queue, independent of pipeline):
 - **`tag_events_with_topics` uses LLM**: `LLMTopicMatcher` sends batches of 10 events per LLM call; `retroactive_tag_topic` still uses the fast keyword-based `TopicMatcher`.
 - **`refresh_topics` runs LLM enrichment**: `Workflow._enrich_topics()` calls the LLM after scraping to generate proper descriptions and expand keywords (batches of 30). Falls back silently — topics are upserted with raw scraped metadata if LLM is unavailable.
 - **LLM responses: always strip code fences**: use `re.sub(r'^```(?:json)?\s*', '', r)` + `re.sub(r'\s*```$', '', r)` before `json.loads()`. All LLM-calling code in the project does this — do not omit it in new code.
+- **LLM routing**: call `get_llm_service(role)` with the use-case role (`analyzer`, `topics`, `newsletter`, `historical`; unknown → `default`). Routes live in `settings.LLM_ROUTES` (dict in `settings/base.py`) — a provider name or an ordered fallback list (`FallbackLLMService` tries each on `LLMError`). Per-provider config (keys/base_url/model) is in `.env`; the who-uses-what routing is in code. There is no `LLM_BACKEND` / `LLM_PROVIDER` var anymore.
 - **Static points bootstrap**: run `python manage.py bootstrap_static_points` once to seed `StaticPoint` (exchanges, ports, central banks)
 
 ---

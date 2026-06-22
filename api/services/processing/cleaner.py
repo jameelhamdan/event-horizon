@@ -87,10 +87,13 @@ class ArticleCleaner:
         ner_batch = self._ner(texts, batch_size=16)
         from services.processing import finbert
         finbert_batch = finbert.score_batch(texts)
+        # Single multi-article LLM call per chunk instead of one call per document.
+        analyses = self._analyzer.analyze_batch(texts)
         results = []
-        for doc, raw_entities, finbert_sentiment in zip(documents, ner_batch, finbert_batch):
+        for doc, raw_entities, finbert_sentiment, analysis in zip(
+            documents, ner_batch, finbert_batch, analyses,
+        ):
             entities = [{'text': e['word'], 'label': e['entity_group']} for e in raw_entities]
-            analysis = self._analyzer.analyze(doc.full_text)
             sentiment = round(self._vader.polarity_scores(doc.full_text)['compound'], 4)
             entity_density = min(len(entities) / 8.0, 1.0)
             event_intensity = round(entity_density * 0.65 + abs(sentiment) * 0.35, 4)

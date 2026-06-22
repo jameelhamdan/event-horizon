@@ -2,7 +2,7 @@ from rest_framework import serializers
 from core.models import (
     Article, Event, Source,
     PriceTick, NotamRecord, NotamZone, EarthquakeRecord, StaticPoint,
-    Topic, Forecast,
+    Topic,
 )
 from newsletter.models import DailyNewsletter
 
@@ -168,19 +168,21 @@ class TopicSerializer(serializers.ModelSerializer):
         ]
 
 
-class ForecastSerializer(serializers.ModelSerializer):
-    id = serializers.CharField(read_only=True)
+class ForecastSerializer(serializers.Serializer):
+    """Placeholder market forecast — neutral / zero diff.
 
-    class Meta:
-        model = Forecast
-        fields = [
-            'id', 'symbol', 'stream_key', 'generated_at', 'horizon_hours',
-            'direction', 'confidence', 'predicted_value', 'actual_value',
-            'magnitude_bucket', 'actual_bucket',
-            'volatility_bucket', 'actual_volatility_bucket',
-            'reliability', 'abstained',
-            'model_name', 'reasoning', 'event_ids', 'feature_vector',
-        ]
+    The real prediction layer was removed and is being reworked; this is a stable
+    response shape so the UI forecast surface keeps working in the meantime. Not
+    backed by a model — synthesized per-symbol from the latest price tick.
+    """
+    symbol = serializers.CharField()
+    stream_key = serializers.CharField()
+    generated_at = serializers.DateTimeField()
+    horizon_hours = serializers.IntegerField()
+    direction = serializers.CharField()
+    predicted_change_pct = serializers.FloatField()
+    current_value = serializers.FloatField(allow_null=True)
+    placeholder = serializers.BooleanField()
 
 
 class SubscribeSerializer(serializers.Serializer):

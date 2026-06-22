@@ -1,5 +1,6 @@
 import type {
   PricesLatestResponse,
+  PriceHistoryResponse,
   NotamZonesResponse,
   EarthquakesResponse,
   StaticPointsResponse,
@@ -18,6 +19,20 @@ export async function fetchPricesLatest(
   const params = new URLSearchParams()
   if (stream_key) params.set("stream_key", stream_key)
   const res = await fetch(`${BASE_URL}/prices/latest/?${params}`)
+  if (!res.ok) throw new Error(`API error ${res.status}`)
+  return res.json()
+}
+
+export async function fetchPriceHistory(
+  symbol: string,
+  opts: { hours?: number; limit?: number } = {}
+): Promise<PriceHistoryResponse> {
+  const params = new URLSearchParams()
+  if (opts.hours) {
+    params.set("from", new Date(Date.now() - opts.hours * 3600 * 1000).toISOString())
+  }
+  if (opts.limit) params.set("limit", String(opts.limit))
+  const res = await fetch(`${BASE_URL}/prices/${encodeURIComponent(symbol)}/?${params}`)
   if (!res.ok) throw new Error(`API error ${res.status}`)
   return res.json()
 }
@@ -54,6 +69,8 @@ export async function fetchStaticPoints(
   return res.json()
 }
 
+// Placeholder: the backend returns a neutral / 0% forecast per symbol until the
+// prediction layer is reworked.
 export async function fetchForecasts(
   symbol?: string,
   stream_key?: string

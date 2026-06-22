@@ -17,6 +17,15 @@ export interface UIStrings {
   mapTab: string
   listTab: string
   briefingsTab: string
+  tabMarkets: string
+  tabForecasts: string
+  tabEvents: string
+  dateFrom: string
+  dateTo: string
+  clearDateRange: string
+  topicHistoryTitle: string
+  topicHistoryEmpty: string
+  allMonths: string
   notams: string
   earthquakes: string
   locations: string
@@ -79,20 +88,16 @@ export interface UIStrings {
   switchToArabic: string
   switchToEnglish: string
   noEventsFiltered: string
-  // Forecast panel
+  // Forecast panel (placeholder — prediction layer being reworked)
   marketForecasts: string
-  forecastSentiment: string
-  forecastFinbert: string
-  forecastMomentum1h: string
-  forecastRelatedEvents: string
-  forecastActual: string
-  forecastHorizon: (n: number) => string
-  forecastHorizonShort: (n: number) => string
-  forecastMagnitude: string
-  forecastVolatility: string
-  forecastReliability: string
-  forecastAbstained: string
-  forecastPredicted: string
+  noForecasts: string
+  forecastPlaceholderNote: string
+  // Price chart
+  priceVolume: string
+  priceNoHistory: string
+  sentBullish: string
+  sentBearish: string
+  sentNeutral: string
   affectedIndicators: string
   magnitudeBuckets: Record<string, string>
   volatilityBuckets: Record<string, string>
@@ -151,6 +156,15 @@ export const UI: Record<Language, UIStrings> = {
     mapTab: "Map",
     listTab: "Events",
     briefingsTab: "Briefings",
+    tabMarkets: "Markets",
+    tabForecasts: "Forecasts",
+    tabEvents: "Events",
+    dateFrom: "From date",
+    dateTo: "To date",
+    clearDateRange: "Clear date range",
+    topicHistoryTitle: "Past topics",
+    topicHistoryEmpty: "No topics for this period",
+    allMonths: "All months",
     notams: "NOTAMs",
     earthquakes: "Earthquakes",
     locations: "Locations",
@@ -233,19 +247,14 @@ export const UI: Record<Language, UIStrings> = {
     switchToArabic: "Switch to Arabic",
     switchToEnglish: "Switch to English",
     noEventsFiltered: "No events match the current filters.",
+    sentBullish: "bullish",
+    sentBearish: "bearish",
+    sentNeutral: "neutral",
     marketForecasts: "Market Forecasts",
-    forecastSentiment: "VADER:",
-    forecastFinbert: "FinBERT:",
-    forecastMomentum1h: "1h Δ:",
-    forecastRelatedEvents: "Related events:",
-    forecastActual: "Actual:",
-    forecastHorizon: (n) => `${n}h horizon`,
-    forecastHorizonShort: (n) => (n === 1 ? "1h" : n === 24 ? "1d" : n === 168 ? "1w" : `${n}h`),
-    forecastMagnitude: "Direction",
-    forecastVolatility: "Volatility",
-    forecastReliability: "Reliability",
-    forecastAbstained: "Abstained",
-    forecastPredicted: "Predicted:",
+    noForecasts: "No forecasts available",
+    forecastPlaceholderNote: "Forecasting is being reworked — showing a neutral placeholder for now.",
+    priceVolume: "Volume",
+    priceNoHistory: "No price history",
     affectedIndicators: "Affected indicators",
     magnitudeBuckets: {
       strong_down: "Strong ↓",
@@ -316,6 +325,15 @@ export const UI: Record<Language, UIStrings> = {
     mapTab: "الخريطة",
     listTab: "الأحداث",
     briefingsTab: "النشرات",
+    tabMarkets: "الأسواق",
+    tabForecasts: "التوقعات",
+    tabEvents: "الأحداث",
+    dateFrom: "من تاريخ",
+    dateTo: "إلى تاريخ",
+    clearDateRange: "مسح النطاق الزمني",
+    topicHistoryTitle: "مواضيع سابقة",
+    topicHistoryEmpty: "لا مواضيع لهذه الفترة",
+    allMonths: "كل الأشهر",
     notams: "نوتام",
     earthquakes: "زلازل",
     locations: "مواقع",
@@ -399,19 +417,14 @@ export const UI: Record<Language, UIStrings> = {
     switchToArabic: "Switch to Arabic",
     switchToEnglish: "Switch to English",
     noEventsFiltered: "لا توجد أحداث تطابق الفلاتر الحالية.",
+    sentBullish: "صعودي",
+    sentBearish: "هبوطي",
+    sentNeutral: "محايد",
     marketForecasts: "توقعات الأسواق",
-    forecastSentiment: "VADER:",
-    forecastFinbert: "FinBERT:",
-    forecastMomentum1h: "تغيير ١س:",
-    forecastRelatedEvents: "أحداث ذات صلة:",
-    forecastActual: "الفعلي:",
-    forecastHorizon: (n) => `أفق ${n} س`,
-    forecastHorizonShort: (n) => (n === 1 ? "١س" : n === 24 ? "١ي" : n === 168 ? "١أ" : `${n}س`),
-    forecastMagnitude: "الاتجاه",
-    forecastVolatility: "التقلب",
-    forecastReliability: "الموثوقية",
-    forecastAbstained: "امتنع",
-    forecastPredicted: "المتوقع:",
+    noForecasts: "لا توجد توقعات متاحة",
+    forecastPlaceholderNote: "يجري إعادة بناء نظام التوقعات — يُعرض الآن عنصر نائب محايد.",
+    priceVolume: "الحجم",
+    priceNoHistory: "لا يوجد سجل أسعار",
     affectedIndicators: "المؤشرات المتأثرة",
     magnitudeBuckets: {
       strong_down: "هبوط قوي ↓",

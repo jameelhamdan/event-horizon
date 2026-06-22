@@ -1,10 +1,13 @@
 'use client'
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, lazy, Suspense } from "react"
 import { fetchPricesLatest } from "../../api/streams"
 import { useLanguage } from "../../contexts/LanguageContext"
 import type { PriceTick, StreamKey } from "../../types"
 import { cn } from "@/lib/utils"
+
+// recharts is heavy — load it only when a user opens a price chart.
+const PriceChart = lazy(() => import("./PriceChart"))
 
 const STREAM_KEYS: StreamKey[] = ["stock", "crypto", "commodity", "forex", "bond", "index"]
 
@@ -23,11 +26,20 @@ function formatValue(value: number, streamKey: StreamKey): string {
 interface PriceRowProps {
   tick: PriceTick
   flash: boolean
+  selected: boolean
+  onClick: () => void
 }
 
-function PriceRow({ tick, flash }: PriceRowProps) {
+function PriceRow({ tick, flash, selected, onClick }: PriceRowProps) {
   return (
-    <div className={cn("price-row", flash && "price-row-flash")}>
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick() } }}
+      className={cn("price-row cursor-pointer", flash && "price-row-flash")}
+      style={selected ? { background: "#1e2030" } : undefined}
+    >
       <span className="w-[72px] shrink-0 overflow-hidden text-ellipsis whitespace-nowrap text-[0.72rem] font-semibold tracking-[0.01em] text-app-text-body-dim">
         {tick.symbol}
       </span>
@@ -53,17 +65,21 @@ interface PriceTickerProps {
     change_pct: number | null
     occurred_at: string
   } | null
+  /** External request (F5 cross-link) to focus a symbol's chart. */
+  focusSymbol?: { symbol: string; streamKey: StreamKey } | null
 }
 
-export default function PriceTicker({ latestTick }: PriceTickerProps) {
+export default function PriceTicker({ latestTick, focusSymbol }: PriceTickerProps) {
   const { t } = useLanguage()
   const [activeKey, setActiveKey] = useState<StreamKey>("crypto")
   const [ticks, setTicks] = useState<PriceTick[]>([])
   const [loading, setLoading] = useState(true)
   const [flashedSymbols, setFlashedSymbols] = useState<Set<string>>(new Set())
+  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
 
   useEffect(() => {
     setLoading(true)
+    setSelectedSymbol(null)
     fetchPricesLatest(activeKey)
       .then((data) => setTicks(data.results))
       .catch(() => {})
@@ -89,6 +105,14 @@ export default function PriceTicker({ latestTick }: PriceTickerProps) {
     }, 600)
     return () => clearTimeout(timer)
   }, [latestTick])
+
+  // F5 cross-link: when the page requests a symbol, switch to its stream tab and
+  // open its chart. Declared after the activeKey loader so it wins the selection.
+  useEffect(() => {
+    if (!focusSymbol) return
+    setActiveKey(focusSymbol.streamKey)
+    setSelectedSymbol(focusSymbol.symbol)
+  }, [focusSymbol])
 
   return (
     <div className="flex flex-col border-b border-app-border">
@@ -122,7 +146,7 @@ export default function PriceTicker({ latestTick }: PriceTickerProps) {
         </span>
       </div>
 
-      <div className="max-h-[200px] overflow-y-auto">
+      <div className="overflow-y-auto">
         {loading ? (
           <div className="min-h-[200px] px-3 py-3 text-[0.72rem] text-app-text-dim">
             {t.loading}
@@ -133,7 +157,19 @@ export default function PriceTicker({ latestTick }: PriceTickerProps) {
           </div>
         ) : (
           ticks.map((tk) => (
-            <PriceRow key={tk.id} tick={tk} flash={flashedSymbols.has(tk.symbol)} />
+            <div key={tk.id}>
+              <PriceRow
+                tick={tk}
+                flash={flashedSymbols.has(tk.symbol)}
+                selected={selectedSymbol === tk.symbol}
+                onClick={() => setSelectedSymbol((prev) => (prev === tk.symbol ? null : tk.symbol))}
+              />
+              {selectedSymbol === tk.symbol && (
+                <Suspense fallback={<div className="px-3 py-3 text-[0.72rem] text-app-text-dim">{t.loading}</div>}>
+                  <PriceChart symbol={tk.symbol} streamKey={tk.stream_key} />
+                </Suspense>
+              )}
+            </div>
           ))
         )}
       </div>

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,23 @@ logger = logging.getLogger(__name__)
 _MAX_CHARS = 1500
 
 
+def _enabled() -> bool:
+    """FinBERT is opt-out via FINBERT_ENABLED (default on).
+
+    Lets a lean deployment skip the ~500 MB model download + its memory/CPU cost
+    without removing transformers (still required by core sentence-transformers
+    clustering). When off, scores fall back to None and the pipeline degrades
+    gracefully — VADER remains the available sentiment signal.
+    """
+    return os.getenv('FINBERT_ENABLED', 'true').strip().lower() not in ('0', 'false', 'no')
+
+
 @functools.lru_cache(maxsize=1)
 def _pipeline():
-    """Lazily build the FinBERT pipeline. Returns None if transformers is missing."""
+    """Lazily build the FinBERT pipeline. Returns None if disabled or unavailable."""
+    if not _enabled():
+        logger.info('[finbert] FINBERT_ENABLED is off — FinBERT disabled')
+        return None
     try:
         from transformers import pipeline
     except ImportError:

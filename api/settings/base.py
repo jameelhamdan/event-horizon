@@ -224,21 +224,52 @@ CACHES = {
 
 TASK_QUEUE_ENABLED = config('TASK_QUEUE_ENABLED', default=False, cast=bool)
 
-# Master switch for the forecasting subsystem (LLM + v2 quant model). When false,
-# run/score/train forecast jobs are neither scheduled nor executed (they no-op).
-FORECASTING_ENABLED = config('FORECASTING_ENABLED', default=True, cast=bool)
+# ── Feature flags (A4) — let a deployment run a lean core without code changes. ──
+# Each gates both scheduling (setup_schedule) and the task function itself.
+NEWSLETTER_ENABLED = config('NEWSLETTER_ENABLED', default=True, cast=bool)
+STREAM_PRICES_ENABLED = config('STREAM_PRICES_ENABLED', default=True, cast=bool)
+STREAM_NOTAM_ENABLED = config('STREAM_NOTAM_ENABLED', default=True, cast=bool)
+STREAM_EARTHQUAKE_ENABLED = config('STREAM_EARTHQUAKE_ENABLED', default=True, cast=bool)
+STREAM_FOREX_ENABLED = config('STREAM_FOREX_ENABLED', default=True, cast=bool)
 
-# LLM backend — 'openrouter' (default) or 'ollama'
-LLM_BACKEND = config('LLM_BACKEND', default='openrouter')
+# ── DRF throttling (A3) — the public read API is exposed; rate-limit anon traffic.
+# Backed by the default cache (Redis, below). Tune the rate via env.
+REST_FRAMEWORK = {
+    'DEFAULT_THROTTLE_CLASSES': ['rest_framework.throttling.AnonRateThrottle'],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': config('API_THROTTLE_ANON', default='120/min'),
+    },
+}
 
-# OpenRouter (https://openrouter.ai) — used when LLM_BACKEND=openrouter
-# Comma-separated lists — multiple keys rotate round-robin; models tried in order on failure
+# ── LLM providers + routing ─────────────────────────────────────────────────────
+# Per-provider settings live in .env (below). Routing — which provider serves each
+# use-case — lives in LLM_ROUTES (a Python dict, edited in code, further below).
+# Available providers: openrouter, ollama, g4f.
+
+# OpenRouter (https://openrouter.ai) — comma-separated keys rotate round-robin
 OPENROUTER_API_KEYS = config('OPENROUTER_API_KEYS', default='')
 OPENROUTER_MODELS = config('OPENROUTER_MODELS', default='openrouter/free')
 
-# Ollama — used when LLM_BACKEND=ollama
-OLLAMA_BASE_URL = config('OLLAMA_BASE_URL', default='')   # e.g. http://my-server:11434
+# Ollama (self-hosted, no key)
+OLLAMA_BASE_URL = config('OLLAMA_BASE_URL', default='http://localhost:11434')
 OLLAMA_MODEL = config('OLLAMA_MODEL', default='qwen3:4b')
+
+# g4f / gpt4free (local proxy, registration-free) — run `g4f api`
+G4F_BASE_URL = config('G4F_BASE_URL', default='http://localhost:1337/v1')
+G4F_MODEL = config('G4F_MODEL', default='gpt-4o-mini')
+
+# Routing: role -> provider name OR ordered fallback list (tried in order on failure).
+# Unconfigured providers are skipped; unknown roles fall back to 'default'.
+LLM_ROUTES = {
+    # Default chain for every role/use-case. g4f leads — it's the headless, always-on
+    # Docker service (registration-free); then OpenRouter as fallback.
+    'default': ['g4f', 'openrouter'],
+
+    # Override per role if you want. Roles: analyzer, topics, newsletter,
+    # historical. e.g. lead the per-article analyzer with a local Ollama model for
+    # stronger Arabic/JSON quality:
+    #   'analyzer': ['ollama', 'g4f'],
+}
 
 # ── RQ / django-rq ────────────────────────────────────────────────────────────
 _REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')
@@ -250,7 +281,7 @@ RQ_QUEUES = {
         'URL': _REDIS_URL,
         'DEFAULT_TIMEOUT': _JOB_TIMEOUT,
     },
-    # Heavy queue — NLP / LLM tasks (processing, clustering, topic matching, forecasting)
+    # Heavy queue — NLP / LLM tasks (processing, clustering, topic matching)
     'heavy': {
         'URL': _REDIS_URL,
         'DEFAULT_TIMEOUT': _JOB_TIMEOUT,

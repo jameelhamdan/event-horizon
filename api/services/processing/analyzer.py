@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -18,70 +19,41 @@ _SUB_CATEGORIES: dict[str, set[str]] = {
     'general':   {'other'},
 }
 
-_SYSTEM_PROMPT = """\
-You are a news article analyzer. Extract structured information from the article and respond \
-with a single valid JSON object — no markdown, no explanation, just JSON.
-
-Schema:
+_OBJECT_SCHEMA = """\
 {
-  "category":     one of: conflict | disaster | economic | political | health | general,
-  "sub_category": sub-category slug for the chosen category (see list below), or null,
-  "country":      country name in English as a string, or null if not determinable,
-  "city":         city or region name in English as a string, or null if not determinable,
+  "category": conflict|disaster|economic|political|health|general,
+  "sub_category": sub-category slug for the chosen category (see guide) or null,
+  "country": English country name or null,
+  "city": English city/region name or null,
   "translations": {
-    "en": {
-      "title":   the article title translated to English (keep original if already English),
-      "summary": a 2-3 sentence factual summary in English,
-      "country": country name in English, or null,
-      "city":    city or region name in English, or null
-    },
-    "ar": {
-      "title":   the article title translated to Arabic,
-      "summary": a 2-3 sentence factual summary in Arabic,
-      "country": country name in Arabic, or null,
-      "city":    city or region name in Arabic, or null
-    }
+    "en": {"title": English title, "summary": 2-3 sentence factual English summary, "country": English country or null, "city": English city or null},
+    "ar": {"title": Arabic title, "summary": 2-3 sentence factual Arabic summary, "country": Arabic country or null, "city": Arabic city or null}
   }
-}
+}"""
 
-Category and sub-category definitions (two-level taxonomy — pick the best top-level,
-then the most specific sub-category):
+_CATEGORY_GUIDE = """\
+Pick the best top-level category, then the most specific sub-category:
+- conflict  [war|airstrike|insurgency|terrorism|border-clash|other]: any deliberate armed/military action — strikes, drones, shelling, clashes, terrorism. Country A attacking Country B is ALWAYS conflict, even with explosions, fires, or mass casualties.
+- disaster  [earthquake|flood|storm|wildfire|industrial-accident|other]: natural catastrophe OR a purely accidental industrial event (factory blast, spill, pipeline leak) with NO armed aggressor.
+- economic  [monetary-policy|energy|trade|tariffs|labor|markets|sanctions|other]: finance, central-bank/rate decisions, trade, tariffs, labor, markets, energy policy, sanctions.
+- political [election|legislation|diplomacy|leadership-change|protest-policy|other]: government decisions, summits, elections, legislation, leadership changes, coups, protests/strikes (use protest-policy).
+- health    [outbreak|pandemic|healthcare-system|other]: disease outbreaks, epidemics, public-health/healthcare news.
+- general   [other]: anything else, including ordinary crime not involving military actors.
 
-- conflict  [war | airstrike | insurgency | terrorism | border-clash | other]
-    Armed conflict, military attack, war, frontline operations, terrorism.
-    USE THIS whenever a deliberate armed or military action is involved — including missile
-    strikes, drone attacks, artillery shelling, airstrikes, cross-border attacks, clashes
-    between two nations or armed groups, or terrorist attacks — even if the outcome involves
-    explosions, fires, casualties, or mass destruction. An event where Country A attacks
-    Country B is ALWAYS conflict, never disaster.
+conflict vs disaster: caused by a deliberate armed/military action? YES → conflict (even if buildings burned or people died); NO → disaster."""
 
-- disaster  [earthquake | flood | storm | wildfire | industrial-accident | other]
-    Natural catastrophe (earthquake, flood, storm, wildfire) or a purely accidental
-    industrial/infrastructure event (factory explosion, chemical spill, pipeline leak)
-    where there is NO deliberate military or armed aggressor.
-    IMPORTANT: If an explosion, fire, or mass-casualty event was caused by a military
-    strike, bombing, or armed attack, use conflict — not disaster.
+_SYSTEM_PROMPT = (
+    'You are a news article analyzer. Respond with a single valid JSON object — '
+    'no markdown, no explanation, just JSON.\n\nSchema:\n'
+    + _OBJECT_SCHEMA + '\n\n' + _CATEGORY_GUIDE
+)
 
-- economic  [monetary-policy | energy | trade | tariffs | labor | markets | sanctions | other]
-    Finance, central-bank/interest-rate decisions, trade and tariffs, labor, markets,
-    energy policy, economic sanctions.
-
-- political [election | legislation | diplomacy | leadership-change | protest-policy | other]
-    Government decisions, diplomatic summits, elections, legislation, leadership changes,
-    coups, and protests/civil unrest (use protest-policy for demonstrations and strikes).
-
-- health    [outbreak | pandemic | healthcare-system | other]
-    Disease outbreaks, epidemics/pandemics, public-health and healthcare-system news.
-
-- general   [other]
-    Anything that does not clearly fit the above categories (including ordinary crime not
-    involving military actors).
-
-Decision rule — conflict vs disaster:
-  Ask: "Was this caused by a deliberate armed/military action?"
-  YES → conflict (even if buildings burned, people died, or infrastructure was destroyed)
-  NO  → disaster (natural event or purely accidental)\
-"""
+_BATCH_SYSTEM_PROMPT = (
+    'You are a news article analyzer. You will receive several numbered articles. '
+    'Respond with a JSON array of one object per article, IN THE SAME ORDER — '
+    'no markdown, no explanation, just the JSON array.\n\nEach object schema:\n'
+    + _OBJECT_SCHEMA + '\n\n' + _CATEGORY_GUIDE
+)
 
 
 @dataclass
@@ -181,16 +153,35 @@ class ArticleAnalyzer:
         # ArticleAnalysis(category='conflict', country='Ukraine', city='Kyiv', latitude=50.45, longitude=30.52)
     """
 
-    _MAX_CHARS = 2000
+    # Title + lead paragraph is enough for category/geo/summary; trimming the
+    # tail keeps input tokens down without hurting classification quality.
+    _MAX_CHARS = 1200
+    # Articles per LLM call in analyze_batch — amortizes the static system prompt
+    # across many articles (the dominant pipeline cost). Kept modest so the JSON
+    # array output stays well within the model's response window.
+    _BATCH_SIZE = 6
+    # Per-article output ceiling. Generous on purpose: a truncated JSON array
+    # fails the whole batch, and the Arabic summary is token-heavy. max_tokens is
+    # only a cap, so short responses cost nothing — we size to avoid truncation.
+    _OUTPUT_PER_ARTICLE = 480
+    _MAX_OUTPUT = 3400
 
     def __init__(self) -> None:
         from services.llm import get_llm_service
-        self._llm = get_llm_service()
+        self._llm = get_llm_service('analyzer')
+
+    @staticmethod
+    def _empty() -> ArticleAnalysis:
+        return ArticleAnalysis(
+            category='general', sub_category=None,
+            country=None, city=None,
+            latitude=None, longitude=None,
+            llm_data={}, translations={},
+        )
 
     def analyze(self, text: str) -> ArticleAnalysis:
         """
-        Analyze article text and return category + location.
-        Returns a zeroed-out ArticleAnalysis on any failure.
+        Analyze a single article. Returns a zeroed-out ArticleAnalysis on failure.
         """
         try:
             raw = self._llm.chat(
@@ -199,20 +190,65 @@ class ArticleAnalyzer:
                     {'role': 'user', 'content': text[: self._MAX_CHARS]},
                 ],
                 temperature=0,
+                max_tokens=self._OUTPUT_PER_ARTICLE + 220,
             )
-            return self._parse(raw)
+            return self._parse_obj(self._loads(raw))
         except Exception:
             logger.exception('ArticleAnalyzer.analyze failed')
-            return ArticleAnalysis(
-                category='general', sub_category=None,
-                country=None, city=None,
-                latitude=None, longitude=None,
-                llm_data={},
-                translations={},
-            )
+            return self._empty()
 
-    def _parse(self, raw: str) -> ArticleAnalysis:
-        data = json.loads(raw.strip())
+    def analyze_batch(self, texts: list[str]) -> list[ArticleAnalysis]:
+        """
+        Analyze many articles, chunked into single multi-article LLM calls.
+        Always returns one ArticleAnalysis per input text, in order; missing or
+        malformed entries degrade to a 'general' ArticleAnalysis.
+        """
+        results: list[ArticleAnalysis] = []
+        for start in range(0, len(texts), self._BATCH_SIZE):
+            results.extend(self._analyze_chunk(texts[start: start + self._BATCH_SIZE]))
+        return results
+
+    def _analyze_chunk(self, chunk: list[str]) -> list[ArticleAnalysis]:
+        user = '\n\n'.join(
+            f'[{i + 1}]\n{t[: self._MAX_CHARS]}' for i, t in enumerate(chunk)
+        )
+        try:
+            raw = self._llm.chat(
+                messages=[
+                    {'role': 'system', 'content': _BATCH_SYSTEM_PROMPT},
+                    {'role': 'user', 'content': user},
+                ],
+                temperature=0,
+                max_tokens=min(self._MAX_OUTPUT, self._OUTPUT_PER_ARTICLE * len(chunk) + 200),
+            )
+            objs = self._parse_array(raw)
+        except Exception:
+            logger.exception('ArticleAnalyzer.analyze_batch chunk failed')
+            objs = []
+        if len(objs) != len(chunk):
+            logger.warning(
+                'analyze_batch: expected %d objects, got %d', len(chunk), len(objs),
+            )
+        # Align strictly to input order; pad short responses with empties.
+        return [objs[i] if i < len(objs) else self._empty() for i in range(len(chunk))]
+
+    @staticmethod
+    def _loads(raw: str):
+        # Free/no-key models often wrap JSON in ```json fences — strip them first.
+        cleaned = re.sub(r'^```(?:json)?\s*', '', raw.strip())
+        cleaned = re.sub(r'\s*```$', '', cleaned)
+        return json.loads(cleaned)
+
+    def _parse_array(self, raw: str) -> list[ArticleAnalysis]:
+        data = self._loads(raw)
+        if isinstance(data, dict):
+            # Tolerate {"results": [...]} / {"articles": [...]} envelopes.
+            data = data.get('results') or data.get('articles') or []
+        if not isinstance(data, list):
+            return []
+        return [self._parse_obj(o) if isinstance(o, dict) else self._empty() for o in data]
+
+    def _parse_obj(self, data: dict) -> ArticleAnalysis:
         category = data.get('category', 'general')
         if category not in _CATEGORIES:
             category = 'general'

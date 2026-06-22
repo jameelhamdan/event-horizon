@@ -106,6 +106,7 @@ __pypackages__/
 
 # Environments
 .env*
+!.env.example
 .venv
 env/
 venv/

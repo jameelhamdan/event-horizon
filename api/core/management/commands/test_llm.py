@@ -6,9 +6,14 @@ from services.llm import get_llm_service
 
 
 class Command(BaseCommand):
-    help = 'Send one example request through the configured LLM backend and print the result.'
+    help = 'Send one example request through the LLM route for a role and print the result.'
 
     def add_arguments(self, parser):
+        parser.add_argument(
+            '--role',
+            default='default',
+            help='LLM route role to test (e.g. analyzer, topics, default).',
+        )
         parser.add_argument(
             '--prompt',
             default=(
@@ -21,8 +26,9 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        svc = get_llm_service()
-        self.stdout.write(f'Backend: {type(svc).__name__}  Model: {getattr(svc, "_model", "?")}')
+        svc = get_llm_service(options['role'])
+        self.stdout.write(f'Role: {options["role"]}')
+        self.stdout.write(f'Resolved: {type(svc).__name__}  Model/chain: {getattr(svc, "_model", "?")}')
         self.stdout.write(f'Prompt: {options["prompt"]}')
         start = time.time()
         out = svc.complete(options['prompt'])

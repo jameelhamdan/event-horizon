@@ -284,7 +284,7 @@ class RSSHistoricalService:
         )
         default = [5.0] * len(entries)
         try:
-            llm = get_llm_service()
+            llm = get_llm_service('historical')
             raw = llm.chat([{'role': 'user', 'content': prompt}])
             raw = re.sub(r'^```(?:json)?\s*', '', (raw or '').strip())
             raw = re.sub(r'\s*```$', '', raw)

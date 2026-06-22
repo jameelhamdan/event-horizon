@@ -99,6 +99,21 @@ class LLMTopicMatcher:
 
         results: dict[str, dict[str, float]] = {str(e.pk): {} for e in events}
 
+        # Pre-filter with the free keyword matcher: only escalate events that have
+        # at least one keyword candidate to the LLM. Events with zero keyword
+        # overlap almost never match semantically, so this skips a large fraction
+        # of LLM calls at no quality cost. Non-candidates keep their {} result.
+        keyword = TopicMatcher()
+        candidates = [e for e in events if keyword.match(e, topics)]
+        skipped = len(events) - len(candidates)
+        if skipped:
+            logger.info(
+                '[topics] pre-filter: %d/%d events have keyword candidates (%d skipped)',
+                len(candidates), len(events), skipped,
+            )
+        if not candidates:
+            return results
+
         # Build prompt fragments shared across all batches
         situation_lines = '\n'.join(
             f'- {t.slug}: {t.name}'
@@ -107,11 +122,11 @@ class LLMTopicMatcher:
         )
         valid_slugs = {t.slug for t in topics}
 
-        llm = get_llm_service()
-        total_batches = (len(events) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
+        llm = get_llm_service('topics')
+        total_batches = (len(candidates) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
 
-        for batch_start in range(0, len(events), self.BATCH_SIZE):
-            batch = events[batch_start: batch_start + self.BATCH_SIZE]
+        for batch_start in range(0, len(candidates), self.BATCH_SIZE):
+            batch = candidates[batch_start: batch_start + self.BATCH_SIZE]
             batch_num = batch_start // self.BATCH_SIZE + 1
             logger.info('[topics] LLM batch %d/%d (%d events)', batch_num, total_batches, len(batch))
 
@@ -133,7 +148,11 @@ class LLMTopicMatcher:
             )
 
             try:
-                response = llm.chat([{'role': 'user', 'content': prompt}]).strip()
+                response = llm.chat(
+                    [{'role': 'user', 'content': prompt}],
+                    temperature=0,
+                    max_tokens=min(1800, 80 * len(batch) + 200),
+                ).strip()
                 # Strip markdown code fences if present
                 response = re.sub(r'^```(?:json)?\s*', '', response)
                 response = re.sub(r'\s*```$', '', response)

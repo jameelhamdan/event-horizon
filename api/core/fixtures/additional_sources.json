@@ -54,19 +54,6 @@
   {
     "model": "core.source",
     "fields": {
-      "code": "the-hindu",
-      "type": "rss",
-      "name": "The Hindu",
-      "description": "News and analysis from India's The Hindu newspaper.",
-      "url": "https://www.thehindu.com/feeder/default.rss",
-      "author_slug": "",
-      "headers": {},
-      "is_enabled": true
-    }
-  },
-  {
-    "model": "core.source",
-    "fields": {
       "code": "japan-times",
       "type": "rss",
       "name": "Japan Times",

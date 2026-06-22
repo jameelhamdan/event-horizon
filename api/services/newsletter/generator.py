@@ -161,7 +161,7 @@ def generate_newsletter(date_str: str | None = None) -> str:
     )
 
     try:
-        llm = get_llm_service()
+        llm = get_llm_service('newsletter')
         raw = llm.chat([
             {'role': 'system', 'content': (
                 'You are a senior editor at a geopolitical intelligence newsletter. '

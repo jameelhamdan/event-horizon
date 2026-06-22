@@ -109,12 +109,19 @@ class NotamStream(BaseStream):
             logger.warning(f'[notam] fetch failed: {exc}')
             return []
 
+        # A2 schema validation: surface drift on this undocumented API loudly.
+        if not isinstance(data, list) and 'features' not in data:
+            logger.warning('[notam] response missing "features" — possible schema drift '
+                           '(keys=%s)', sorted(data)[:8] if isinstance(data, dict) else type(data).__name__)
         features = data if isinstance(data, list) else data.get('features', [])
         records = []
         for feature in features:
             normalized = _normalize(feature)
             if normalized:
                 records.append(normalized)
+        if features and not records:
+            logger.warning('[notam] %d features but none normalized — possible schema drift '
+                           '(property names changed)', len(features))
         return records
 
     def save(self, records: list[dict]) -> int:

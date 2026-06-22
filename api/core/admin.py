@@ -340,34 +340,3 @@ class StaticPointAdmin(admin.ModelAdmin):
         return self.readonly_fields
 
 
-@admin.register(models.Forecast)
-class ForecastAdmin(admin.ModelAdmin):
-    list_display = [
-        'symbol', 'stream_key', 'horizon_hours', 'magnitude_bucket', 'actual_bucket',
-        'volatility_bucket', 'actual_volatility_bucket', 'reliability', 'abstained',
-        'confidence', 'generated_at',
-    ]
-    list_filter = ['stream_key', 'horizon_hours', 'magnitude_bucket',
-                   'volatility_bucket', 'reliability', 'abstained', 'direction']
-    search_fields = ['symbol']
-    readonly_fields = [
-        'symbol', 'stream_key', 'generated_at', 'horizon_hours',
-        'direction', 'confidence', 'magnitude_bucket', 'actual_bucket',
-        'volatility_bucket', 'actual_volatility_bucket', 'reliability', 'abstained',
-        'model_name', 'reasoning', 'event_ids', 'feature_vector',
-        'actual_value', 'predicted_value',
-    ]
-
-    change_list_template = 'admin/core/forecast_metrics_changelist.html'
-
-    def changelist_view(self, request, extra_context=None):
-        """Surface the two-head evaluation report (plan §3c) above the changelist."""
-        from services.forecasting.metrics import evaluate_forecasts
-        extra_context = extra_context or {}
-        try:
-            extra_context['metrics_report'] = evaluate_forecasts()
-        except Exception as exc:  # never break the admin page on a metrics error
-            extra_context['metrics_error'] = str(exc)
-        return super().changelist_view(request, extra_context=extra_context)
-
-

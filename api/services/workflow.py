@@ -120,16 +120,21 @@ class Workflow:
             logger.exception('NLP pipeline failed')
             raise
 
-        processed = 0
-        for article in articles:
-            doc = ArticleDocument(
+        docs = [
+            ArticleDocument(
                 id=str(article.id),
                 title=article.title,
                 content=article.content,
                 source_code=article.source_code,
                 published_on=article.published_on.isoformat(),
             )
-            features = cleaner.clean(doc)
+            for article in articles
+        ]
+        # Batch the NLP + LLM analysis (one multi-article LLM call per chunk).
+        feature_list = cleaner.clean_batch(docs)
+
+        processed = 0
+        for article, features in zip(articles, feature_list):
             article.entities = features.entities
             article.sentiment = features.sentiment
             article.finbert_sentiment = features.finbert_sentiment
@@ -527,7 +532,7 @@ class Workflow:
             return topics
 
         try:
-            llm = get_llm_service()
+            llm = get_llm_service('topics')
         except Exception as exc:
             logger.warning('[topics] LLM enrichment skipped (no LLM service): %s', exc)
             return topics
@@ -781,7 +786,7 @@ class Workflow:
         from services.tasks import retroactive_tag_topic_task
 
         valid_categories = {c.value for c in EventCategory}
-        llm = get_llm_service()
+        llm = get_llm_service('topics')
         created_count = 0
 
         for (category, country), events in candidates:

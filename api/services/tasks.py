@@ -64,68 +64,80 @@ def discover_topics_task(hours: int = 6) -> int:
 # ── Stream tasks ───────────────────────────────────────────────────────────────
 
 def fetch_prices_task() -> int:
+    from django.conf import settings
+    if not settings.STREAM_PRICES_ENABLED:
+        return 0
     from services.streams import run_stream
     return run_stream('prices')
 
 
 def fetch_notams_task() -> int:
+    from django.conf import settings
+    if not settings.STREAM_NOTAM_ENABLED:
+        return 0
     from services.streams import run_stream
     return run_stream('notam')
 
 
 def fetch_earthquakes_task() -> int:
+    from django.conf import settings
+    if not settings.STREAM_EARTHQUAKE_ENABLED:
+        return 0
     from services.streams import run_stream
     return run_stream('earthquakes')
 
 
 def fetch_forex_task() -> int:
+    from django.conf import settings
+    if not settings.STREAM_FOREX_ENABLED:
+        return 0
     from services.streams import run_stream
     return run_stream('forex')
 
 
-# ── Forecasting tasks ──────────────────────────────────────────────────────────
-# All three entrypoints short-circuit when the subsystem is switched off via
-# FORECASTING_ENABLED, so manual/admin triggers honour the flag too — not just the
-# scheduler. The gate lives in services.forecasting (single source of truth).
+# ── Health monitoring (A1 / A5) ─────────────────────────────────────────────────
 
-def run_forecast_task() -> int:
-    from services.forecasting import is_enabled
-    if not is_enabled():
-        return 0
-    from services.forecasting.service import run_forecasts
-    return run_forecasts()
+def pipeline_health_task() -> dict:
+    """Warn when pipeline outputs go stale. Logs only — surfaced via Sentry / log alerts.
 
-
-def score_forecasts_task() -> int:
-    from services.forecasting import is_enabled
-    if not is_enabled():
-        return 0
-    from services.forecasting.service import score_forecasts
-    return score_forecasts()
-
-
-def train_forecaster_task() -> dict:
-    """Train the v2 quantitative classifier per (symbol, horizon). Heavy queue.
-
-    Degrades gracefully — returns an error marker if lightgbm/numpy are absent so
-    the v1 LLM remains the operative predictor.
+    Covers the highest-risk silent failures (A1): no fetched articles, stale stream
+    data on undocumented APIs, and — the single-source topic risk (A5) — zero current
+    topics, which means the Wikipedia scraper has likely broken.
     """
-    from services.forecasting import is_enabled
-    if not is_enabled():
-        return {'disabled': True}
-    from services.forecasting.model import train
-    from services.forecasting.service import DEFAULT_SYMBOLS, _horizons_for
+    import logging
+    from django.conf import settings
+    from core import models as core_models
 
-    results: dict = {}
-    for symbol, stream_key in DEFAULT_SYMBOLS:
-        for _label, hours in _horizons_for(stream_key):
-            try:
-                results[f'{symbol}|{hours}h'] = train(symbol, hours)
-            except RuntimeError as exc:
-                return {'error': str(exc)}
-            except Exception as exc:  # noqa: BLE001
-                results[f'{symbol}|{hours}h'] = {'error': str(exc)}
-    return results
+    log = logging.getLogger('pipeline.health')
+    now = datetime.now(dt_timezone.utc)
+    report: dict = {}
+
+    def _aware(dt):
+        return dt.replace(tzinfo=dt_timezone.utc) if dt and dt.tzinfo is None else dt
+
+    def _check_stale(model, field, minutes, label):
+        latest = _aware(model.objects.order_by(f'-{field}').values_list(field, flat=True).first())
+        ok = latest is not None and latest >= now - timedelta(minutes=minutes)
+        report[label] = {'latest': latest.isoformat() if latest else None, 'ok': ok}
+        if not ok:
+            log.warning('[health] %s stale — latest=%s (threshold=%dm)', label, latest, minutes)
+
+    _check_stale(core_models.Article, 'created_on',
+                 int(os.getenv('HEALTH_ARTICLE_STALE_MIN', '180')), 'articles')
+    if settings.STREAM_PRICES_ENABLED:
+        _check_stale(core_models.PriceTick, 'occurred_at',
+                     int(os.getenv('HEALTH_PRICE_STALE_MIN', '60')), 'prices')
+    if settings.STREAM_EARTHQUAKE_ENABLED:
+        _check_stale(core_models.EarthquakeRecord, 'occurred_at',
+                     int(os.getenv('HEALTH_QUAKE_STALE_MIN', '360')), 'earthquakes')
+
+    # A5: Wikipedia is the only topic source — zero current topics ⇒ likely broken.
+    current_topics = core_models.Topic.objects.filter(is_current=True).count()
+    report['current_topics'] = current_topics
+    if current_topics == 0:
+        log.warning('[health] zero current topics — the Wikipedia topic source may be broken')
+
+    return report
 
 
 # ── Backfill tasks ─────────────────────────────────────────────────────────────

@@ -62,19 +62,26 @@ def _yahoo_quote(symbol: str) -> dict | None:
         resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
+        # A2 schema validation: log drift loudly rather than silently skipping, so a
+        # format change on this undocumented API is noticed instead of going dark.
         result = data.get('chart', {}).get('result', [])
         if not result:
+            err = (data.get('chart') or {}).get('error')
+            logger.warning('[prices] Yahoo %s: no result (drift or error: %s)', symbol, err)
             return None
         meta = result[0].get('meta', {})
+        price = meta.get('regularMarketPrice')
+        prev = meta.get('previousClose')
+        if price is None and prev is None:
+            logger.warning('[prices] Yahoo %s: meta missing price fields — possible schema '
+                           'drift (keys=%s)', symbol, sorted(meta)[:12])
+            return None
         return {
             'symbol': symbol,
             'stream_key': YAHOO_STREAM_KEY.get(symbol, 'stock'),
             'name': YAHOO_NAMES.get(symbol, symbol),
-            'value': meta.get('regularMarketPrice') or meta.get('previousClose'),
-            'change_pct': _safe_change_pct(
-                meta.get('regularMarketPrice'),
-                meta.get('previousClose'),
-            ),
+            'value': price or prev,
+            'change_pct': _safe_change_pct(price, prev),
             'volume': meta.get('regularMarketVolume'),
             'occurred_at': dj_timezone.now(),
         }
@@ -122,6 +129,10 @@ def _coingecko_quotes() -> list[dict]:
             'volume': coin.get('usd_24h_vol'),
             'occurred_at': now,
         })
+    # A2: a non-empty response that yields no known coins signals schema drift.
+    if data and not records:
+        logger.warning('[prices] CoinGecko returned data but no recognized coins — '
+                       'possible schema drift (keys=%s)', sorted(data)[:8])
     return records
 
 

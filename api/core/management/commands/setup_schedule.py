@@ -7,7 +7,7 @@ re-running is idempotent.
 Queues
 ------
 default  — light I/O tasks (fetchers, stream collectors)
-heavy    — NLP / LLM tasks (processing, clustering, topic matching, forecasting)
+heavy    — NLP / LLM tasks (processing, clustering, topic matching)
            Heavy task intervals default to 5x the equivalent light interval.
 """
 
@@ -15,10 +15,9 @@ import os
 from datetime import datetime, timezone
 
 import django_rq
+from django.conf import settings
 from django.core.management.base import BaseCommand
 from rq_scheduler import Scheduler
-
-from services.forecasting import is_enabled as forecasting_enabled
 
 
 def _minutes(env_var: str, default: str) -> int:
@@ -43,12 +42,10 @@ class Command(BaseCommand):
             fetch_forex_task,
             fetch_notams_task,
             fetch_prices_task,
+            pipeline_health_task,
             process_articles_task,
             refresh_topics_task,
-            run_forecast_task,
-            score_forecasts_task,
             tag_topics_task,
-            train_forecaster_task,
         )
 
         conn = django_rq.get_connection('default')
@@ -75,44 +72,40 @@ class Command(BaseCommand):
         forex_interval = _minutes('FOREX_FETCH_INTERVAL_MINUTES', '15')
 
         light.schedule(now, fetch_articles_task,    interval=fetch_interval, repeat=None, timeout=_interval_timeout(fetch_interval))
-        light.schedule(now, fetch_prices_task,      interval=price_interval, repeat=None, timeout=_interval_timeout(price_interval))
-        light.schedule(now, fetch_notams_task,      interval=notam_interval, repeat=None, timeout=_interval_timeout(notam_interval))
-        light.schedule(now, fetch_earthquakes_task, interval=quake_interval, repeat=None, timeout=_interval_timeout(quake_interval))
-        light.schedule(now, fetch_forex_task,       interval=forex_interval, repeat=None, timeout=_interval_timeout(forex_interval))
+        # Stream collectors — each gated by its A4 feature flag.
+        if settings.STREAM_PRICES_ENABLED:
+            light.schedule(now, fetch_prices_task,      interval=price_interval, repeat=None, timeout=_interval_timeout(price_interval))
+        if settings.STREAM_NOTAM_ENABLED:
+            light.schedule(now, fetch_notams_task,      interval=notam_interval, repeat=None, timeout=_interval_timeout(notam_interval))
+        if settings.STREAM_EARTHQUAKE_ENABLED:
+            light.schedule(now, fetch_earthquakes_task, interval=quake_interval, repeat=None, timeout=_interval_timeout(quake_interval))
+        if settings.STREAM_FOREX_ENABLED:
+            light.schedule(now, fetch_forex_task,       interval=forex_interval, repeat=None, timeout=_interval_timeout(forex_interval))
+        # Pipeline health monitor (A1/A5) — logs warnings on stale outputs.
+        health_interval = _minutes('HEALTH_CHECK_INTERVAL_MINUTES', '30')
+        light.schedule(now, pipeline_health_task, interval=health_interval, repeat=None, timeout=_interval_timeout(health_interval))
 
         # ── Heavy queue — NLP / LLM (defaults are 5x the base interval) ───────
         process_interval  = _minutes('PROCESS_INTERVAL_MINUTES', '60')
         aggregate_interval = _minutes('AGGREGATE_INTERVAL_MINUTES', '60')
         tag_interval      = _minutes('TAG_TOPICS_INTERVAL_MINUTES', '75')
         discover_interval = _minutes('DISCOVER_TOPICS_INTERVAL_MINUTES', '150')
-        forecast_interval = _minutes('FORECAST_INTERVAL_MINUTES', '300')
-        score_interval    = _minutes('FORECAST_SCORE_INTERVAL_MINUTES', '300')
-
-        forecasting_on = forecasting_enabled()
 
         heavy.schedule(now, process_articles_task,  interval=process_interval,   repeat=None, timeout=_interval_timeout(process_interval))
         heavy.schedule(now, aggregate_events_task,  interval=aggregate_interval, repeat=None, timeout=_interval_timeout(aggregate_interval))
         heavy.schedule(now, tag_topics_task,        interval=tag_interval,       repeat=None, timeout=_interval_timeout(tag_interval))
         heavy.schedule(now, discover_topics_task,   interval=discover_interval,  repeat=None, timeout=_interval_timeout(discover_interval))
-        # Forecasting (run + score) — skipped entirely when FORECASTING_ENABLED is off.
-        if forecasting_on:
-            heavy.schedule(now, run_forecast_task,    interval=forecast_interval, repeat=None, timeout=_interval_timeout(forecast_interval))
-            heavy.schedule(now, score_forecasts_task, interval=score_interval,    repeat=None, timeout=_interval_timeout(score_interval))
 
         # ── Cron jobs (heavy — daily LLM runs) ────────────────────────────────
         refresh_hour    = int(os.getenv('TOPICS_REFRESH_HOUR', '4'))
         newsletter_hour = int(os.getenv('NEWSLETTER_GENERATE_HOUR', '6'))
-        train_hour      = int(os.getenv('FORECAST_TRAIN_HOUR', '3'))
         heavy.cron(f'0 {refresh_hour} * * *',    refresh_topics_task,      repeat=None, timeout=cron_timeout)
-        heavy.cron(f'0 {newsletter_hour} * * *', generate_newsletter_task, repeat=None, timeout=cron_timeout)
-        # v2 retrain — daily; no-op if lightgbm/numpy unavailable. Skipped when off.
-        if forecasting_on:
-            heavy.cron(f'0 {train_hour} * * *',  train_forecaster_task,    repeat=None, timeout=cron_timeout)
+        if settings.NEWSLETTER_ENABLED:
+            heavy.cron(f'0 {newsletter_hour} * * *', generate_newsletter_task, repeat=None, timeout=cron_timeout)
 
-        # rq-scheduler keeps a single shared job registry (not split per queue), so
-        # report the total actually registered — robust to the forecasting toggle.
+        # rq-scheduler keeps a single shared job registry (not split per queue),
+        # so report the total actually registered.
         total = sum(1 for _ in heavy.get_jobs())
-        note = '' if forecasting_on else ' (forecasting disabled)'
         self.stdout.write(self.style.SUCCESS(
-            f'Schedule registered: {total} scheduled job(s).{note}'
+            f'Schedule registered: {total} scheduled job(s).'
         ))

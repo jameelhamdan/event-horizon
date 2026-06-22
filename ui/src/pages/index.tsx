@@ -11,7 +11,9 @@ import { categoryColor, categoryShapeComponent } from "@/components/category";
 import { useLanguage } from "../contexts/LanguageContext";
 import { categoryLabel } from "../i18n/categories";
 import { fetchTopics } from "../api/topics";
-import type { EventSummary, EventFilters, Topic } from "../types";
+import TopicHistory from "../components/topics/TopicHistory";
+import type { EventSummary, EventFilters, Topic, StreamKey } from "../types";
+import { symbolStreamKey } from "../lib/symbols";
 import { cn } from "@/lib/utils";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
 
@@ -59,6 +61,9 @@ export default function IndexPage() {
   const [isMobile, setIsMobile] = useState(false);
   const [mobileTab, setMobileTab] = useState<"map" | "list">("map");
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarTab, setSidebarTab] = useState<"events" | "markets" | "forecasts">("events");
+  const [forecastCount, setForecastCount] = useState(0);
+  const [focusSymbol, setFocusSymbol] = useState<{ symbol: string; streamKey: StreamKey } | null>(null);
 
   const [showNotams, setShowNotams] = useState(true);
   const [showEarthquakes, setShowEarthquakes] = useState(true);
@@ -112,6 +117,19 @@ export default function IndexPage() {
     setActiveTopic((prev) => (prev === slug ? null : slug));
   }
 
+  // F5 cross-link: clicking an event's affected-indicator chip opens that symbol's
+  // chart in the Markets tab.
+  function handleSymbolClick(symbol: string) {
+    const sk = symbolStreamKey(symbol);
+    if (!sk) return;
+    setFocusSymbol({ symbol, streamKey: sk });
+    setSidebarTab("markets");
+    if (isMobile) {
+      setMobileTab("list");
+      setSidebarOpen(true);
+    }
+  }
+
   useEffect(() => setMounted(true), []);
 
   useEffect(() => {
@@ -157,8 +175,23 @@ export default function IndexPage() {
     setQuickFilter("");
   }
 
+  // Date-range picker (F4): sets an explicit start/end ISO bound and clears the
+  // relative quick filter so the two controls don't fight each other.
+  function setDateBound(which: "start" | "end", value: string) {
+    setQuickFilter("");
+    setFilters((f) => {
+      if (!value) return { ...f, [which]: "" };
+      const iso =
+        which === "start"
+          ? new Date(value + "T00:00:00").toISOString()
+          : new Date(value + "T23:59:59").toISOString();
+      return { ...f, [which]: iso };
+    });
+  }
+
   function handleSelectEvent(id: string) {
     setSelectedId(id);
+    setSidebarTab("events");
     if (isMobile) {
       setMobileTab("list");
       setSidebarOpen(true);
@@ -202,6 +235,32 @@ export default function IndexPage() {
               <button
                 onClick={clearQuickFilter}
                 title={t.clearTimeFilter}
+                className="shrink-0 cursor-pointer rounded border-none bg-transparent px-[0.25rem] py-[0.1rem] text-[0.7rem] leading-none text-app-text-ghost"
+              >
+                ✕
+              </button>
+            )}
+            <div className="mx-1 h-[16px] w-px shrink-0 bg-app-border" />
+            <input
+              type="date"
+              aria-label={t.dateFrom}
+              title={t.dateFrom}
+              value={filters.start ? filters.start.slice(0, 10) : ""}
+              onChange={(e) => setDateBound("start", e.target.value)}
+              className="shrink-0 rounded border border-app-border bg-transparent px-1 py-[0.1rem] text-[0.68rem] text-app-text-muted [color-scheme:dark]"
+            />
+            <input
+              type="date"
+              aria-label={t.dateTo}
+              title={t.dateTo}
+              value={filters.end ? filters.end.slice(0, 10) : ""}
+              onChange={(e) => setDateBound("end", e.target.value)}
+              className="shrink-0 rounded border border-app-border bg-transparent px-1 py-[0.1rem] text-[0.68rem] text-app-text-muted [color-scheme:dark]"
+            />
+            {(filters.start || filters.end) && (
+              <button
+                onClick={() => setFilters((f) => ({ ...f, start: "", end: "" }))}
+                title={t.clearDateRange}
                 className="shrink-0 cursor-pointer rounded border-none bg-transparent px-[0.25rem] py-[0.1rem] text-[0.7rem] leading-none text-app-text-ghost"
               >
                 ✕
@@ -314,15 +373,58 @@ export default function IndexPage() {
 
         <section
           className={cn(
-            "flex min-w-0 flex-col overflow-y-auto bg-app-panel",
+            "flex min-w-0 flex-col overflow-hidden bg-app-panel",
             isMobile
               ? cn("absolute inset-0 z-[500]", !sidebarOpen && "hidden")
               : "flex-[0_0_380px] border-l border-app-border",
           )}
         >
-          <PriceTicker latestTick={latestPriceTick} />
-          <ForecastPanel />
-          <EventList events={events} selectedId={selectedId} onSelectEvent={handleSelectEvent} onTopicClick={handleTopicClick} activeTopic={activeTopic} />
+          {/* Sidebar tabs (F1) — surface Markets / Forecasts / Events */}
+          <div className="flex shrink-0 border-b border-app-border bg-app-surface">
+            {([
+              { key: "events", label: t.tabEvents, badge: 0 },
+              { key: "markets", label: t.tabMarkets, badge: 0 },
+              { key: "forecasts", label: t.tabForecasts, badge: forecastCount },
+            ] as const).map((tab) => {
+              const active = sidebarTab === tab.key;
+              return (
+                <button
+                  key={tab.key}
+                  onClick={() => setSidebarTab(tab.key)}
+                  className={cn(
+                    "flex flex-1 cursor-pointer items-center justify-center gap-1.5 border-none bg-transparent px-2 py-2 text-[0.72rem] font-medium transition-colors duration-[120ms]",
+                    active ? "text-app-accent-blue" : "text-app-text-muted",
+                  )}
+                  style={active ? { boxShadow: "inset 0 -2px 0 0 var(--app-accent-blue)" } : undefined}
+                >
+                  {tab.label}
+                  {tab.badge > 0 && (
+                    <span
+                      className="rounded-full px-1.5 text-[0.6rem] leading-[1.4] text-app-accent-blue"
+                      style={{ background: "rgba(124,158,248,0.18)" }}
+                    >
+                      {tab.badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* All three stay mounted (CSS-toggled) so SSE prices + forecast count
+              persist across tab switches without refetching. */}
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className={cn(sidebarTab !== "markets" && "hidden")}>
+              <PriceTicker latestTick={latestPriceTick} focusSymbol={focusSymbol} />
+            </div>
+            <div className={cn(sidebarTab !== "forecasts" && "hidden")}>
+              <ForecastPanel embedded onCount={setForecastCount} />
+            </div>
+            <div className={cn(sidebarTab !== "events" && "hidden")}>
+              <TopicHistory onTopicClick={handleTopicClick} activeTopic={activeTopic} />
+              <EventList events={events} selectedId={selectedId} onSelectEvent={handleSelectEvent} onTopicClick={handleTopicClick} onSymbolClick={handleSymbolClick} activeTopic={activeTopic} />
+            </div>
+          </div>
         </section>
       </main>
 

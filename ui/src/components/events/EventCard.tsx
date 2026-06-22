@@ -15,10 +15,11 @@ interface EventCardProps {
   selected: boolean
   onSelect: (id: string) => void
   onTopicClick?: (slug: string) => void
+  onSymbolClick?: (symbol: string) => void
   activeTopic?: string | null
 }
 
-export default function EventCard({ event, selected, onSelect, onTopicClick, activeTopic }: EventCardProps) {
+export default function EventCard({ event, selected, onSelect, onTopicClick, onSymbolClick, activeTopic }: EventCardProps) {
   const { lang, t } = useLanguage()
   const pick = useLocalizedField()
   const [articles, setArticles] = useState<Article[] | null>(null)
@@ -59,7 +60,13 @@ export default function EventCard({ event, selected, onSelect, onTopicClick, act
             </span>
           ))}
         </div>
-        <span className="text-[0.75rem] text-app-text-ghost">
+        <span
+          className="cursor-help text-[0.75rem] text-app-text-ghost"
+          title={new Date(event.started_at).toLocaleString(lang === "ar" ? "ar" : "en", {
+            dateStyle: "medium",
+            timeStyle: "short",
+          })}
+        >
           {timeAgo(event.started_at, lang)}
         </span>
       </div>
@@ -111,10 +118,17 @@ export default function EventCard({ event, selected, onSelect, onTopicClick, act
             .map((ind) => {
               const positive = ind.weight >= 0
               return (
-                <span
+                <button
                   key={ind.symbol}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onSymbolClick?.(ind.symbol)
+                  }}
                   title={`${ind.symbol}: ${ind.weight.toFixed(2)}`}
-                  className="rounded border px-[0.4rem] py-[0.05rem] font-mono text-[0.64rem] leading-[1.4]"
+                  className={cn(
+                    "rounded border px-[0.4rem] py-[0.05rem] font-mono text-[0.64rem] leading-[1.4]",
+                    onSymbolClick && "cursor-pointer",
+                  )}
                   style={{
                     color: positive ? "#52c8a0" : "#e05252",
                     borderColor: positive ? "#2a4a3e" : "#4a2a2e",
@@ -122,7 +136,7 @@ export default function EventCard({ event, selected, onSelect, onTopicClick, act
                   }}
                 >
                   {ind.symbol} {positive ? "+" : ""}{ind.weight.toFixed(2)}
-                </span>
+                </button>
               )
             })}
         </div>
