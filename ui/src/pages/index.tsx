@@ -2,18 +2,16 @@
 
 import { useState, useEffect, useCallback, lazy, Suspense } from "react";
 import EventList from "../components/events/EventList";
-import PriceTicker from "../components/events/PriceTicker";
-import ForecastPanel from "../components/events/ForecastPanel";
 import { fetchEvents } from "../api/events";
 import { useSSE } from "../hooks/useSSE";
+import { useNavigate } from "react-router-dom";
 import { SiteHeader } from "../components/layout";
 import { categoryColor, categoryShapeComponent } from "@/components/category";
 import { useLanguage } from "../contexts/LanguageContext";
 import { categoryLabel } from "../i18n/categories";
 import { fetchTopics } from "../api/topics";
 import TopicHistory from "../components/topics/TopicHistory";
-import type { EventSummary, EventFilters, Topic, StreamKey } from "../types";
-import { symbolStreamKey } from "../lib/symbols";
+import type { EventSummary, EventFilters, Topic } from "../types";
 import { cn } from "@/lib/utils";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
 
@@ -48,6 +46,7 @@ type QuickFilter = (typeof QUICK_FILTERS)[number]["value"] | "";
 
 export default function IndexPage() {
   const { lang, t } = useLanguage();
+  const navigate = useNavigate();
   useDocumentTitle();
 
   const [events, setEvents] = useState<EventSummary[]>([]);
@@ -61,20 +60,11 @@ export default function IndexPage() {
   const [isMobile, setIsMobile] = useState(false);
   const [mobileTab, setMobileTab] = useState<"map" | "list">("map");
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sidebarTab, setSidebarTab] = useState<"events" | "markets" | "forecasts">("events");
-  const [forecastCount, setForecastCount] = useState(0);
-  const [focusSymbol, setFocusSymbol] = useState<{ symbol: string; streamKey: StreamKey } | null>(null);
 
   const [showNotams, setShowNotams] = useState(true);
   const [showEarthquakes, setShowEarthquakes] = useState(true);
   const [showStaticPoints, setShowStaticPoints] = useState(true);
   const [streamRefresh, setStreamRefresh] = useState(0);
-  const [latestPriceTick, setLatestPriceTick] = useState<{
-    symbol: string;
-    value: number;
-    change_pct: number | null;
-    occurred_at: string;
-  } | null>(null);
 
   const overlayState = { notams: showNotams, earthquakes: showEarthquakes, staticPoints: showStaticPoints };
   const overlaySetters = {
@@ -87,14 +77,6 @@ export default function IndexPage() {
   useSSE((event) => {
     if (event.type === "notam_update" || event.type === "earthquake_update") {
       setStreamRefresh((n) => n + 1);
-    }
-    if (event.type === "price_tick") {
-      setLatestPriceTick({
-        symbol: event.symbol as string,
-        value: event.value as number,
-        change_pct: event.change_pct as number | null,
-        occurred_at: event.occurred_at as string,
-      });
     }
   });
 
@@ -117,17 +99,10 @@ export default function IndexPage() {
     setActiveTopic((prev) => (prev === slug ? null : slug));
   }
 
-  // F5 cross-link: clicking an event's affected-indicator chip opens that symbol's
-  // chart in the Markets tab.
+  // Cross-link: clicking an event's affected-indicator chip opens the Markets page
+  // focused on that symbol.
   function handleSymbolClick(symbol: string) {
-    const sk = symbolStreamKey(symbol);
-    if (!sk) return;
-    setFocusSymbol({ symbol, streamKey: sk });
-    setSidebarTab("markets");
-    if (isMobile) {
-      setMobileTab("list");
-      setSidebarOpen(true);
-    }
+    navigate(`/markets?symbol=${encodeURIComponent(symbol)}`);
   }
 
   useEffect(() => setMounted(true), []);
@@ -191,7 +166,6 @@ export default function IndexPage() {
 
   function handleSelectEvent(id: string) {
     setSelectedId(id);
-    setSidebarTab("events");
     if (isMobile) {
       setMobileTab("list");
       setSidebarOpen(true);
@@ -379,51 +353,10 @@ export default function IndexPage() {
               : "flex-[0_0_380px] border-l border-app-border",
           )}
         >
-          {/* Sidebar tabs (F1) — surface Markets / Forecasts / Events */}
-          <div className="flex shrink-0 border-b border-app-border bg-app-surface">
-            {([
-              { key: "events", label: t.tabEvents, badge: 0 },
-              { key: "markets", label: t.tabMarkets, badge: 0 },
-              { key: "forecasts", label: t.tabForecasts, badge: forecastCount },
-            ] as const).map((tab) => {
-              const active = sidebarTab === tab.key;
-              return (
-                <button
-                  key={tab.key}
-                  onClick={() => setSidebarTab(tab.key)}
-                  className={cn(
-                    "flex flex-1 cursor-pointer items-center justify-center gap-1.5 border-none bg-transparent px-2 py-2 text-[0.72rem] font-medium transition-colors duration-[120ms]",
-                    active ? "text-app-accent-blue" : "text-app-text-muted",
-                  )}
-                  style={active ? { boxShadow: "inset 0 -2px 0 0 var(--app-accent-blue)" } : undefined}
-                >
-                  {tab.label}
-                  {tab.badge > 0 && (
-                    <span
-                      className="rounded-full px-1.5 text-[0.6rem] leading-[1.4] text-app-accent-blue"
-                      style={{ background: "rgba(124,158,248,0.18)" }}
-                    >
-                      {tab.badge}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* All three stay mounted (CSS-toggled) so SSE prices + forecast count
-              persist across tab switches without refetching. */}
+          {/* Events list — markets & forecasts now live on the dedicated /markets page */}
           <div className="min-h-0 flex-1 overflow-y-auto">
-            <div className={cn(sidebarTab !== "markets" && "hidden")}>
-              <PriceTicker latestTick={latestPriceTick} focusSymbol={focusSymbol} />
-            </div>
-            <div className={cn(sidebarTab !== "forecasts" && "hidden")}>
-              <ForecastPanel embedded onCount={setForecastCount} />
-            </div>
-            <div className={cn(sidebarTab !== "events" && "hidden")}>
-              <TopicHistory onTopicClick={handleTopicClick} activeTopic={activeTopic} />
-              <EventList events={events} selectedId={selectedId} onSelectEvent={handleSelectEvent} onTopicClick={handleTopicClick} onSymbolClick={handleSymbolClick} activeTopic={activeTopic} />
-            </div>
+            <TopicHistory onTopicClick={handleTopicClick} activeTopic={activeTopic} />
+            <EventList events={events} selectedId={selectedId} onSelectEvent={handleSelectEvent} onTopicClick={handleTopicClick} onSymbolClick={handleSymbolClick} activeTopic={activeTopic} />
           </div>
         </section>
       </main>
@@ -446,6 +379,10 @@ export default function IndexPage() {
               </button>
             );
           })}
+          <a href="/markets" className="mobile-nav-link">
+            <span className="text-[1.05rem] leading-none">$</span>
+            {t.navMarkets}
+          </a>
           <a href="/newsletter" className="mobile-nav-link">
             <span className="text-[1.05rem] leading-none">✉</span>
             {t.briefingsTab}

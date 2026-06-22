@@ -142,7 +142,8 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   ├── src/
 │   │   ├── main.tsx        # App entry — BrowserRouter + all Routes + LanguageProvider
 │   │   ├── pages/
-│   │   │   ├── index.tsx           # Main map page — activeTopic state, all overlays
+│   │   │   ├── index.tsx           # Main map page — activeTopic state, all overlays; sidebar = events list only
+│   │   │   ├── markets.tsx         # Markets & Forecasts page — PriceTicker + ForecastPanel + EventsHeatmap
 │   │   │   ├── about.tsx           # About page
 │   │   │   ├── privacy.tsx         # Privacy policy
 │   │   │   ├── terms.tsx           # Terms of service
@@ -185,6 +186,8 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │   │   │   └── PriceTicker.tsx     # Real-time SSE price table
 │   │   │   ├── topics/
 │   │   │   │   └── TopicsPanel.tsx     # Active topics pill list, category colors
+│   │   │   ├── markets/
+│   │   │   │   └── EventsHeatmap.tsx   # weighted event→symbol heatmap + most-impacted bars
 │   │   │   └── layers/
 │   │   │       ├── NotamOverlay.tsx    # GeoJSON NOTAM zones with hover tooltips
 │   │   │       └── EarthquakeLayer.tsx # USGS earthquake markers (magnitude circles)
@@ -219,7 +222,7 @@ This is a real-time global event intelligence platform. Key feature areas:
 | **Real-time SSE** | Redis pub/sub → Server-Sent Events → PriceTicker + NOTAM/earthquake notifications |
 | **Dual-language UI** | English + Arabic translations (LLM-generated at process time; toggled via LanguageContext) |
 | **Two-queue workers** | `default` queue (light I/O: fetch, prices, notam, earthquakes, forex) + `heavy` queue (NLP/LLM: process, aggregate, tag) |
-| **Admin pipeline panel** | Custom Django admin actions for manual pipeline triggers (fetch/process/aggregate/run-all) |
+| **Admin pipeline panel** | Article admin: a single **"Run full pipeline → Events"** button runs `run_pipeline_task` (fetch→process→aggregate→tag) as one ordered job, plus individual step buttons |
 
 ---
 
@@ -392,7 +395,7 @@ LightGBM **classifier (calibrated P(up)) + regressor (magnitude)** per horizon (
 - **Tasks:** `backfill_prices_task`, `route_events_task`, `train_forecast_model_task`, `run_forecast_task`, `score_forecasts_task` (all in `services/tasks.py`, scheduled in `setup_schedule.py`, gated by `FORECAST_ENABLED`).
 - **Commands:** `backfill_prices`, `route_events`, `train_forecast`, `run_forecast`, `evaluate_forecast`, `forecast_e2e` (full-flow runner).
 - **API:** model-backed `ForecastSerializer`; `GET /api/forecasts/` + `/latest/` (param `horizon`), `/api/forecasts/accuracy/`, `/api/prices/<symbol>/bars/`.
-- **UI:** `ForecastPanel.tsx` (1d/5d toggle, direction/P(up)/Δ%, accuracy badge, expandable chart) + `ForecastChart.tsx` (recharts daily close + dashed forward projection + confidence band). The intraday `PriceChart.tsx` (PriceTick) is unchanged.
+- **UI:** dedicated **`/markets` page** (`pages/markets.tsx`) with live `PriceTicker`, `ForecastPanel.tsx` (1d/5d toggle, direction/P(up)/Δ%, accuracy badge, expandable chart) + `ForecastChart.tsx` (recharts daily close + dashed forward projection + confidence band), and `markets/EventsHeatmap.tsx` (weighted event→symbol heatmap). The intraday `PriceChart.tsx` (PriceTick) is unchanged.
 - **Tests:** `services/forecasting/tests_forecast.py` — dependency-light self-tests (leakage, router fallback, metrics, train/predict roundtrip): `DJANGO_SETTINGS_MODULE=settings.base python -m services.forecasting.tests_forecast`.
 - **Settings:** `FORECAST_ENABLED`, `FORECAST_MODEL_DIR`, `FORECAST_HORIZONS_DAYS` (`1,5`), `FORECAST_TRAIN_WINDOW_DAYS`, `FORECAST_ROUTER` (`llm`/`rules`); deps `lightgbm` + `scikit-learn` + `joblib`; LLM route `'routing'`.
 
@@ -408,6 +411,7 @@ LightGBM **classifier (calibrated P(up)) + regressor (magnitude)** per horizon (
 - `_dates.py` — `parse_approximate_date()`: handles `"October 2023"` and year-only `"2014"`
 - `Topic` model fields: `slug`, `name`, `keywords`, `description`, `category`, `is_current`, `is_active`, `source_ids`, `started_at`, `ended_at`, `topic_score`, `is_top_level`, `is_pinned`, `historical_month/day/year`
 - `is_current` — in today's news cycle; `is_active` — enabled for display; `is_top_level` — promoted by score ≥ `TOP_LEVEL_SCORE_THRESHOLD` or `is_pinned`
+- **Auto-hide stale topics**: `Workflow.prune_stale_topics()` (run in `refresh_topics`, daily) sets `is_top_level=False` for any non-pinned top-level topic with no tagged events in `TOPIC_STALE_DAYS` (default 90), so dormant topics drop off the header. Pinned topics and topics first seen within the window are exempt; `is_current`/`is_active` are left to the scrape lifecycle.
 - Frontend API: `GET /api/topics/?active=true&current=true`
 
 ### Newsletter
@@ -470,6 +474,7 @@ LightGBM **classifier (calibrated P(up)) + regressor (magnitude)** per horizon (
 - React state lives in `src/pages/index.tsx`; pass down as props
 - Map markers use custom `L.divIcon` via category shape SVG; never plain `Marker` with default icon
 - Frontend uses **react-router-dom** `BrowserRouter` with routes defined in `src/main.tsx`
+- **Top-level pages / nav tabs** (in `SiteHeader`): **Map** (`/`, event map; sidebar is the events list only) and **Markets** (`/markets`, live prices + forecasts + the event→market `EventsHeatmap`). Clicking an event's affected-indicator chip cross-links to `/markets?symbol=<symbol>` (PriceTicker focuses it). Markets/Forecasts are no longer sidebar sub-tabs on the map page.
 - Route params available via `useParams()` from react-router-dom
 - All source files are TypeScript (`.tsx`/`.ts`) — not `.jsx`/`.js`
 - Dark theme color palette (inline styles):
@@ -729,6 +734,7 @@ Stream tasks (default queue, independent of pipeline):
 | `DISCOVER_TOPICS_INTERVAL_MINUTES` | `30` | discover_topics_task base period (×5 = 150m) |
 | `TOPICS_REFRESH_HOUR` | `4` | Hour (UTC) for daily refresh_topics_task |
 | `TOPIC_SOURCES_DAYS` | `30` | Wikipedia Current Events lookback window (days) |
+| `TOPIC_STALE_DAYS` | `90` | Topics with no tagged events in this window are auto-hidden from the header (`Workflow.prune_stale_topics`, runs in `refresh_topics`) |
 | `PRICE_FETCH_INTERVAL_MINUTES` | `5` | fetch_prices_task period |
 | `NOTAM_FETCH_INTERVAL_MINUTES` | `15` | fetch_notams_task period |
 | `EARTHQUAKE_FETCH_INTERVAL_MINUTES` | `5` | fetch_earthquakes_task period |
@@ -765,6 +771,8 @@ Stream tasks (default queue, independent of pipeline):
 - **MongoDB date filters**: never `__date=`, always explicit datetime range
 - **UUID filtering**: `article_ids` stores strings; convert with `uuid.UUID()` first
 - **`enqueue()` dev mode**: when `TASK_QUEUE_ENABLED=False`, `enqueue()` calls the function synchronously — no Redis or worker needed locally
+- **Pipeline ordering**: with `TASK_QUEUE_ENABLED=True`, enqueuing fetch + process + aggregate as separate jobs **races them** — aggregate can run before process finishes, so no new Events. Chain dependent steps in a single task (see `run_pipeline_task`) instead of enqueuing them separately.
+- **Aggregation needs a location**: `aggregate_events` only buckets articles with a non-empty `Article.location` and `published_on` within the window. An article processed while the LLM/geo step was failing (e.g. g4f down) is saved `processed_on`-set but `location=None` → it **never aggregates**, and `process_articles` won't retry it (it skips processed rows). Recover with `process_articles(only_failed=True)` (admin: **"Reprocess un-located"**); `aggregate_events` logs how many in-window articles it skipped for missing location.
 - **Two queues**: `default` for fast I/O, `heavy` for NLP/LLM. New NLP/LLM tasks must pass `queue='heavy'` to `enqueue()` and `setup_schedule`
 - **Schedule is stored in Redis**: `setup_schedule` clears and re-registers all jobs on every `scheduler` container start — this is intentional and idempotent
 - **Restart scheduler to change intervals**: edit the env var and restart the `scheduler` service; it re-runs `setup_schedule` automatically

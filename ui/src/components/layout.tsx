@@ -45,6 +45,33 @@ export function SiteHeader({ activePage, children, showNav = true }: SiteHeaderP
 
       {showNav && (
         <>
+          <NavLink
+            to="/"
+            end
+            className={({ isActive }) =>
+              cn(
+                "shrink-0 rounded px-[0.45rem] py-[0.2rem] text-[0.8rem] font-medium no-underline transition-colors",
+                isActive || activePage === "map"
+                  ? "text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )
+            }
+          >
+            {t.navMap}
+          </NavLink>
+          <NavLink
+            to="/markets"
+            className={({ isActive }) =>
+              cn(
+                "shrink-0 rounded px-[0.45rem] py-[0.2rem] text-[0.8rem] font-medium no-underline transition-colors",
+                isActive || activePage === "markets"
+                  ? "text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )
+            }
+          >
+            {t.navMarkets}
+          </NavLink>
           <SubscribePopup />
           <NavLink
             to="/newsletter"

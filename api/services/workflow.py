@@ -96,10 +96,15 @@ class Workflow:
         limit: int = 500,
         source_code: str | None = None,
         reprocess: bool = False,
+        only_failed: bool = False,
     ) -> int:
         """
         Step 2 — Clean: run HuggingFace NER + VADER sentiment on Articles; use LLM for category + location.
         Returns the number of articles processed.
+
+        only_failed: re-run NLP on articles that were processed but ended up with no location
+        (e.g. the LLM/geo step failed — these can never aggregate into Events and are otherwise
+        never retried). Recovers a batch stuck by an LLM-provider outage.
         """
         from core.models import Article, ArticleDocument
         from services.processing.cleaner import ArticleCleaner, CleaningError
@@ -107,9 +112,14 @@ class Workflow:
         qs = Article.objects.all()
         if source_code:
             qs = qs.filter(source_code=source_code)
-        if not reprocess:
-            qs = qs.filter(processed_on__isnull=True)
-        articles = list(qs[:limit])
+        if only_failed:
+            # Processed but un-located; skip ones already confirmed un-geocodable on a prior retry.
+            qs = qs.filter(processed_on__isnull=False, location__isnull=True)
+            articles = [a for a in qs if not (a.extra_data or {}).get('geo_failed')][:limit]
+        else:
+            if not reprocess:
+                qs = qs.filter(processed_on__isnull=True)
+            articles = list(qs[:limit])
 
         if not articles:
             return 0
@@ -145,7 +155,11 @@ class Workflow:
             article.category = features.category
             article.sub_category = features.sub_category
             article.processed_on = timezone.now()
-            article.extra_data = {**(article.extra_data or {}), 'llm': features.llm_data}
+            extra = {**(article.extra_data or {}), 'llm': features.llm_data}
+            # Retried and still no location → mark so only_failed won't re-select it forever.
+            if only_failed and not features.location:
+                extra['geo_failed'] = True
+            article.extra_data = extra
             article.translations = features.translations
 
             # Best-effort: fetch og:image if no banner set yet and URL is reachable
@@ -185,6 +199,17 @@ class Workflow:
                 published_on__gte=lookback,
             ).exclude(location='')
         )
+
+        # Visibility: processed articles in-window that can't aggregate because they have no
+        # location (the usual reason "events don't show up" — often an LLM/geo failure).
+        skipped_no_location = Article.objects.filter(
+            processed_on__isnull=False, location__isnull=True, published_on__gte=lookback,
+        ).count()
+        if skipped_no_location:
+            logger.info(
+                '[aggregate] %d processed article(s) in window have no location — excluded from '
+                'events. Recover with process_articles(only_failed=True).', skipped_no_location,
+            )
 
         if not articles:
             return 0, 0
@@ -444,9 +469,47 @@ class Workflow:
                 enqueue(retroactive_tag_topic_task, slug=slug)
                 logger.info('[topics] Enqueued retroactive tagging for: %s', slug)
 
+        # Hide long-dormant topics from the header (no tagged events in TOPIC_STALE_DAYS).
+        cls.prune_stale_topics()
+
         active_count = Topic.objects.filter(is_current=True, is_active=True).count()
         logger.info('[topics] refresh_topics done — %d current active topic(s)', active_count)
         return active_count
+
+    @classmethod
+    def prune_stale_topics(cls, stale_days: int | None = None) -> int:
+        """Hide top-bar topics with no tagged events in `stale_days` (default 90).
+
+        A non-pinned, top-level topic with no Event in the window is set is_top_level=False so it
+        drops off the header. Pinned topics are never auto-demoted, and topics first seen within
+        the window are exempt (too new to have accumulated events). Only is_top_level changes —
+        is_current/is_active are left to the scrape lifecycle. Runs in refresh_topics (daily).
+        """
+        from core.models import Topic, Event
+
+        stale_days = stale_days or int(os.getenv('TOPIC_STALE_DAYS', '90'))
+        now = timezone.now()
+        cutoff = now - timedelta(days=stale_days)
+
+        # Slugs with at least one event since the cutoff (single pass).
+        fresh: set[str] = set()
+        for ev in Event.objects.filter(started_at__gte=cutoff).only('topic_slugs'):
+            fresh.update(ev.topic_slugs or [])
+
+        demoted = 0
+        # Filter in Python so flag checks work for pre-migration docs (missing fields).
+        for topic in Topic.objects.filter(is_active=True):
+            if not topic.is_top_level or topic.is_pinned or topic.slug in fresh:
+                continue
+            # Exempt brand-new topics that haven't had time to accumulate events.
+            if topic.started_at and topic.started_at >= cutoff:
+                continue
+            topic.is_top_level = False
+            topic.save(update_fields=['is_top_level'])
+            demoted += 1
+        if demoted:
+            logger.info('[topics] pruned %d stale topic(s) from header — no events in %dd', demoted, stale_days)
+        return demoted
 
     @classmethod
     def tag_events_with_topics(cls, hours: int = 24, force_retag: bool = False) -> int:

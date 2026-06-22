@@ -140,6 +140,38 @@ def _geocode(city: str | None, country: str | None = None) -> tuple[float | None
     return None, None
 
 
+def geocode_from_entities(
+    entities: list[dict],
+) -> tuple[str | None, str | None, float | None, float | None]:
+    """Best-effort (city, country, lat, lon) from NER entities when the LLM gave no location.
+
+    Scans LOC/MISC entities for a known country or city (geonamescache). Prefers a country
+    match as the anchor (country-level event); uses a matched city's coords when available.
+    Returns (None, None, None, None) if nothing geocodes.
+    """
+    city_idx = _city_index()
+    country_idx = _country_index()
+    country = city = None
+    for e in entities:
+        if e.get('label') not in ('LOC', 'MISC'):
+            continue
+        name = (e.get('text') or '').strip()
+        low = name.lower()
+        if not low:
+            continue
+        if country is None and low in country_idx:
+            country = name
+        if city is None and low in city_idx:
+            city = name
+    if city:
+        lat, lon = city_idx.get(city.lower(), (None, None))
+        return city, country, lat, lon
+    if country:
+        lat, lon = country_idx.get(country.lower(), (None, None))
+        return None, country, lat, lon
+    return None, None, None, None
+
+
 class ArticleAnalyzer:
     """
     Uses the LLM to extract category, country, city, and coordinates from article text.

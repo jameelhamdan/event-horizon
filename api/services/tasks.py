@@ -32,8 +32,11 @@ def process_articles_task(
     limit: int = DEFAULT_PROCESS_LIMIT,
     source_code: str | None = None,
     reprocess: bool = False,
+    only_failed: bool = False,
 ) -> int:
-    return Workflow.process_articles(limit=limit, source_code=source_code, reprocess=reprocess)
+    return Workflow.process_articles(
+        limit=limit, source_code=source_code, reprocess=reprocess, only_failed=only_failed,
+    )
 
 
 def aggregate_events_task(
@@ -41,6 +44,31 @@ def aggregate_events_task(
     min_articles: int = DEFAULT_AGGREGATE_MIN_ARTICLES,
 ) -> tuple[int, int]:
     return Workflow.aggregate_events(hours=hours, min_articles=min_articles)
+
+
+def run_pipeline_task(
+    fetch_hours: int = 2,
+    process_limit: int = 500,
+    aggregate_hours: int = 24,
+    source_code: str | None = None,
+    tag: bool = False,
+) -> dict:
+    """Run fetch -> process -> aggregate (-> tag) sequentially in ONE job.
+
+    Enqueueing the three steps as separate jobs races them: aggregate can run before
+    process/fetch finish, so no new events appear. This chains them in order so the admin
+    'Run full pipeline' button reliably produces Events.
+    """
+    now = datetime.now(dt_timezone.utc)
+    summary: dict = {}
+    summary['fetched'] = fetch_articles_task(source_code, now - timedelta(hours=fetch_hours))
+    summary['processed'] = process_articles_task(limit=process_limit)
+    created, updated = aggregate_events_task(hours=aggregate_hours)
+    summary['events_created'] = created
+    summary['events_updated'] = updated
+    if tag:
+        summary['tagged'] = tag_topics_task(hours=aggregate_hours)
+    return summary
 
 
 # ── Topic tasks ────────────────────────────────────────────────────────────────

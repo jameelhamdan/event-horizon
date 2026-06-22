@@ -161,28 +161,61 @@ class ArticleAdmin(ImportExportModelAdmin):
     def _handle_pipeline_action(self, request):
         from django.utils.timezone import now
         from services.queue import enqueue
-        from services.tasks import aggregate_events_task, fetch_articles_task, process_articles_task
+        from services.tasks import (
+            aggregate_events_task, fetch_articles_task, process_articles_task, run_pipeline_task,
+        )
 
         action = request.POST["pipeline_action"]
 
-        if action in ("fetch", "run_all"):
+        # One ordered job: fetch -> process -> aggregate -> tag. Enqueuing the steps
+        # separately races them (aggregate runs before process finishes -> no new events).
+        if action == "run_all":
+            fetch_hours = max(1, int(request.POST.get("fetch_hours") or 2))
+            process_limit = max(1, int(request.POST.get("process_limit") or 500))
+            aggregate_hours = max(1, int(request.POST.get("aggregate_hours") or 24))
+            source_code = request.POST.get("fetch_source") or None
+            enqueue(
+                run_pipeline_task,
+                fetch_hours=fetch_hours,
+                process_limit=process_limit,
+                aggregate_hours=aggregate_hours,
+                source_code=source_code,
+                tag=True,
+                queue="heavy",
+                job_timeout=-1,
+            )
+            self.message_user(
+                request,
+                f"Full pipeline enqueued as one ordered job "
+                f"(fetch {fetch_hours}h → process {process_limit} → aggregate "
+                f"{aggregate_hours}h → tag). Watch /admin/django-rq/; events appear when it finishes.",
+                messages.SUCCESS,
+            )
+            return redirect(request.path)
+
+        if action == "fetch":
             hours = max(1, int(request.POST.get("fetch_hours") or 2))
             source_code = request.POST.get("fetch_source") or None
-            start_date = now() - timedelta(hours=hours)
-            enqueue(fetch_articles_task, source_code, start_date)
-            self.message_user(request, f"Fetch job enqueued - {source_code}, last {hours}h.", messages.SUCCESS)
-
-        if action in ("process", "run_all"):
+            enqueue(fetch_articles_task, source_code, now() - timedelta(hours=hours))
+            self.message_user(request, f"Fetch job enqueued - {source_code or 'all'}, last {hours}h.", messages.SUCCESS)
+        elif action == "process":
             limit = max(1, int(request.POST.get("process_limit") or 500))
-            enqueue(process_articles_task, limit=limit)
+            enqueue(process_articles_task, limit=limit, queue="heavy")
             self.message_user(request, f"Process job enqueued - limit {limit}.", messages.SUCCESS)
-
-        if action in ("aggregate", "run_all"):
+        elif action == "reprocess_failed":
+            limit = max(1, int(request.POST.get("process_limit") or 500))
+            enqueue(process_articles_task, limit=limit, only_failed=True, queue="heavy")
+            self.message_user(
+                request,
+                f"Re-processing up to {limit} article(s) that were processed but have no "
+                f"location (so they can aggregate into Events).",
+                messages.SUCCESS,
+            )
+        elif action == "aggregate":
             hours = max(1, int(request.POST.get("aggregate_hours") or 24))
-            enqueue(aggregate_events_task, hours=hours)
+            enqueue(aggregate_events_task, hours=hours, queue="heavy")
             self.message_user(request, f"Aggregate job enqueued - last {hours}h.", messages.SUCCESS)
-
-        if action not in ("fetch", "process", "aggregate", "run_all"):
+        else:
             self.message_user(request, f"Unknown action: {action}", messages.ERROR)
 
         return redirect(request.path)

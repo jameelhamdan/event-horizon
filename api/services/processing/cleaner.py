@@ -1,12 +1,28 @@
 from typing import Sequence
 
 from core.models import ArticleDocument, ArticleFeatures
-from services.processing.analyzer import ArticleAnalyzer
+from services.processing.analyzer import ArticleAnalyzer, geocode_from_entities
 
 
 class CleaningError(Exception):
     """Base exception for the cleaning service."""
     pass
+
+
+def _resolve_location(analysis, entities):
+    """Return (location, lat, lon), falling back to NER-derived geography when the LLM gave none.
+
+    Mutates analysis.llm_data with the NER-derived city/country so event bucketing stays correct.
+    """
+    city, country = analysis.city, analysis.country
+    lat, lon = analysis.latitude, analysis.longitude
+    if not city and not country:
+        city, country, lat, lon = geocode_from_entities(entities)
+        if city or country:
+            analysis.llm_data['city'] = city
+            analysis.llm_data['country'] = country
+    location = ', '.join(filter(None, [city, country])) or None
+    return location, lat, lon
 
 
 class ArticleCleaner:
@@ -63,7 +79,7 @@ class ArticleCleaner:
         entity_density = min(len(entities) / 8.0, 1.0)
         event_intensity = round(entity_density * 0.65 + abs(sentiment) * 0.35, 4)
 
-        location = ', '.join(filter(None, [analysis.city, analysis.country])) or None
+        location, lat, lon = _resolve_location(analysis, entities)
 
         return ArticleFeatures(
             id=document.id,
@@ -71,8 +87,8 @@ class ArticleCleaner:
             sentiment=sentiment,
             finbert_sentiment=finbert_sentiment,
             location=location,
-            latitude=analysis.latitude,
-            longitude=analysis.longitude,
+            latitude=lat,
+            longitude=lon,
             event_intensity=event_intensity,
             category=analysis.category,
             sub_category=analysis.sub_category,
@@ -97,15 +113,15 @@ class ArticleCleaner:
             sentiment = round(self._vader.polarity_scores(doc.full_text)['compound'], 4)
             entity_density = min(len(entities) / 8.0, 1.0)
             event_intensity = round(entity_density * 0.65 + abs(sentiment) * 0.35, 4)
-            location = ', '.join(filter(None, [analysis.city, analysis.country])) or None
+            location, lat, lon = _resolve_location(analysis, entities)
             results.append(ArticleFeatures(
                 id=doc.id,
                 entities=entities,
                 sentiment=sentiment,
                 finbert_sentiment=finbert_sentiment,
                 location=location,
-                latitude=analysis.latitude,
-                longitude=analysis.longitude,
+                latitude=lat,
+                longitude=lon,
                 event_intensity=event_intensity,
                 category=analysis.category,
                 sub_category=analysis.sub_category,

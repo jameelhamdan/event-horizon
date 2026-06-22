@@ -100,6 +100,16 @@ export interface UIStrings {
   forecastNoModel: string
   forecastProjection: string
   forecastHistory: string
+  // Nav + Markets page
+  navMap: string
+  navMarkets: string
+  eventsImpactHeatmap: string
+  mostImpacted: string
+  heatmapNet: string
+  heatmapEmpty: string
+  heatmapUp: string
+  heatmapDown: string
+  eventCountLabel: string
   // Price chart
   priceVolume: string
   priceNoHistory: string
@@ -269,6 +279,15 @@ export const UI: Record<Language, UIStrings> = {
     forecastNoModel: "No forecasts yet — backfill prices and train the model.",
     forecastProjection: "Projection",
     forecastHistory: "History",
+    navMap: "Map",
+    navMarkets: "Markets",
+    eventsImpactHeatmap: "Event Impact on Markets",
+    mostImpacted: "Most-impacted indicators",
+    heatmapNet: "Net event pressure by category",
+    heatmapEmpty: "No weighted events in this window",
+    heatmapUp: "upward pressure",
+    heatmapDown: "downward pressure",
+    eventCountLabel: "events",
     priceVolume: "Volume",
     priceNoHistory: "No price history",
     affectedIndicators: "Affected indicators",
@@ -447,6 +466,15 @@ export const UI: Record<Language, UIStrings> = {
     forecastNoModel: "لا توجد توقعات بعد — عبّئ الأسعار ودرّب النموذج.",
     forecastProjection: "الإسقاط",
     forecastHistory: "السجل",
+    navMap: "الخريطة",
+    navMarkets: "الأسواق",
+    eventsImpactHeatmap: "تأثير الأحداث على الأسواق",
+    mostImpacted: "المؤشرات الأكثر تأثراً",
+    heatmapNet: "صافي ضغط الأحداث حسب الفئة",
+    heatmapEmpty: "لا توجد أحداث مرجّحة في هذه الفترة",
+    heatmapUp: "ضغط صعودي",
+    heatmapDown: "ضغط هبوطي",
+    eventCountLabel: "أحداث",
     priceVolume: "الحجم",
     priceNoHistory: "لا يوجد سجل أسعار",
     affectedIndicators: "المؤشرات المتأثرة",
