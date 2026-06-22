@@ -1,10 +1,12 @@
 import type {
   PricesLatestResponse,
   PriceHistoryResponse,
+  PriceBarsResponse,
   NotamZonesResponse,
   EarthquakesResponse,
   StaticPointsResponse,
   ForecastsResponse,
+  ForecastAccuracyResponse,
   StreamKey,
   StaticPointType,
 } from "@/types"
@@ -69,16 +71,37 @@ export async function fetchStaticPoints(
   return res.json()
 }
 
-// Placeholder: the backend returns a neutral / 0% forecast per symbol until the
-// prediction layer is reworked.
+// Event-fused, model-backed forecasts (one per symbol + horizon).
 export async function fetchForecasts(
-  symbol?: string,
-  stream_key?: string
+  opts: { symbol?: string; stream_key?: string; horizon?: number } = {}
 ): Promise<ForecastsResponse> {
   const params = new URLSearchParams()
-  if (symbol) params.set("symbol", symbol)
-  if (stream_key) params.set("stream_key", stream_key)
+  if (opts.symbol) params.set("symbol", opts.symbol)
+  if (opts.stream_key) params.set("stream_key", opts.stream_key)
+  if (opts.horizon) params.set("horizon", String(opts.horizon))
   const res = await fetch(`${BASE_URL}/forecasts/latest/?${params}`)
+  if (!res.ok) throw new Error(`API error ${res.status}`)
+  return res.json()
+}
+
+export async function fetchForecastAccuracy(
+  symbol?: string
+): Promise<ForecastAccuracyResponse> {
+  const params = new URLSearchParams()
+  if (symbol) params.set("symbol", symbol)
+  const res = await fetch(`${BASE_URL}/forecasts/accuracy/?${params}`)
+  if (!res.ok) throw new Error(`API error ${res.status}`)
+  return res.json()
+}
+
+export async function fetchPriceBars(
+  symbol: string,
+  opts: { interval?: string; limit?: number } = {}
+): Promise<PriceBarsResponse> {
+  const params = new URLSearchParams()
+  if (opts.interval) params.set("interval", opts.interval)
+  if (opts.limit) params.set("limit", String(opts.limit))
+  const res = await fetch(`${BASE_URL}/prices/${encodeURIComponent(symbol)}/bars/?${params}`)
   if (!res.ok) throw new Error(`API error ${res.status}`)
   return res.json()
 }

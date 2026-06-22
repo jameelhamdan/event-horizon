@@ -35,6 +35,11 @@ markdown>=3.7
 # Stream data fetching (prices, forex, NOTAM, earthquakes)
 yfinance>=1.2.0
 
+# Forecasting — gradient-boosted directional + magnitude models, calibration, persistence
+lightgbm>=4.3.0
+scikit-learn>=1.4.0
+joblib>=1.3.0
+
 # PyTorch CPU-only (avoids pulling CUDA binaries)
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.10.0+cpu

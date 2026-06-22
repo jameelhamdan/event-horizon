@@ -24,7 +24,7 @@ from core import models as core_models
 from rest_framework import generics, status as drf_status
 from api.serializers import (
     ArticleSerializer, EventSerializer, SourceSerializer,
-    PriceTickSerializer, NotamZoneSerializer, NotamRecordSerializer,
+    PriceTickSerializer, PriceBarSerializer, NotamZoneSerializer, NotamRecordSerializer,
     EarthquakeRecordSerializer, StaticPointSerializer,
     TopicSerializer,
 )
@@ -181,6 +181,22 @@ class PriceHistoryView(APIView):
         limit = _parse_int(request.query_params.get('limit'), 500, 5000)
         serializer = PriceTickSerializer(qs[:limit], many=True)
         return Response({'symbol': symbol, 'results': serializer.data, 'count': len(serializer.data)})
+
+
+class PriceBarsView(APIView):
+    """GET /api/prices/<symbol>/bars/ — daily OHLC history. Params: interval (1d), limit (max 5000)."""
+
+    def get(self, request, symbol):
+        interval = request.query_params.get('interval', '1d')
+        qs = core_models.PriceBar.objects.filter(symbol=symbol, interval=interval).order_by('date')
+        limit = _parse_int(request.query_params.get('limit'), 1000, 5000)
+        # Take the most recent `limit` bars but return them oldest→newest for charting.
+        total = qs.count()
+        start = max(total - limit, 0)
+        bars = list(qs[start:total])
+        serializer = PriceBarSerializer(bars, many=True)
+        return Response({'symbol': symbol, 'interval': interval,
+                         'results': serializer.data, 'count': len(serializer.data)})
 
 
 class NotamZoneListView(APIView):

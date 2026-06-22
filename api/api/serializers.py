@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from core.models import (
     Article, Event, Source,
-    PriceTick, NotamRecord, NotamZone, EarthquakeRecord, StaticPoint,
+    PriceTick, PriceBar, Forecast, NotamRecord, NotamZone, EarthquakeRecord, StaticPoint,
     Topic,
 )
 from newsletter.models import DailyNewsletter
@@ -168,21 +168,39 @@ class TopicSerializer(serializers.ModelSerializer):
         ]
 
 
-class ForecastSerializer(serializers.Serializer):
-    """Placeholder market forecast — neutral / zero diff.
+class PriceBarSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
 
-    The real prediction layer was removed and is being reworked; this is a stable
-    response shape so the UI forecast surface keeps working in the meantime. Not
-    backed by a model — synthesized per-symbol from the latest price tick.
-    """
-    symbol = serializers.CharField()
-    stream_key = serializers.CharField()
-    generated_at = serializers.DateTimeField()
-    horizon_hours = serializers.IntegerField()
-    direction = serializers.CharField()
-    predicted_change_pct = serializers.FloatField()
-    current_value = serializers.FloatField(allow_null=True)
-    placeholder = serializers.BooleanField()
+    class Meta:
+        model = PriceBar
+        fields = [
+            'id', 'symbol', 'stream_key', 'name', 'interval',
+            'open', 'high', 'low', 'close', 'volume', 'date',
+        ]
+
+
+class ForecastSerializer(serializers.ModelSerializer):
+    """Model-backed market forecast (event-fused symbol prediction)."""
+    id = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = Forecast
+        fields = [
+            'id', 'symbol', 'stream_key', 'generated_at', 'as_of_date', 'horizon_days',
+            'direction', 'proba_up', 'predicted_change_pct', 'predicted_price',
+            'band_low', 'band_high', 'confidence', 'current_value',
+            'router_source', 'model_version',
+            'realized_direction', 'realized_change_pct', 'is_correct', 'scored_at',
+        ]
+
+
+class ForecastAccuracySerializer(serializers.Serializer):
+    """Rolling accuracy/calibration summary over scored forecasts."""
+    horizon_days = serializers.IntegerField()
+    scored = serializers.IntegerField()
+    correct = serializers.IntegerField()
+    accuracy = serializers.FloatField(allow_null=True)
+    brier = serializers.FloatField(allow_null=True)
 
 
 class SubscribeSerializer(serializers.Serializer):

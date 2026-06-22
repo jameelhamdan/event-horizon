@@ -269,3 +269,110 @@ def _parse_backfill_date(value) -> datetime:
         return value
     d = datetime.strptime(value, '%Y-%m-%d')
     return d.replace(tzinfo=dt_timezone.utc)
+
+
+# ── Forecasting tasks (event-fused symbol prediction) ────────────────────────────
+
+def backfill_prices_task(symbols: list[str] | None = None, years: int = 5) -> int:
+    """Backfill daily OHLC PriceBar history for the indicator panel."""
+    from services.forecasting.history import backfill_all
+    results = backfill_all(symbols=symbols, years=years)
+    return sum(results.values())
+
+
+def route_events_task(hours: int = 168, source: str | None = None) -> int:
+    """(Re)route recent events to market symbols, populating Event.affected_indicators."""
+    from django.conf import settings
+    from core import models as core_models
+    from services.routing import route_events
+
+    src = source or settings.FORECAST_ROUTER
+    start = datetime.now(dt_timezone.utc) - timedelta(hours=hours)
+    events = list(core_models.Event.objects.filter(started_at__gte=start))
+    return route_events(events, source=src)
+
+
+def train_forecast_model_task() -> int:
+    """Train the LightGBM classifier + regressor for every configured horizon."""
+    from django.conf import settings
+    if not settings.FORECAST_ENABLED:
+        return 0
+    from services.forecasting import features, model
+
+    end = datetime.now(dt_timezone.utc)
+    start = end - timedelta(days=settings.FORECAST_TRAIN_WINDOW_DAYS + 60)
+    frame = features.build_training_frame(
+        start=start, end=end, horizons=settings.FORECAST_HORIZONS_DAYS, include_events=True,
+    )
+    if frame.empty:
+        return 0
+    trained = 0
+    for h in settings.FORECAST_HORIZONS_DAYS:
+        try:
+            model.train(frame, h)
+            trained += 1
+        except RuntimeError as exc:
+            import logging
+            logging.getLogger(__name__).warning('[forecast] train h%d skipped: %s', h, exc)
+    return trained
+
+
+def run_forecast_task() -> int:
+    """Write one Forecast row per (panel symbol, horizon) from the latest models."""
+    from django.conf import settings
+    if not settings.FORECAST_ENABLED:
+        return 0
+    from services.forecasting import features, model
+    from services.forecasting.history import SYMBOL_META
+    from core import models as core_models
+
+    fm = features.build_feature_matrix(include_events=True)
+    if fm.empty:
+        return 0
+    now = datetime.now(dt_timezone.utc)
+    router = settings.FORECAST_ROUTER
+    created = 0
+    for h in settings.FORECAST_HORIZONS_DAYS:
+        for p in model.predict(fm, h):
+            stream_key = SYMBOL_META.get(p['symbol'], ('', ''))[0]
+            core_models.Forecast.objects.create(
+                symbol=p['symbol'], stream_key=stream_key, generated_at=now,
+                as_of_date=p['as_of_date'], horizon_days=h, direction=p['direction'],
+                proba_up=p['proba_up'], predicted_change_pct=p['predicted_change_pct'],
+                predicted_price=p['predicted_price'], band_low=p['band_low'],
+                band_high=p['band_high'], confidence=p['confidence'],
+                current_value=p['current_value'], router_source=router,
+                model_version=p['model_version'],
+            )
+            created += 1
+    return created
+
+
+def score_forecasts_task() -> int:
+    """Fill realized outcomes for forecasts whose horizon has elapsed."""
+    from core import models as core_models
+
+    pending = core_models.Forecast.objects.filter(realized_direction__isnull=True)
+    now = datetime.now(dt_timezone.utc)
+    scored = 0
+    for f in pending:
+        if not f.current_value:
+            continue
+        future = list(
+            core_models.PriceBar.objects.filter(
+                symbol=f.symbol, interval='1d', date__gt=f.as_of_date,
+            ).order_by('date').values_list('close', flat=True)[:f.horizon_days]
+        )
+        if len(future) < f.horizon_days:
+            continue  # horizon not elapsed yet
+        ret = future[-1] / f.current_value - 1
+        f.realized_change_pct = round(ret * 100, 4)
+        f.realized_direction = 'up' if ret > 0 else 'down'
+        pred_up = f.proba_up > 0.5
+        f.is_correct = (pred_up and ret > 0) or (not pred_up and ret <= 0)
+        f.scored_at = now
+        f.save(update_fields=[
+            'realized_change_pct', 'realized_direction', 'is_correct', 'scored_at',
+        ])
+        scored += 1
+    return scored

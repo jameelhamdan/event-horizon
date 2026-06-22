@@ -88,10 +88,18 @@ export interface UIStrings {
   switchToArabic: string
   switchToEnglish: string
   noEventsFiltered: string
-  // Forecast panel (placeholder — prediction layer being reworked)
+  // Forecast panel (event-fused symbol prediction)
   marketForecasts: string
   noForecasts: string
   forecastPlaceholderNote: string
+  forecastNote: string
+  forecastHorizon1d: string
+  forecastHorizon5d: string
+  forecastProbUp: string
+  forecastAccuracy: string
+  forecastNoModel: string
+  forecastProjection: string
+  forecastHistory: string
   // Price chart
   priceVolume: string
   priceNoHistory: string
@@ -252,7 +260,15 @@ export const UI: Record<Language, UIStrings> = {
     sentNeutral: "neutral",
     marketForecasts: "Market Forecasts",
     noForecasts: "No forecasts available",
-    forecastPlaceholderNote: "Forecasting is being reworked — showing a neutral placeholder for now.",
+    forecastPlaceholderNote: "Event-fused predictions — direction from news + price history.",
+    forecastNote: "Event-fused predictions — direction from news + price history.",
+    forecastHorizon1d: "1 day",
+    forecastHorizon5d: "5 days",
+    forecastProbUp: "P(up)",
+    forecastAccuracy: "Accuracy",
+    forecastNoModel: "No forecasts yet — backfill prices and train the model.",
+    forecastProjection: "Projection",
+    forecastHistory: "History",
     priceVolume: "Volume",
     priceNoHistory: "No price history",
     affectedIndicators: "Affected indicators",
@@ -422,7 +438,15 @@ export const UI: Record<Language, UIStrings> = {
     sentNeutral: "محايد",
     marketForecasts: "توقعات الأسواق",
     noForecasts: "لا توجد توقعات متاحة",
-    forecastPlaceholderNote: "يجري إعادة بناء نظام التوقعات — يُعرض الآن عنصر نائب محايد.",
+    forecastPlaceholderNote: "توقعات مدمجة بالأحداث — الاتجاه من الأخبار وتاريخ الأسعار.",
+    forecastNote: "توقعات مدمجة بالأحداث — الاتجاه من الأخبار وتاريخ الأسعار.",
+    forecastHorizon1d: "يوم واحد",
+    forecastHorizon5d: "٥ أيام",
+    forecastProbUp: "احتمال الصعود",
+    forecastAccuracy: "الدقة",
+    forecastNoModel: "لا توجد توقعات بعد — عبّئ الأسعار ودرّب النموذج.",
+    forecastProjection: "الإسقاط",
+    forecastHistory: "السجل",
     priceVolume: "الحجم",
     priceNoHistory: "لا يوجد سجل أسعار",
     affectedIndicators: "المؤشرات المتأثرة",

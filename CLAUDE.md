@@ -39,8 +39,8 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   ├── apps.py             # MongoAdminConfig, MongoAuthConfig, MongoContentTypesConfig
 │   ├── core/               # Django app — data models + management commands
 │   │   ├── apps.py         # name='core', label='core'
-│   │   ├── models.py       # Source, Article, Event, Topic, PriceTick, NotamZone,
-│   │   │                   # NotamRecord, EarthquakeRecord, StaticPoint
+│   │   ├── models.py       # Source, Article, Event, Topic, PriceTick, PriceBar, Forecast,
+│   │   │                   # NotamZone, NotamRecord, EarthquakeRecord, StaticPoint
 │   │   ├── admin.py        # Admin for all core models (pipeline action buttons, import/export)
 │   │   └── management/commands/
 │   │       ├── fetch_data.py           # Enqueues fetch_articles_task
@@ -67,7 +67,7 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │       │                   # NotamHistoryView, EarthquakeListView, StaticPointListView,
 │   │       │                   # TopicListView, TopicDetailView, TopicEventsView,
 │   │       │                   # SSEStreamView
-│   │       ├── forecasts.py     # ForecastListView, ForecastLatestView (placeholder — neutral/0)
+│   │       ├── forecasts.py     # ForecastListView, ForecastLatestView, ForecastAccuracyView (model-backed)
 │   │       └── newsletter.py   # SubscribeView, ConfirmView, UnsubscribeView,
 │   │                           # NewsletterListView, NewsletterLatestView, NewsletterDetailView
 │   ├── newsletter/         # Django app — newsletter models + admin + tasks
@@ -109,9 +109,15 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │   │   ├── historical.py   # HistoricalBackfillService, RSSHistoricalService,
 │   │   │   │                   # RankedArticle, WeekResult
 │   │   │   └── rss.py          # RSSService (feedparser)
-│   │   ├── forecasting/    # Market forecasting (prediction layer removed — being reworked)
-│   │   │   └── routing.py      # route_event_to_weighted_symbols() — event→symbol routing,
-│   │   │                       # feeds Event.affected_indicators (live pipeline)
+│   │   ├── forecasting/    # Event-fused symbol prediction (v2)
+│   │   │   ├── routing.py      # route_event_to_weighted_symbols() — deterministic event→symbol (baseline+fallback)
+│   │   │   ├── history.py      # OHLC backfill (yfinance + CoinGecko) → PriceBar
+│   │   │   ├── features.py     # leak-free as-of feature matrix (price + event + topic features)
+│   │   │   ├── model.py        # LightGBM classifier + regressor per horizon
+│   │   │   ├── backtest.py     # walk-forward backtest, 4 ablation arms
+│   │   │   └── tests_forecast.py  # dependency-light self-tests
+│   │   ├── routing/        # LLMEventRouter (LLM event→symbol, rules fallback)
+│   │   │   └── llm_router.py
 │   │   ├── newsletter/     # Newsletter generation + sending
 │   │   │   ├── generator.py    # generate_newsletter() — LLM-based section writer
 │   │   │   └── sender.py       # send_newsletter() — Markdown→HTML, SES
@@ -172,7 +178,9 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │   │   │   ├── EventCard.tsx       # Topic badges; onTopicClick prop
 │   │   │   │   ├── EventList.tsx       # Passes topic props down
 │   │   │   │   ├── EventUI.tsx         # CategoryBadge, EventMeta, useLocalizedField
-│   │   │   │   ├── ForecastPanel.tsx   # Placeholder — neutral forecast list (rework pending)
+│   │   │   │   ├── ForecastPanel.tsx   # Forecasts: 1d/5d toggle, direction/P(up)/Δ%, accuracy badge
+│   │   │   │   ├── ForecastChart.tsx   # recharts daily close + dashed forward projection + band
+│   │   │   │   ├── PriceChart.tsx      # recharts intraday PriceTick history (ticker)
 │   │   │   │   ├── MapView.tsx         # L.divIcon category markers + all map layers
 │   │   │   │   └── PriceTicker.tsx     # Real-time SSE price table
 │   │   │   ├── topics/
@@ -260,6 +268,8 @@ This is a real-time global event intelligence platform. Key feature areas:
 - `NotamRecord` — append-only NOTAM history (every fetch); same fields + `fetched_at`
 - `EarthquakeRecord` — USGS events; fields: `usgs_id` (unique), `magnitude`, `depth_km`, `location_name`, `latitude`, `longitude`, `occurred_at`, `tsunami_alert`, `alert_level` (green/yellow/orange/red)
 - `PriceTick` — price samples; fields: `symbol`, `stream_key` (crypto/stock/commodity/forex/bond), `value`, `change_pct`, `volume`, `occurred_at`; 1-year TTL in production
+- `PriceBar` — daily OHLC (forecasting substrate, no TTL); fields: `symbol`, `stream_key`, `name`, `interval` (`1d`), `open/high/low/close`, `volume`, `date`; backfilled via `services/forecasting/history.py`
+- `Forecast` — model-backed forecast (one per symbol+horizon); fields: `symbol`, `stream_key`, `generated_at`, `as_of_date`, `horizon_days` (1\|5), `direction`, `proba_up`, `predicted_change_pct`, `predicted_price`, `band_low/high`, `confidence`, `current_value`, `router_source` (llm/rules), `model_version`, `realized_direction/change_pct`, `is_correct`, `scored_at`
 - `misc` app contains only `EmailLog` model — admin panel for monitoring sent emails
 - `Subscriber` in `newsletter/models.py` — fields: `email` (unique), `token` (UUID), `subscribed_at`, `confirmed_at` (nullable), `is_active`, `unsubscribed_at`; lifecycle: pending → confirmed → unsubscribed
 
@@ -360,28 +370,31 @@ command: sh -c "python manage.py setup_schedule && rqscheduler --url $${REDIS_UR
 - Frontend hook: `useSSE` (`ui/src/hooks/useSSE.ts`) — wraps `EventSource`, auto-reconnects on drop (5s backoff), calls handler per event type
 - `PriceTicker` component uses `useSSE` for live price updates
 
-### Forecasting
+### Forecasting (event-fused symbol prediction — v2)
 
-> **The market-forecasting prediction layer has been removed and is being reworked from
-> scratch.** Gone: the `Forecast` model, `service.py`/`features.py`/`buckets.py`/
-> `calibration.py`/`metrics.py`/`arima.py`, the `run_forecast_task`/`score_forecasts_task`
-> jobs, and the `FORECASTING_ENABLED`/`FORECAST_METHOD` settings. **Do not reintroduce
-> them ad-hoc** — the rework will redefine the model/tasks.
+The prediction layer was **rebuilt** as event-fused symbol forecasting. Full design + diagrams:
+[`docs/forecasting.md`](docs/forecasting.md). The core idea: the **event→symbol router output is a
+FEATURE/hypothesis, not the label**; the label is the realized return between two real price nodes
+(`close@t → close@t+horizon`). The model learns whether events actually predict the panel.
 
-**Placeholder forecast (current state):** so the UI forecast surface keeps working, the
-`/api/forecasts/` + `/api/forecasts/latest/` endpoints are back as a **model-free
-placeholder** (`api/api/views/forecasts.py`). They synthesize one *neutral / 0%-diff*
-forecast per symbol from the latest `PriceTick` — nothing is stored, no tasks/scoring.
-Serializer: `ForecastSerializer` (a plain `serializers.Serializer`, not model-backed) with
-fields `symbol, stream_key, generated_at, horizon_hours, direction ('neutral'),
-predicted_change_pct (0.0), current_value, placeholder (true)`. UI: `ForecastPanel.tsx`
-renders the neutral list under the "Forecasts" sidebar tab; `fetchForecasts()` in
-`api/streams.ts`; `Forecast`/`ForecastsResponse` types in `types.ts`.
+Pipeline: `route_events` (LLM, rule fallback) → `Event.affected_indicators` → `features.py`
+(leak-free, as-of `Event.latest_article_at`, fuses price + event + tagged-topic features) →
+LightGBM **classifier (calibrated P(up)) + regressor (magnitude)** per horizon (**1d, 5d**) →
+`Forecast` rows → `score_forecasts_task` fills realized outcome.
 
-The reusable, deterministic event→symbol router survives and runs inside the live event
-pipeline (NOT part of the removed/placeholder prediction layer):
-- `api/services/forecasting/routing.py` — `route_event_to_weighted_symbols(category, location, topic_slugs, sub_categories, sentiment)`: maps event attributes to affected market symbols with deterministic weights (e.g. conflict + Ukraine → wheat, energy). Populates `Event.affected_indicators` during `aggregate_events` and `tag_topics`.
-- Panel symbols: GC=F (gold), CL=F (oil), NG=F (natural gas), ZW=F (wheat), DX-Y.NYB, ^TNX, ^VIX, SPY, BTC-USD, ETH-USD
+- **Panel symbols** (`services/forecasting/routing.py` `PANEL_SYMBOLS`): GC=F, CL=F, NG=F, ZW=F, DX-Y.NYB, ^TNX, ^VIX, SPY, BTC-USD, ETH-USD.
+- **Two routers** (both write `Event.affected_indicators` + `Event.router_source`):
+  - `services/forecasting/routing.py` — deterministic weight product (baseline + fallback).
+  - `services/routing/llm_router.py` `LLMEventRouter` — batched LLM (role `'routing'`), falls back per-event to the deterministic router on any error.
+- **Data:** `PriceBar` (daily OHLC, backfilled via yfinance + CoinGecko in `services/forecasting/history.py`) is the training/charting substrate, distinct from the high-frequency `PriceTick`.
+- **Models:** `Forecast` (model-backed) + `PriceBar`. Artifacts persist per horizon under `FORECAST_MODEL_DIR` (`model_h{h}.joblib`), loaded lazily/cached.
+- **Backtest** (the gradeable artifact): `services/forecasting/backtest.py` — walk-forward, 4 ablation arms (naive / price-only / price+rule-events / price+llm-events), reports accuracy/F1/AUC/Brier + reliability, with a leakage self-check; `evaluate_forecast` writes a JSON report.
+- **Tasks:** `backfill_prices_task`, `route_events_task`, `train_forecast_model_task`, `run_forecast_task`, `score_forecasts_task` (all in `services/tasks.py`, scheduled in `setup_schedule.py`, gated by `FORECAST_ENABLED`).
+- **Commands:** `backfill_prices`, `route_events`, `train_forecast`, `run_forecast`, `evaluate_forecast`, `forecast_e2e` (full-flow runner).
+- **API:** model-backed `ForecastSerializer`; `GET /api/forecasts/` + `/latest/` (param `horizon`), `/api/forecasts/accuracy/`, `/api/prices/<symbol>/bars/`.
+- **UI:** `ForecastPanel.tsx` (1d/5d toggle, direction/P(up)/Δ%, accuracy badge, expandable chart) + `ForecastChart.tsx` (recharts daily close + dashed forward projection + confidence band). The intraday `PriceChart.tsx` (PriceTick) is unchanged.
+- **Tests:** `services/forecasting/tests_forecast.py` — dependency-light self-tests (leakage, router fallback, metrics, train/predict roundtrip): `DJANGO_SETTINGS_MODULE=settings.base python -m services.forecasting.tests_forecast`.
+- **Settings:** `FORECAST_ENABLED`, `FORECAST_MODEL_DIR`, `FORECAST_HORIZONS_DAYS` (`1,5`), `FORECAST_TRAIN_WINDOW_DAYS`, `FORECAST_ROUTER` (`llm`/`rules`); deps `lightgbm` + `scikit-learn` + `joblib`; LLM route `'routing'`.
 
 ### Topics
 
@@ -431,7 +444,8 @@ pipeline (NOT part of the removed/placeholder prediction layer):
 | GET | `/api/events/<id>/` | Event detail + related articles |
 | GET | `/api/sources/` | All configured data sources |
 | GET | `/api/prices/latest/` | Most recent price tick per symbol; param: `stream_key` |
-| GET | `/api/prices/<symbol>/` | Price history; params: `from`, `to`, `limit` (max 5000) |
+| GET | `/api/prices/<symbol>/` | Price history (PriceTick); params: `from`, `to`, `limit` (max 5000) |
+| GET | `/api/prices/<symbol>/bars/` | Daily OHLC history (PriceBar); params: `interval`, `limit` (max 5000) |
 | GET | `/api/notams/` | Active NOTAM zones; params: `active`, `country_code`, `notam_type` |
 | GET | `/api/notams/history/` | NOTAM record history; params: `from`, `to`, `country_code`, `status`, `limit` |
 | GET | `/api/earthquakes/` | Global earthquakes; params: `min_magnitude` (default 3.0), `hours` (default 24), `limit` |
@@ -439,8 +453,9 @@ pipeline (NOT part of the removed/placeholder prediction layer):
 | GET | `/api/topics/` | Topics list; params: `active`, `current`, `top_level`, `category`, `date`, `parent`, `source`, `month`, `year` |
 | GET | `/api/topics/<slug>/` | Topic detail |
 | GET | `/api/topics/<slug>/events/` | Events tagged with topic; params: `start`, `end`, `limit` |
-| GET | `/api/forecasts/` | Placeholder forecasts (neutral/0 per symbol); params: `symbol`, `stream_key` |
-| GET | `/api/forecasts/latest/` | Placeholder; same neutral payload as above |
+| GET | `/api/forecasts/` | Latest forecast per (symbol, horizon); params: `symbol`, `stream_key`, `horizon` (1\|5) |
+| GET | `/api/forecasts/latest/` | Same as above (newest per symbol+horizon) |
+| GET | `/api/forecasts/accuracy/` | Rolling directional accuracy + Brier over scored forecasts; param: `symbol` |
 | GET | `/api/sse/` | Server-Sent Events stream (prices, NOTAMs, earthquakes) |
 | POST | `/api/newsletter/subscribe/` | Subscribe; body: `{"email": "..."}` — rate limited 5/hour |
 | GET | `/api/newsletter/confirm/<token>/` | Confirm subscription via token |
@@ -599,7 +614,11 @@ Service code: `api/services/data/historical.py` — `HistoricalBackfillService`.
 | Forex stream | `api/services/streams/forex.py` |
 | RSS ingestion | `api/services/data/rss.py` |
 | Historical backfill | `api/services/data/historical.py` → `HistoricalBackfillService` |
-| Event→symbol routing | `api/services/forecasting/routing.py` |
+| Event→symbol routing (rules) | `api/services/forecasting/routing.py` |
+| Event→symbol routing (LLM) | `api/services/routing/llm_router.py` |
+| Forecast features / model / backtest | `api/services/forecasting/{features,model,backtest}.py` |
+| OHLC backfill | `api/services/forecasting/history.py` |
+| Forecast docs (Mermaid) | `docs/forecasting.md` |
 | API views | `api/api/views/` |
 | API serializers | `api/api/serializers.py` |
 | API URLs | `api/api/urls.py` |
@@ -701,8 +720,8 @@ Stream tasks (default queue, independent of pipeline):
 | `OPENROUTER_MODELS` | `openrouter/free` | OpenRouter model (first value used) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `qwen3:4b` | Ollama model name |
-| `G4F_BASE_URL` | `http://localhost:1337/v1` | g4f local proxy URL (`g4f api`) |
-| `G4F_MODEL` | `gpt-4o-mini` | g4f model name |
+| `G4F_BASE_URL` | `http://localhost:8080/v1` | g4f proxy URL — the `hlohaus789/g4f` image serves the API on **:8080** (not :1337) |
+| `G4F_MODEL` | `gpt-4o` | g4f model — `gpt-4o-mini` is broken upstream (`KeyError: 'Chatai'`); the image git-pulls main on boot so models drift |
 | `FETCH_INTERVAL_MINUTES` | `10` | fetch_articles_task period |
 | `PROCESS_INTERVAL_MINUTES` | `10` | process_articles_task base period (×6 for heavy queue = 60m) |
 | `AGGREGATE_INTERVAL_MINUTES` | `10` | aggregate_events_task base period (×6 = 60m) |
@@ -717,6 +736,11 @@ Stream tasks (default queue, independent of pipeline):
 | `FOREX_FETCH_INTERVAL_MINUTES` | `15` | fetch_forex_task period |
 | `NEWSLETTER_GENERATE_HOUR` | `6` | Hour (UTC) for daily newsletter generation |
 | `NEWSLETTER_ENABLED` | `true` | Feature flag — gates newsletter generation/send (schedule + task) |
+| `FORECAST_ENABLED` | `true` | Feature flag — gates forecast train/run/score tasks + schedule |
+| `FORECAST_MODEL_DIR` | `<BASE_DIR>/forecast_models` | Where LightGBM artifacts persist (`model_h{h}.joblib`) |
+| `FORECAST_HORIZONS_DAYS` | `1,5` | Horizons (trading days) trained + served |
+| `FORECAST_TRAIN_WINDOW_DAYS` | `540` | Training lookback window |
+| `FORECAST_ROUTER` | `llm` | Live event router: `llm` (LLMEventRouter, rules fallback) or `rules` |
 | `STREAM_PRICES_ENABLED` | `true` | Feature flag — gates the prices stream (schedule + task) |
 | `STREAM_NOTAM_ENABLED` | `true` | Feature flag — gates the NOTAM stream |
 | `STREAM_EARTHQUAKE_ENABLED` | `true` | Feature flag — gates the earthquakes stream |
@@ -823,6 +847,16 @@ python manage.py fetch_stream forex
 
 # Seed static reference points (run once)
 python manage.py bootstrap_static_points
+
+# Forecasting (event-fused symbol prediction)
+python manage.py backfill_prices --years 5            # seed daily OHLC PriceBar
+python manage.py route_events --router llm --hours 720 # (re)route events → affected_indicators
+python manage.py train_forecast                        # fit LightGBM clf+reg per horizon
+python manage.py run_forecast                          # write Forecast rows
+python manage.py evaluate_forecast                     # walk-forward backtest → JSON report
+python manage.py forecast_e2e --years 3 --backtest    # run the whole flow → JSON report
+# Self-tests (no Mongo needed):
+DJANGO_SETTINGS_MODULE=settings.base python -m services.forecasting.tests_forecast
 
 # Backfill historical top-N articles per week from a source
 python manage.py backfill_history <source_code> --start-date 2022-01-01 --end-date 2025-01-01

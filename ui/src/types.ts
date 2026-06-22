@@ -195,21 +195,65 @@ export interface NewsletterDetail extends NewsletterSummary {
 
 export type ForecastDirection = "up" | "down" | "neutral"
 
-// Placeholder forecast — the prediction layer is being reworked; the API currently
-// returns a neutral / 0% diff per symbol.
+// Model-backed, event-fused forecast (one per symbol + horizon).
 export interface Forecast {
   symbol: string
   stream_key: string
   generated_at: string
-  horizon_hours: number
+  as_of_date: string
+  horizon_days: number
   direction: ForecastDirection
+  proba_up: number
   predicted_change_pct: number
+  predicted_price: number | null
+  band_low: number | null
+  band_high: number | null
+  confidence: number
   current_value: number | null
-  placeholder: boolean
+  router_source: string
+  model_version: string
+  realized_direction: ForecastDirection | null
+  realized_change_pct: number | null
+  is_correct: boolean | null
+  scored_at: string | null
 }
 
 export interface ForecastsResponse {
   results: Forecast[]
+  count: number
+}
+
+export interface ForecastAccuracy {
+  horizon_days: number
+  scored: number
+  correct: number
+  accuracy: number | null
+  brier: number | null
+}
+
+export interface ForecastAccuracyResponse {
+  results: ForecastAccuracy[]
+  count: number
+}
+
+export interface PriceBar {
+  id: string
+  symbol: string
+  stream_key: StreamKey
+  name: string
+  interval: string
+  open: number | null
+  high: number | null
+  low: number | null
+  close: number
+  volume: number | null
+  date: string
+}
+
+export interface PriceBarsResponse {
+  symbol: string
+  interval: string
+  results: PriceBar[]
   count: number
 }
 

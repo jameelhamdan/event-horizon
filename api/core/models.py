@@ -169,9 +169,12 @@ class Event(models.Model):
     avg_finbert_sentiment = models.FloatField(null=True, blank=True)  # FinBERT mean over articles
     avg_intensity = models.FloatField(null=True, blank=True)
 
-    # Deterministically-routed market indicators this event plausibly moves.
+    # Market indicators this event plausibly moves (a FEATURE/hypothesis, not a label).
     # Format: [{"symbol": "GC=F", "weight": 0.42}, ...] (weight signed; see routing.py)
     affected_indicators = models.JSONField(default=list, blank=True)
+    # Which router produced affected_indicators: 'llm' (LLMEventRouter) or 'rules' (routing.py).
+    # Recorded so the forecasting backtest can ablate LLM-routed vs rule-routed features.
+    router_source = models.CharField(max_length=8, default='rules', blank=True)
 
     # References
     article_ids = models.JSONField(default=list)
@@ -229,6 +232,87 @@ class PriceTick(models.Model):
 
     def __str__(self):
         return f'{self.symbol} {self.value} @ {self.occurred_at:%Y-%m-%d %H:%M}'
+
+
+class PriceBar(models.Model):
+    """Daily OHLC bar for a panel symbol — the training + charting substrate.
+
+    Distinct from PriceTick (high-frequency live samples): PriceBar is a clean daily
+    candle backfilled from yfinance (non-crypto) / CoinGecko (crypto). Upserted on
+    (symbol, interval, date); no TTL (history is the point).
+    """
+    symbol      = models.CharField(max_length=32)
+    stream_key  = models.CharField(max_length=32)                  # crypto/stock/commodity/index/bond
+    name        = models.CharField(max_length=64, blank=True)
+    interval    = models.CharField(max_length=8, default='1d')
+    open        = models.FloatField(null=True, blank=True)
+    high        = models.FloatField(null=True, blank=True)
+    low         = models.FloatField(null=True, blank=True)
+    close       = models.FloatField()
+    volume      = models.FloatField(null=True, blank=True)
+    date        = models.DateTimeField()                           # day-anchored UTC midnight
+    created_on  = models.DateTimeField(auto_now_add=True)
+
+    objects = MongoManager()
+
+    class Meta:
+        ordering = ['-date']
+        indexes = [
+            models.Index(fields=['symbol', 'interval', 'date']),
+            models.Index(fields=['date']),
+        ]
+
+    def __str__(self):
+        return f'{self.symbol} {self.close} @ {self.date:%Y-%m-%d}'
+
+
+class Forecast(models.Model):
+    """A model-backed market forecast for one (symbol, horizon) at a point in time.
+
+    The event→symbol router weights are FEATURES; the supervised label is the realized
+    return between two real price nodes (close@t → close@t+horizon). realized_* fields
+    are filled by score_forecasts_task once the horizon elapses.
+    """
+    symbol               = models.CharField(max_length=32)
+    stream_key           = models.CharField(max_length=32, blank=True)
+    generated_at         = models.DateTimeField()
+    as_of_date           = models.DateTimeField()                  # feature cut time t
+    horizon_days         = models.IntegerField(default=1)          # 1 or 5
+
+    # Predictions
+    direction            = models.CharField(max_length=8, default='neutral')  # up/down/neutral
+    proba_up             = models.FloatField(default=0.5)          # calibrated P(up)
+    predicted_change_pct = models.FloatField(default=0.0)          # regressor output (%)
+    predicted_price      = models.FloatField(null=True, blank=True)
+    band_low             = models.FloatField(null=True, blank=True)
+    band_high            = models.FloatField(null=True, blank=True)
+    confidence           = models.FloatField(default=0.0)          # |proba_up - 0.5| * 2
+    current_value        = models.FloatField(null=True, blank=True)  # last close at t
+
+    # Provenance
+    router_source        = models.CharField(max_length=8, default='rules')  # llm/rules
+    model_version        = models.CharField(max_length=64, blank=True)
+
+    # Realized outcome (scoring)
+    realized_direction   = models.CharField(max_length=8, null=True, blank=True)
+    realized_change_pct  = models.FloatField(null=True, blank=True)
+    is_correct           = models.BooleanField(null=True, blank=True)
+    scored_at            = models.DateTimeField(null=True, blank=True)
+
+    created_on           = models.DateTimeField(auto_now_add=True)
+
+    objects = MongoManager()
+
+    class Meta:
+        ordering = ['-generated_at']
+        indexes = [
+            models.Index(fields=['symbol', 'horizon_days', 'generated_at']),
+            models.Index(fields=['as_of_date']),
+            models.Index(fields=['generated_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.symbol} h{self.horizon_days}d {self.direction} ({self.proba_up:.2f})'
 
 
 class NotamRecord(models.Model):

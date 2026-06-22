@@ -150,3 +150,8 @@ media_data/*
 .static
 plans/*
 .claude/settings.local.json
+
+# Forecasting model artifacts + run reports
+forecast_models/
+forecast_backtest_*.json
+forecast_e2e_*.json

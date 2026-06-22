@@ -43,8 +43,12 @@ services:
     expose:
       - "8000"
     depends_on:
-      - mongo
-      - redis
+      mongo:
+        condition: service_started
+      redis:
+        condition: service_started
+      g4f:
+        condition: service_healthy
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
@@ -53,10 +57,14 @@ services:
   worker-heavy:
     build: ./api
     restart: always
-    command: sh -c "python manage.py rqworker heavy"
+    command: sh -c "python manage.py rqworker   heavy"
     depends_on:
-      - mongo
-      - redis
+      mongo:
+        condition: service_started
+      redis:
+        condition: service_started
+      g4f:
+        condition: service_healthy
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
@@ -84,20 +92,19 @@ services:
       - ./media_data:/app/media
 
   g4f:
-    # gpt4free OpenAI-compatible proxy — registration-free LLM provider.
-    # OPTIONAL: gated behind the `g4f` compose profile so the stack does not depend
-    # on it at startup. For production, prefer a reliable provider (OpenRouter) as the
-    # primary route in settings.LLM_ROUTES and keep g4f only as a fallback chain entry.
-    #   • default `docker compose up`        → g4f NOT started; LLM calls route to OpenRouter
-    #   • `docker compose --profile g4f up`   → bundles g4f at http://g4f:1337/v1
-    # When enabling, set G4F_BASE_URL=http://g4f:1337/v1 in .env.app (the localhost default
-    # is for running manage.py outside Docker). Use the full `hlohaus789/g4f:latest` image
-    # instead of -slim if you need the browser-based providers (heavier; bundles Chromium).
     image: hlohaus789/g4f:latest-slim
-    profiles: ["g4f"]
     restart: always
+    # NOTE: this image serves the OpenAI-compatible API on 8080 (not 1337), and it
+    # git-pulls g4f main on every boot — so providers/models drift. Keep G4F_MODEL on a
+    # provider that works (gpt-4o); gpt-4o-mini is currently broken upstream (KeyError 'Chatai').
     expose:
-      - "1337"
+      - "8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/v1/models', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   redis:
     image: redis:7-alpine

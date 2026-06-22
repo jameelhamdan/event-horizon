@@ -1,61 +1,85 @@
-"""Forecast API views — PLACEHOLDER.
+"""Forecast API views — model-backed (event-fused symbol prediction).
 
-The market-forecasting prediction layer was removed and is being reworked from
-scratch. These views return a neutral / zero-diff forecast per symbol so the UI
-forecast surface keeps working in the meantime. Nothing is stored: each result is
-synthesized from the most recent ``PriceTick`` for the symbol.
+Reads the latest ``Forecast`` rows per (symbol, horizon), plus a rolling accuracy/calibration
+summary from scored forecasts. Forecasts are produced by ``run_forecast_task``; if none exist
+yet (models not trained / no backfill), the list endpoints return an empty result set.
 """
-
-from datetime import datetime, timezone as dt_timezone
-
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core import models as core_models
-from api.serializers import ForecastSerializer
+from api.serializers import ForecastSerializer, ForecastAccuracySerializer
 
-PLACEHOLDER_HORIZON_HOURS = 24
+
+def _latest_per_symbol_horizon(qs, limit=400):
+    """qs ordered by -generated_at → keep the newest row per (symbol, horizon)."""
+    seen, out = set(), []
+    for f in qs:
+        key = (f.symbol, f.horizon_days)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+        if len(out) >= limit:
+            break
+    return out
 
 
 class ForecastLatestView(APIView):
     """
     GET /api/forecasts/latest/
-    Placeholder: one neutral (0% predicted change) forecast per symbol, built from
-    the latest price tick. Query params: stream_key, symbol.
+    Latest forecast per (symbol, horizon). Params: symbol, stream_key, horizon (1|5).
     """
 
     def get(self, request):
-        qs = core_models.PriceTick.objects.all()
-        if stream_key := request.query_params.get('stream_key'):
-            qs = qs.filter(stream_key=stream_key)
+        qs = core_models.Forecast.objects.all()
         if symbol := request.query_params.get('symbol'):
             qs = qs.filter(symbol=symbol)
+        if stream_key := request.query_params.get('stream_key'):
+            qs = qs.filter(stream_key=stream_key)
+        if horizon := request.query_params.get('horizon'):
+            try:
+                qs = qs.filter(horizon_days=int(horizon))
+            except ValueError:
+                pass
 
-        now = datetime.now(dt_timezone.utc)
-        seen: set[str] = set()
-        results: list[dict] = []
-        # qs uses the model's default ordering (-occurred_at), so the first tick seen
-        # for a symbol is its most recent one.
-        for tick in qs:
-            if tick.symbol in seen:
-                continue
-            seen.add(tick.symbol)
-            results.append({
-                'symbol': tick.symbol,
-                'stream_key': tick.stream_key,
-                'generated_at': now,
-                'horizon_hours': PLACEHOLDER_HORIZON_HOURS,
-                'direction': 'neutral',
-                'predicted_change_pct': 0.0,
-                'current_value': tick.value,
-                'placeholder': True,
-            })
-            if len(seen) >= 200:
-                break
-
-        data = ForecastSerializer(results, many=True).data
+        latest = _latest_per_symbol_horizon(qs)  # qs default order = -generated_at
+        data = ForecastSerializer(latest, many=True).data
         return Response({'results': data, 'count': len(data)})
 
 
 class ForecastListView(ForecastLatestView):
-    """GET /api/forecasts/ — placeholder; same neutral payload as /latest/."""
+    """GET /api/forecasts/ — same as /latest/ (newest forecast per symbol+horizon)."""
+
+
+class ForecastAccuracyView(APIView):
+    """
+    GET /api/forecasts/accuracy/
+    Rolling directional accuracy + Brier over scored forecasts, per horizon. Param: symbol.
+    """
+
+    def get(self, request):
+        qs = core_models.Forecast.objects.filter(is_correct__isnull=False)
+        if symbol := request.query_params.get('symbol'):
+            qs = qs.filter(symbol=symbol)
+
+        agg: dict[int, dict] = {}
+        for f in qs:
+            a = agg.setdefault(f.horizon_days, {'scored': 0, 'correct': 0, 'sq_err': 0.0})
+            a['scored'] += 1
+            a['correct'] += 1 if f.is_correct else 0
+            realized_up = 1.0 if (f.realized_change_pct or 0) > 0 else 0.0
+            a['sq_err'] += (f.proba_up - realized_up) ** 2
+
+        results = []
+        for horizon, a in sorted(agg.items()):
+            n = a['scored']
+            results.append({
+                'horizon_days': horizon,
+                'scored': n,
+                'correct': a['correct'],
+                'accuracy': round(a['correct'] / n, 4) if n else None,
+                'brier': round(a['sq_err'] / n, 4) if n else None,
+            })
+        data = ForecastAccuracySerializer(results, many=True).data
+        return Response({'results': data, 'count': len(data)})

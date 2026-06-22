@@ -36,6 +36,7 @@ class Command(BaseCommand):
         from newsletter.tasks import generate_newsletter_task
         from services.tasks import (
             aggregate_events_task,
+            backfill_prices_task,
             discover_topics_task,
             fetch_articles_task,
             fetch_earthquakes_task,
@@ -45,7 +46,11 @@ class Command(BaseCommand):
             pipeline_health_task,
             process_articles_task,
             refresh_topics_task,
+            route_events_task,
+            run_forecast_task,
+            score_forecasts_task,
             tag_topics_task,
+            train_forecast_model_task,
         )
 
         conn = django_rq.get_connection('default')
@@ -102,6 +107,21 @@ class Command(BaseCommand):
         heavy.cron(f'0 {refresh_hour} * * *',    refresh_topics_task,      repeat=None, timeout=cron_timeout)
         if settings.NEWSLETTER_ENABLED:
             heavy.cron(f'0 {newsletter_hour} * * *', generate_newsletter_task, repeat=None, timeout=cron_timeout)
+
+        # ── Forecasting (event-fused symbol prediction) ───────────────────────
+        if settings.FORECAST_ENABLED:
+            # Weekly OHLC backfill keeps PriceBar fresh (light I/O).
+            week = 7 * 24 * 60 * 60
+            light.schedule(now, backfill_prices_task, interval=week, repeat=None, timeout=cron_timeout)
+            # Route new events to symbols (LLM) on the heavy queue, aligned with tagging.
+            route_interval = _minutes('ROUTE_EVENTS_INTERVAL_MINUTES', '90')
+            heavy.schedule(now, route_events_task, interval=route_interval, repeat=None,
+                           timeout=_interval_timeout(route_interval))
+            # Daily: train models (05:00), generate forecasts (05:30), score elapsed (07:00).
+            train_hour = int(os.getenv('FORECAST_TRAIN_HOUR', '5'))
+            heavy.cron(f'0 {train_hour} * * *',  train_forecast_model_task, repeat=None, timeout=cron_timeout)
+            heavy.cron(f'30 {train_hour} * * *', run_forecast_task,         repeat=None, timeout=cron_timeout)
+            light.cron('0 7 * * *',              score_forecasts_task,      repeat=None, timeout=cron_timeout)
 
         # rq-scheduler keeps a single shared job registry (not split per queue),
         # so report the total actually registered.

@@ -254,9 +254,11 @@ OPENROUTER_MODELS = config('OPENROUTER_MODELS', default='openrouter/free')
 OLLAMA_BASE_URL = config('OLLAMA_BASE_URL', default='http://localhost:11434')
 OLLAMA_MODEL = config('OLLAMA_MODEL', default='qwen3:4b')
 
-# g4f / gpt4free (local proxy, registration-free) — run `g4f api`
-G4F_BASE_URL = config('G4F_BASE_URL', default='http://localhost:1337/v1')
-G4F_MODEL = config('G4F_MODEL', default='gpt-4o-mini')
+# g4f / gpt4free (local proxy, registration-free). NOTE: the hlohaus789/g4f Docker image
+# serves the OpenAI-compatible API on :8080 (not :1337) and git-pulls main on boot, so models
+# drift — keep G4F_MODEL on a working provider (gpt-4o; gpt-4o-mini is broken upstream).
+G4F_BASE_URL = config('G4F_BASE_URL', default='http://localhost:8080/v1')
+G4F_MODEL = config('G4F_MODEL', default='gpt-4o')
 
 # Routing: role -> provider name OR ordered fallback list (tried in order on failure).
 # Unconfigured providers are skipped; unknown roles fall back to 'default'.
@@ -266,10 +268,24 @@ LLM_ROUTES = {
     'default': ['g4f', 'openrouter'],
 
     # Override per role if you want. Roles: analyzer, topics, newsletter,
-    # historical. e.g. lead the per-article analyzer with a local Ollama model for
+    # historical, routing. e.g. lead the per-article analyzer with a local Ollama model for
     # stronger Arabic/JSON quality:
     #   'analyzer': ['ollama', 'g4f'],
+
+    # Event→symbol routing (LLMEventRouter). Falls back to deterministic routing.py on error.
+    'routing': ['g4f', 'openrouter'],
 }
+
+# ── Forecasting (event-fused symbol prediction) ───────────────────────────────
+FORECAST_ENABLED = config('FORECAST_ENABLED', default=True, cast=bool)
+FORECAST_MODEL_DIR = config('FORECAST_MODEL_DIR', default=str(BASE_DIR / 'forecast_models'))
+# Horizons (trading days) trained + served. Comma-separated.
+FORECAST_HORIZONS_DAYS = [
+    int(h) for h in config('FORECAST_HORIZONS_DAYS', default='1,5').split(',') if h.strip()
+]
+FORECAST_TRAIN_WINDOW_DAYS = config('FORECAST_TRAIN_WINDOW_DAYS', default=540, cast=int)
+# Live router source: 'llm' (LLMEventRouter, rules fallback) or 'rules' (deterministic only).
+FORECAST_ROUTER = config('FORECAST_ROUTER', default='llm')
 
 # ── RQ / django-rq ────────────────────────────────────────────────────────────
 _REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')

@@ -1,7 +1,7 @@
 from django.urls import path
 from api.views.events import (
     EventListView, EventDetailView, SourceListView,
-    PriceLatestView, PriceHistoryView,
+    PriceLatestView, PriceHistoryView, PriceBarsView,
     NotamZoneListView, NotamHistoryView,
     EarthquakeListView, StaticPointListView,
     TopicListView, TopicDetailView, TopicEventsView,
@@ -11,7 +11,7 @@ from api.views.newsletter import (
     SubscribeView, ConfirmView, UnsubscribeView,
     NewsletterListView, NewsletterLatestView, NewsletterDetailView,
 )
-from api.views.forecasts import ForecastListView, ForecastLatestView
+from api.views.forecasts import ForecastListView, ForecastLatestView, ForecastAccuracyView
 
 urlpatterns = [
     # ── Events & sources ──────────────────────────────────────────────────────
@@ -21,6 +21,7 @@ urlpatterns = [
 
     # ── Price streams ─────────────────────────────────────────────────────────
     path('prices/latest/', PriceLatestView.as_view(), name='price-latest'),
+    path('prices/<str:symbol>/bars/', PriceBarsView.as_view(), name='price-bars'),
     path('prices/<str:symbol>/', PriceHistoryView.as_view(), name='price-history'),
 
     # ── NOTAMs ────────────────────────────────────────────────────────────────
@@ -38,9 +39,10 @@ urlpatterns = [
     path('topics/<str:slug>/', TopicDetailView.as_view(), name='topic-detail'),
     path('topics/<str:slug>/events/', TopicEventsView.as_view(), name='topic-events'),
 
-    # ── Forecasts (placeholder — neutral/0 until the prediction layer is reworked) ─
+    # ── Forecasts (event-fused symbol prediction) ─────────────────────────────
     path('forecasts/', ForecastListView.as_view(), name='forecast-list'),
     path('forecasts/latest/', ForecastLatestView.as_view(), name='forecast-latest'),
+    path('forecasts/accuracy/', ForecastAccuracyView.as_view(), name='forecast-accuracy'),
 
     # ── Server-Sent Events ────────────────────────────────────────────────────
     path('sse/', SSEStreamView.as_view(), name='sse-stream'),
