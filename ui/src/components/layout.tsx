@@ -72,7 +72,6 @@ export function SiteHeader({ activePage, children, showNav = true }: SiteHeaderP
           >
             {t.navMarkets}
           </NavLink>
-          <SubscribePopup />
           <NavLink
             to="/newsletter"
             className={({ isActive }) =>
@@ -107,6 +106,8 @@ export function SiteHeader({ activePage, children, showNav = true }: SiteHeaderP
       >
         {lang === "en" ? "ع" : "EN"}
       </button>
+
+      {showNav && <SubscribePopup />}
 
       <span className="shrink-0 font-mono text-[0.7rem] text-muted-foreground/50">v{constants.VERSION}</span>
     </nav>

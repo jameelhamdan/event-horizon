@@ -6,6 +6,8 @@ import { SiteHeader } from "../components/layout";
 import PriceTicker from "../components/events/PriceTicker";
 import ForecastPanel from "../components/events/ForecastPanel";
 import EventsHeatmap from "../components/markets/EventsHeatmap";
+import IndicatorsLineChart from "../components/markets/IndicatorsLineChart";
+import CauseEffectGraph from "../components/markets/CauseEffectGraph";
 import { useSSE } from "../hooks/useSSE";
 import { useLanguage } from "../contexts/LanguageContext";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
@@ -57,9 +59,7 @@ export default function MarketsPage() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-app-bg text-app-text-primary">
-      <header className="shrink-0 border-b border-app-border bg-app-surface">
-        <SiteHeader activePage="markets" />
-      </header>
+      <SiteHeader activePage="markets" />
 
       <main className="min-h-0 flex-1 overflow-y-auto p-4">
         <div className="mx-auto grid max-w-6xl grid-cols-1 gap-4 lg:grid-cols-[minmax(0,400px)_1fr]">
@@ -73,10 +73,19 @@ export default function MarketsPage() {
             </Panel>
           </div>
 
-          {/* Right column: weighted event→market heatmap */}
-          <Panel title={t.eventsImpactHeatmap}>
-            <EventsHeatmap days={7} />
-          </Panel>
+          {/* Right column: indicator relationships + weighted event→market views */}
+          <div className="flex flex-col gap-4">
+            <Panel title={t.indicatorsCompare}>
+              <IndicatorsLineChart />
+            </Panel>
+            <Panel title={t.causeEffectTitle}>
+              <p className="mb-3 text-[0.7rem] leading-snug text-app-text-muted">{t.causeEffectNote}</p>
+              <CauseEffectGraph days={7} />
+            </Panel>
+            <Panel title={t.eventsImpactHeatmap}>
+              <EventsHeatmap days={7} />
+            </Panel>
+          </div>
         </div>
       </main>
     </div>

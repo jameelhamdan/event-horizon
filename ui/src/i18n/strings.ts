@@ -110,6 +110,14 @@ export interface UIStrings {
   heatmapUp: string
   heatmapDown: string
   eventCountLabel: string
+  // Indicator relationship visualisations (Markets page)
+  indicatorsCompare: string
+  indicatorsCompareNote: string
+  causeEffectTitle: string
+  causeEffectNote: string
+  causeEffectEmpty: string
+  causeLabel: string
+  effectLabel: string
   // Price chart
   priceVolume: string
   priceNoHistory: string
@@ -288,6 +296,13 @@ export const UI: Record<Language, UIStrings> = {
     heatmapUp: "upward pressure",
     heatmapDown: "downward pressure",
     eventCountLabel: "events",
+    indicatorsCompare: "Indicator performance",
+    indicatorsCompareNote: "Daily close, rebased to 0% at window start — shows how indicators move against each other.",
+    causeEffectTitle: "Cause → effect graph",
+    causeEffectNote: "How recent event categories press on each market indicator. Edge thickness = strength, colour = direction.",
+    causeEffectEmpty: "No weighted events to map in this window",
+    causeLabel: "Causes",
+    effectLabel: "Effects",
     priceVolume: "Volume",
     priceNoHistory: "No price history",
     affectedIndicators: "Affected indicators",
@@ -449,8 +464,8 @@ export const UI: Record<Language, UIStrings> = {
     showSidebar: "إظهار الشريط الجانبي",
     clearTimeFilter: "مسح فلتر الوقت",
     clearTopicFilter: "مسح فلتر الموضوع",
-    switchToArabic: "Switch to Arabic",
-    switchToEnglish: "Switch to English",
+    switchToArabic: "التبديل إلى العربية",
+    switchToEnglish: "التبديل إلى الإنجليزية",
     noEventsFiltered: "لا توجد أحداث تطابق الفلاتر الحالية.",
     sentBullish: "صعودي",
     sentBearish: "هبوطي",
@@ -475,6 +490,13 @@ export const UI: Record<Language, UIStrings> = {
     heatmapUp: "ضغط صعودي",
     heatmapDown: "ضغط هبوطي",
     eventCountLabel: "أحداث",
+    indicatorsCompare: "أداء المؤشرات",
+    indicatorsCompareNote: "الإغلاق اليومي، معاد ضبطه إلى ٪٠ في بداية الفترة — يوضح كيف تتحرك المؤشرات مقابل بعضها.",
+    causeEffectTitle: "رسم السبب ← الأثر",
+    causeEffectNote: "كيف تضغط فئات الأحداث الأخيرة على كل مؤشر سوقي. سماكة الخط = القوة، اللون = الاتجاه.",
+    causeEffectEmpty: "لا توجد أحداث مرجّحة لرسمها في هذه الفترة",
+    causeLabel: "الأسباب",
+    effectLabel: "الآثار",
     priceVolume: "الحجم",
     priceNoHistory: "لا يوجد سجل أسعار",
     affectedIndicators: "المؤشرات المتأثرة",
