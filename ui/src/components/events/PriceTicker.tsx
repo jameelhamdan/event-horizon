@@ -67,24 +67,37 @@ interface PriceTickerProps {
   } | null
   /** External request (F5 cross-link) to focus a symbol's chart. */
   focusSymbol?: { symbol: string; streamKey: StreamKey } | null
+  /**
+   * Controlled master-detail mode. When provided, clicking a row reports the selection
+   * to the parent (which drives a central chart) instead of expanding an inline chart.
+   */
+  selectedSymbol?: string | null
+  onSelectSymbol?: (symbol: string, streamKey: StreamKey, name: string) => void
 }
 
-export default function PriceTicker({ latestTick, focusSymbol }: PriceTickerProps) {
+export default function PriceTicker({
+  latestTick,
+  focusSymbol,
+  selectedSymbol: controlledSelected,
+  onSelectSymbol,
+}: PriceTickerProps) {
   const { t } = useLanguage()
+  const controlled = onSelectSymbol != null
   const [activeKey, setActiveKey] = useState<StreamKey>("crypto")
   const [ticks, setTicks] = useState<PriceTick[]>([])
   const [loading, setLoading] = useState(true)
   const [flashedSymbols, setFlashedSymbols] = useState<Set<string>>(new Set())
-  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
+  const [internalSelected, setInternalSelected] = useState<string | null>(null)
+  const selectedSymbol = controlled ? controlledSelected ?? null : internalSelected
 
   useEffect(() => {
     setLoading(true)
-    setSelectedSymbol(null)
+    if (!controlled) setInternalSelected(null)
     fetchPricesLatest(activeKey)
       .then((data) => setTicks(data.results))
       .catch(() => {})
       .finally(() => setLoading(false))
-  }, [activeKey])
+  }, [activeKey, controlled])
 
   useEffect(() => {
     if (!latestTick) return
@@ -111,8 +124,16 @@ export default function PriceTicker({ latestTick, focusSymbol }: PriceTickerProp
   useEffect(() => {
     if (!focusSymbol) return
     setActiveKey(focusSymbol.streamKey)
-    setSelectedSymbol(focusSymbol.symbol)
-  }, [focusSymbol])
+    if (!controlled) setInternalSelected(focusSymbol.symbol)
+  }, [focusSymbol, controlled])
+
+  const handleRowClick = (tk: PriceTick) => {
+    if (controlled) {
+      onSelectSymbol!(tk.symbol, tk.stream_key, tk.name)
+    } else {
+      setInternalSelected((prev) => (prev === tk.symbol ? null : tk.symbol))
+    }
+  }
 
   return (
     <div className="flex flex-col border-b border-app-border">
@@ -162,9 +183,10 @@ export default function PriceTicker({ latestTick, focusSymbol }: PriceTickerProp
                 tick={tk}
                 flash={flashedSymbols.has(tk.symbol)}
                 selected={selectedSymbol === tk.symbol}
-                onClick={() => setSelectedSymbol((prev) => (prev === tk.symbol ? null : tk.symbol))}
+                onClick={() => handleRowClick(tk)}
               />
-              {selectedSymbol === tk.symbol && (
+              {/* Inline chart only in uncontrolled mode; controlled mode drives a central chart. */}
+              {!controlled && selectedSymbol === tk.symbol && (
                 <Suspense fallback={<div className="px-3 py-3 text-[0.72rem] text-app-text-dim">{t.loading}</div>}>
                   <PriceChart symbol={tk.symbol} streamKey={tk.stream_key} />
                 </Suspense>

@@ -7,7 +7,7 @@ import { categoryColor } from "@/components/category"
 import { categoryLabel } from "../../i18n/categories"
 import type { EventSummary } from "../../types"
 
-// Panel symbols + short labels (kept in sync with services/forecasting/routing.py + EventsHeatmap).
+// Panel symbols + short labels (kept in sync with services/forecasting/routing.py PANEL_SYMBOLS).
 const PANEL: { symbol: string; label: string }[] = [
   { symbol: "GC=F", label: "Gold" },
   { symbol: "CL=F", label: "Oil" },

@@ -24,17 +24,21 @@ interface Row {
 }
 
 interface IndicatorsLineChartProps {
-  limit?: number
+  days?: number
   height?: number
 }
 
 // Multi-indicator overlay: each indicator's daily close is rebased to 0% at the window start so
 // they share one axis and you can read how they move *relative to each other* (cause/effect over
 // time). Data comes from the same daily PriceBar substrate the forecast charts use.
-export default function IndicatorsLineChart({ limit = 120, height = 260 }: IndicatorsLineChartProps) {
+export default function IndicatorsLineChart({ days = 90, height = 260 }: IndicatorsLineChartProps) {
   const { t } = useLanguage()
   const [series, setSeries] = useState<Record<string, { date: string; close: number }[]>>({})
   const [loading, setLoading] = useState(true)
+
+  // Daily bars: cap the number fetched to the calendar window (weekends/holidays mean we get fewer
+  // back). +1 so a 1-day range still returns the most recent bar.
+  const limit = Math.max(days + 1, 2)
 
   useEffect(() => {
     let cancelled = false

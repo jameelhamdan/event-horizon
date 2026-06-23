@@ -118,6 +118,24 @@ export interface UIStrings {
   causeEffectEmpty: string
   causeLabel: string
   effectLabel: string
+  // Date range filter
+  rangeLabel: string
+  range1d: string
+  range1w: string
+  range1m: string
+  range3m: string
+  range1y: string
+  range5y: string
+  // Markets dashboard
+  watchlist: string
+  moversTitle: string
+  moversGainers: string
+  moversLosers: string
+  moversVolatile: string
+  symbolSelectPrompt: string
+  symbolRangeHigh: string
+  symbolRangeLow: string
+  symbolRangeChange: string
   // Price chart
   priceVolume: string
   priceNoHistory: string
@@ -303,6 +321,22 @@ export const UI: Record<Language, UIStrings> = {
     causeEffectEmpty: "No weighted events to map in this window",
     causeLabel: "Causes",
     effectLabel: "Effects",
+    rangeLabel: "Range",
+    range1d: "1D",
+    range1w: "1W",
+    range1m: "1M",
+    range3m: "3M",
+    range1y: "1Y",
+    range5y: "5Y",
+    watchlist: "Watchlist",
+    moversTitle: "Movers",
+    moversGainers: "Gainers",
+    moversLosers: "Losers",
+    moversVolatile: "Most volatile",
+    symbolSelectPrompt: "Select a symbol to view its chart",
+    symbolRangeHigh: "High",
+    symbolRangeLow: "Low",
+    symbolRangeChange: "Change",
     priceVolume: "Volume",
     priceNoHistory: "No price history",
     affectedIndicators: "Affected indicators",
@@ -497,6 +531,22 @@ export const UI: Record<Language, UIStrings> = {
     causeEffectEmpty: "لا توجد أحداث مرجّحة لرسمها في هذه الفترة",
     causeLabel: "الأسباب",
     effectLabel: "الآثار",
+    rangeLabel: "الفترة",
+    range1d: "يوم",
+    range1w: "أسبوع",
+    range1m: "شهر",
+    range3m: "٣ أشهر",
+    range1y: "سنة",
+    range5y: "٥ سنوات",
+    watchlist: "قائمة المتابعة",
+    moversTitle: "الأكثر تحركًا",
+    moversGainers: "الرابحون",
+    moversLosers: "الخاسرون",
+    moversVolatile: "الأكثر تقلبًا",
+    symbolSelectPrompt: "اختر رمزًا لعرض الرسم البياني",
+    symbolRangeHigh: "أعلى",
+    symbolRangeLow: "أدنى",
+    symbolRangeChange: "التغيّر",
     priceVolume: "الحجم",
     priceNoHistory: "لا يوجد سجل أسعار",
     affectedIndicators: "المؤشرات المتأثرة",
