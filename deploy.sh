@@ -3,13 +3,13 @@
 #
 # Usage:
 #   ./deploy.sh              # deploy from current branch
-#   ./deploy.sh main         # deploy a specific branch
+#   ./deploy.sh master         # deploy a specific branch
 #
 # Called by: git post-receive hook, webhook listener, or manually.
 
 set -e
 
-BRANCH="${1:-main}"
+BRANCH="${1:-master}"
 COMPOSE="docker compose"
 
 echo "==> deploy: pulling $BRANCH"

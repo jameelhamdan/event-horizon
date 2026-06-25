@@ -1,0 +1,8 @@
+{% extends "admin/base.html" %}
+{% load i18n %}
+
+{% block nav-global %}
+<div id="nav-global">
+  <a href="{% url 'admin:ops_dashboard' %}">{% trans "Dashboard" %}</a>
+</div>
+{% endblock %}

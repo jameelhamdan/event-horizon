@@ -519,3 +519,9 @@ def _admin_get_urls():
 admin.site.get_urls = _admin_get_urls
 
 
+# ── Branding ──────────────────────────────────────────────────────────────────
+from django.conf import settings as _settings  # noqa: E402
+_app = getattr(_settings, 'APP_NAME', 'conflictradar.live')
+admin.site.site_header = _app
+admin.site.site_title = _app
+admin.site.index_title = 'Administration'
