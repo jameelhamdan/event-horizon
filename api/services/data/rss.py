@@ -112,6 +112,12 @@ def _entry_to_datum(
     if not content:
         return None
 
+    # --- Content length filter ---
+    from django.conf import settings as _s
+    min_words = getattr(_s, 'ARTICLE_MIN_WORD_COUNT', 30)
+    if min_words > 0 and len(f'{title} {content}'.split()) < min_words:
+        return None
+
     # --- Author ---
     author = (
         entry.get('author')

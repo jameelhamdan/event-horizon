@@ -3,10 +3,13 @@
 These are plain Python functions enqueued via django-rq (services.queue.enqueue).
 """
 
+import logging
 import os
 from datetime import datetime, timedelta, timezone as dt_timezone
 
 from services.workflow import Workflow
+
+logger = logging.getLogger(__name__)
 
 JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "1800"))
 DEFAULT_FETCH_MINUTES = int(os.getenv("FETCH_INTERVAL_MINUTES", "10")) * 2
@@ -132,8 +135,15 @@ def dispatch_process_articles_task(limit: int | None = None, only_failed: bool =
         qs = core_models.Article.objects.filter(processed_on__isnull=False, location__isnull=True)
         ids = [a.id for a in qs.only('id', 'extra_data') if not (a.extra_data or {}).get('geo_failed')][:limit]
     else:
-        ids = list(core_models.Article.objects.filter(processed_on__isnull=True)
-                   .values_list('id', flat=True)[:limit])
+        from django.conf import settings as _s
+        qs = core_models.Article.objects.filter(processed_on__isnull=True)
+        min_score = getattr(_s, 'ARTICLE_MIN_IMPORTANCE_TO_PROCESS', 0.0)
+        if min_score > 0:
+            qs = qs.exclude(
+                importance_score__isnull=False,
+                importance_score__lt=min_score,
+            )
+        ids = list(qs.order_by('-importance_score').values_list('id', flat=True)[:limit])
     if not ids:
         return 0
     retry = make_retry()
@@ -558,6 +568,130 @@ def run_forecast_task() -> int:
             )
             created += 1
     return created
+
+
+# ── Article importance scoring ────────────────────────────────────────────────
+
+def score_articles_task(hours: int = 2, article_ids: list | None = None) -> int:
+    """
+    LLM-score articles that have no importance_score.
+    article_ids: when given, re-score exactly these articles (ignores hours).
+    hours: when article_ids is None, score rows created in this window.
+    """
+    from django.conf import settings
+    if not getattr(settings, 'ARTICLE_IMPORTANCE_SCORING_ENABLED', True):
+        return 0
+    from services.scoring import score_unscored_articles
+    return score_unscored_articles(hours=hours, article_ids=article_ids)
+
+
+def cleanup_low_importance_articles_task() -> int:
+    """
+    Delete unprocessed low-importance articles older than ARTICLE_CLEANUP_GRACE_HOURS.
+    Approximates "gate before storage" without blocking the fetch path.
+    """
+    from django.conf import settings
+    from core import models as core_models
+
+    min_score   = getattr(settings, 'ARTICLE_MIN_IMPORTANCE', 4.0)
+    grace_hours = getattr(settings, 'ARTICLE_CLEANUP_GRACE_HOURS', 48)
+    cutoff      = datetime.now(dt_timezone.utc) - timedelta(hours=grace_hours)
+
+    deleted, _ = core_models.Article.objects.filter(
+        importance_score__isnull=False,
+        importance_score__lt=min_score,
+        processed_on__isnull=True,
+        created_on__lt=cutoff,
+    ).delete()
+    logger.info('[cleanup] deleted %d low-importance unprocessed articles', deleted)
+    return deleted
+
+
+def prune_stale_articles_task() -> int:
+    """
+    Delete processed articles that could never contribute to an event:
+    location not resolved AND older than ARTICLE_STALE_PROCESSED_DAYS.
+    """
+    from django.conf import settings
+    from core import models as core_models
+
+    stale_days = getattr(settings, 'ARTICLE_STALE_PROCESSED_DAYS', 7)
+    cutoff     = datetime.now(dt_timezone.utc) - timedelta(days=stale_days)
+
+    candidates = list(
+        core_models.Article.objects.filter(
+            location__isnull=True,
+            processed_on__lt=cutoff,
+        ).only('id', 'extra_data')
+    )
+    ids = [a.id for a in candidates if (a.extra_data or {}).get('geo_failed')]
+    if not ids:
+        return 0
+
+    deleted, _ = core_models.Article.objects.filter(id__in=ids).delete()
+    logger.info('[cleanup] pruned %d stale unlocated articles', deleted)
+    return deleted
+
+
+def adjust_source_weights_task() -> int:
+    """
+    Nudge Source.weight based on 30-day event yield rate.
+    Sources whose articles consistently land in Events drift up; noisy sources drift down.
+    weight_locked=True sources are skipped. Independent of ARTICLE_IMPORTANCE_SCORING_ENABLED.
+    """
+    from core import models as core_models
+
+    cutoff  = datetime.now(dt_timezone.utc) - timedelta(days=30)
+    sources = list(core_models.Source.objects.filter(is_enabled=True))
+    if not sources:
+        return 0
+
+    # Load all article IDs referenced by recent events once — avoid per-source DB round-trips.
+    event_article_ids_raw = list(
+        core_models.Event.objects.filter(started_at__gte=cutoff)
+        .values_list('article_ids', flat=True)
+    )
+    all_event_article_ids: set[str] = {
+        str(aid)
+        for article_ids in event_article_ids_raw
+        for aid in (article_ids or [])
+    }
+
+    adjusted = 0
+    for source in sources:
+        if source.weight_locked:
+            continue
+
+        source_article_ids = list(
+            core_models.Article.objects.filter(
+                source_code=source.code,
+                created_on__gte=cutoff,
+            ).values_list('id', flat=True)
+        )
+        total = len(source_article_ids)
+        if total < 10:
+            continue
+
+        event_count = sum(1 for aid in source_article_ids if str(aid) in all_event_article_ids)
+        yield_rate  = event_count / total
+
+        if yield_rate >= 0.3:
+            new_weight = min(round(source.weight + 0.1, 2), 2.0)
+        elif yield_rate < 0.1:
+            new_weight = max(round(source.weight - 0.1, 2), 0.5)
+        else:
+            continue
+
+        if abs(new_weight - source.weight) > 0.001:
+            source.weight = new_weight
+            source.save(update_fields=['weight'])
+            logger.info(
+                '[weights] %s: yield=%.0f%% → weight %.2f',
+                source.code, yield_rate * 100, new_weight,
+            )
+            adjusted += 1
+
+    return adjusted
 
 
 def score_forecasts_task() -> int:

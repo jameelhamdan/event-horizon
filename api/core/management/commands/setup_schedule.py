@@ -34,12 +34,11 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         from newsletter.tasks import generate_newsletter_task
-        from services.queue import enqueue  # noqa: F401 — used below for bootstrap
         from services.tasks import (
+            adjust_source_weights_task,
             aggregate_events_task,
-            backfill_articles_task,
             backfill_prices_task,
-            bootstrap_initial_data_task,
+            cleanup_low_importance_articles_task,
             discover_topics_task,
             dispatch_fetch_task,
             dispatch_process_articles_task,
@@ -50,8 +49,10 @@ class Command(BaseCommand):
             fetch_notams_task,
             fetch_prices_task,
             pipeline_health_task,
+            prune_stale_articles_task,
             refresh_topics_task,
             run_forecast_task,
+            score_articles_task,
             score_forecasts_task,
             train_forecast_model_task,
         )
@@ -121,11 +122,18 @@ class Command(BaseCommand):
         if settings.NEWSLETTER_ENABLED:
             cron(heavy, f'0 {newsletter_hour} * * *', generate_newsletter_task, timeout=cron_timeout)
 
-        # ── Forecasting ────────────────────────────────────────────────────────
-        week = 7 * 24 * 60 * 60
-        sched(heavy, now, backfill_articles_task, interval=week, timeout=cron_timeout)
+        # ── Article importance scoring + cleanup ──────────────────────────────
+        if settings.ARTICLE_IMPORTANCE_SCORING_ENABLED:
+            score_interval = _minutes('SCORE_INTERVAL_MINUTES', '15')
+            sched(heavy, now, score_articles_task, interval=score_interval,
+                  timeout=_interval_timeout(score_interval))
+            cron(light, '0 3 * * *', cleanup_low_importance_articles_task, timeout=cron_timeout)
+            cron(light, '30 3 * * *', prune_stale_articles_task,           timeout=cron_timeout)
+            cron(light, '0 2 * * 0', adjust_source_weights_task,           timeout=cron_timeout)
 
+        # ── Forecasting ────────────────────────────────────────────────────────
         if settings.FORECAST_ENABLED:
+            week = 7 * 24 * 60 * 60
             sched(light, now, backfill_prices_task, interval=week, timeout=cron_timeout)
             route_interval = _minutes('ROUTE_EVENTS_INTERVAL_MINUTES', '90')
             sched(light, now, dispatch_route_events_task, interval=route_interval,
@@ -134,15 +142,6 @@ class Command(BaseCommand):
             cron(heavy, f'0 {train_hour} * * *',  train_forecast_model_task, timeout=cron_timeout)
             cron(heavy, f'30 {train_hour} * * *', run_forecast_task,         timeout=cron_timeout)
             cron(light, '0 7 * * *',              score_forecasts_task,      timeout=cron_timeout)
-
-        # ── Configurationless first-load bootstrap (WA4) ──────────────────────
-        # Enqueue once on every scheduler start; the task is idempotent (cache flag +
-        # PriceBar-presence heuristic) so it only backfills on a fresh deployment.
-        try:
-            enqueue(bootstrap_initial_data_task, queue='default')
-            self.stdout.write('Triggered first-load bootstrap (idempotent).')
-        except Exception as exc:  # noqa: BLE001 — never block schedule registration
-            self.stdout.write(self.style.WARNING(f'Bootstrap trigger skipped: {exc}'))
 
         # rq-scheduler keeps a single shared job registry (not split per queue),
         # so report the total actually registered.

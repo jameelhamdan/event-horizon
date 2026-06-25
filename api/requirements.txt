@@ -21,6 +21,7 @@ transformers>=5.3
 sentence-transformers>=3.0
 vaderSentiment>=3.3
 openai>=2.24.0
+httpx>=0.27.0
 
 # HTML parsing
 scrapling>=0.2.9

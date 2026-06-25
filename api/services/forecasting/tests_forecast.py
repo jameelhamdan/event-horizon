@@ -78,10 +78,11 @@ def test_router_fallback():
     out = route_event_to_weighted_symbols('conflict', 'Ukraine', ['ukraine-war'], ['war'], -0.5)
     assert out and all('symbol' in d and 'weight' in d for d in out)
     # _clean rejects off-panel symbols and zero weights
+    panel = {'GC=F', 'CL=F', 'SPY', 'BTC-USD', 'EURUSD=X'}
     cleaned = LLMEventRouter._clean([
         {'symbol': 'GC=F', 'weight': 0.5}, {'symbol': 'FAKE', 'weight': 0.9},
         {'symbol': 'CL=F', 'weight': 0}, {'symbol': 'CL=F', 'weight': 2.0},
-    ])
+    ], panel)
     syms = {c['symbol'] for c in cleaned}
     assert syms == {'GC=F', 'CL=F'}
     assert all(-1.0 <= c['weight'] <= 1.0 for c in cleaned)

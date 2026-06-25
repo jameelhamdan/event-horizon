@@ -9,7 +9,9 @@
       "url": "http://feeds.bbci.co.uk/news/world/rss.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.4,
+      "weight_locked": true
     }
   },
   {
@@ -22,7 +24,9 @@
       "url": "https://www.aljazeera.com/xml/rss/all.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.2,
+      "weight_locked": false
     }
   },
   {
@@ -35,7 +39,9 @@
       "url": "https://www.theguardian.com/world/rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.2,
+      "weight_locked": false
     }
   },
   {
@@ -48,7 +54,9 @@
       "url": "https://www.france24.com/en/rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.1,
+      "weight_locked": false
     }
   },
   {
@@ -61,20 +69,9 @@
       "url": "https://rss.dw.com/rdf/rss-en-world",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
-    }
-  },
-  {
-    "model": "core.source",
-    "fields": {
-      "code": "euronews-world",
-      "type": "rss",
-      "name": "Euronews World",
-      "description": "World news from Euronews English.",
-      "url": "https://www.euronews.com/rss?format=mrss&level=theme&name=news",
-      "author_slug": "",
-      "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.1,
+      "weight_locked": false
     }
   },
   {
@@ -87,7 +84,9 @@
       "url": "https://www.rfi.fr/en/rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
     }
   },
   {
@@ -100,20 +99,9 @@
       "url": "https://feeds.npr.org/1004/rss.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
-    }
-  },
-  {
-    "model": "core.source",
-    "fields": {
-      "code": "sky-world",
-      "type": "rss",
-      "name": "Sky News World",
-      "description": "World news from Sky News.",
-      "url": "https://feeds.skynews.com/feeds/rss/world.xml",
-      "author_slug": "",
-      "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.3,
+      "weight_locked": true
     }
   },
   {
@@ -126,7 +114,9 @@
       "url": "https://www.rt.com/rss/",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
     }
   },
   {
@@ -139,7 +129,9 @@
       "url": "https://tass.com/rss/v2.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
     }
   },
   {
@@ -152,7 +144,9 @@
       "url": "http://www.xinhuanet.com/english/rss/worldrss.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
     }
   },
   {
@@ -165,7 +159,9 @@
       "url": "https://www.middleeasteye.net/rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
     }
   },
   {
@@ -178,7 +174,9 @@
       "url": "https://www.dawn.com/feeds/latest-news",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
     }
   },
   {
@@ -191,7 +189,9 @@
       "url": "https://www.scmp.com/rss/91/feed",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
     }
   },
   {
@@ -204,7 +204,9 @@
       "url": "https://techcrunch.com/feed/",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 0.9,
+      "weight_locked": false
     }
   },
   {
@@ -217,7 +219,9 @@
       "url": "https://www.theverge.com/rss/index.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 0.9,
+      "weight_locked": false
     }
   },
   {
@@ -230,7 +234,9 @@
       "url": "http://feeds.arstechnica.com/arstechnica/index",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
     }
   },
   {
@@ -243,7 +249,9 @@
       "url": "https://www.wired.com/feed/rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 0.9,
+      "weight_locked": false
     }
   },
   {
@@ -256,7 +264,9 @@
       "url": "https://www.technologyreview.com/feed/",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.1,
+      "weight_locked": false
     }
   },
   {
@@ -269,7 +279,9 @@
       "url": "https://feeds.reuters.com/reuters/businessNews",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": false,
+      "weight": 1.3,
+      "weight_locked": true
     }
   },
   {
@@ -282,33 +294,9 @@
       "url": "https://www.economist.com/finance-and-economics/rss.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
-    }
-  },
-  {
-    "model": "core.source",
-    "fields": {
-      "code": "cnbc-top",
-      "type": "rss",
-      "name": "CNBC Top News",
-      "description": "Top business and financial news from CNBC.",
-      "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-      "author_slug": "",
-      "headers": {},
-      "is_enabled": true
-    }
-  },
-  {
-    "model": "core.source",
-    "fields": {
-      "code": "marketwatch",
-      "type": "rss",
-      "name": "MarketWatch Top Stories",
-      "description": "Financial markets and business news from MarketWatch.",
-      "url": "https://feeds.marketwatch.com/marketwatch/topstories/",
-      "author_slug": "",
-      "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.3,
+      "weight_locked": true
     }
   },
   {
@@ -321,20 +309,9 @@
       "url": "https://www.theguardian.com/business/economics/rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
-    }
-  },
-  {
-    "model": "core.source",
-    "fields": {
-      "code": "hacker-news",
-      "type": "rss",
-      "name": "Hacker News",
-      "description": "Top stories from Hacker News (Y Combinator).",
-      "url": "https://news.ycombinator.com/rss",
-      "author_slug": "",
-      "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.2,
+      "weight_locked": false
     }
   }
 ]

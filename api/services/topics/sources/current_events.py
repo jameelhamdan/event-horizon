@@ -27,13 +27,14 @@ We recurse one level deep (depth 0 + depth 1) to capture both
 "Middle Eastern crisis" and "2026 Iran war" without going too granular.
 """
 import logging
-import re
 from datetime import date, timedelta
 
 import requests
 from django.conf import settings
+from django.utils.text import slugify
 from scrapling.parser import Selector
 
+from services.text_utils import tokenize as _tokenize
 from services.topics.types import TopicDict
 
 logger = logging.getLogger(__name__)
@@ -91,14 +92,6 @@ _SKIP_HEADINGS = frozenset({
     'external links', 'further reading', 'footnotes',
 })
 
-_STOP = frozenset({
-    'the', 'a', 'an', 'in', 'on', 'at', 'to', 'of', 'for', 'and', 'or',
-    'but', 'is', 'are', 'was', 'were', 'be', 'been', 'has', 'have', 'had',
-    'its', 'that', 'this', 'with', 'by', 'from', 'as', 'after', 'amid',
-    'over', 'into', 'also', 'not', 'new',
-})
-
-_SLUG_RE = re.compile(r'[^a-z0-9]+')
 
 
 def _section_to_category(heading: str) -> str:
@@ -137,16 +130,6 @@ def _fetch_html(title: str) -> str:
         return ''
 
 
-def _tokens(text: str) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for w in re.findall(r'[a-zA-Z]{3,}', text or ''):
-        wl = w.lower()
-        if wl not in _STOP and wl not in seen:
-            seen.add(wl)
-            result.append(w)
-    return result
-
 
 def _li_topic_name(li_node) -> str:
     """
@@ -174,13 +157,13 @@ def _li_nested_ul(li_node):
 
 
 def _emit_topic(name: str, category: str, source_url: str, results: dict) -> None:
-    slug = _SLUG_RE.sub('-', name.lower()).strip('-')[:80]
+    slug = slugify(name)[:80]
     if not slug or slug in results:
         return
     results[slug] = {
         'slug': slug,
         'name': name[:255],
-        'keywords': _tokens(name)[:15],
+        'keywords': sorted(_tokenize(name))[:15],
         'source_id': 'wikipedia-current-events',
         'description': '',
         'category': category,

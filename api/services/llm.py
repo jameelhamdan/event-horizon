@@ -2,6 +2,7 @@ import itertools
 import logging
 import re
 import threading
+import httpx
 import requests
 from openai import OpenAI
 from django.conf import settings
@@ -16,6 +17,45 @@ _NO_KEY = 'none'
 
 def _parse_csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(',') if v.strip()]
+
+
+def strip_code_fences(text: str) -> str:
+    """Strip markdown code fences that LLMs sometimes wrap around JSON responses."""
+    text = re.sub(r'^```(?:json)?\s*', '', (text or '').strip())
+    return re.sub(r'\s*```$', '', text)
+
+
+def _parse_proxy_entries(
+    proxy_csv: str, fallback_keys: list[str]
+) -> list[tuple[str, str]]:
+    """
+    Parse 'url::key,url,url::key2' into resolved (proxy_url, api_key) pairs.
+
+    Entries without an explicit '::key' suffix draw from fallback_keys in
+    round-robin — "loosely tied" because the key pool and proxy list can have
+    different lengths and are cycled independently before being zipped here.
+    """
+    raw: list[tuple[str, str | None]] = []
+    for entry in _parse_csv(proxy_csv):
+        if '::' in entry:
+            url, key = entry.split('::', 1)
+            raw.append((url.strip(), key.strip() or None))
+        else:
+            raw.append((entry.strip(), None))
+
+    if not raw:
+        return []
+
+    fb_cycle = itertools.cycle(fallback_keys) if fallback_keys else None
+    pairs: list[tuple[str, str]] = []
+    for url, key in raw:
+        if key:
+            pairs.append((url, key))
+        elif fb_cycle:
+            pairs.append((url, next(fb_cycle)))
+        else:
+            pairs.append((url, _NO_KEY))
+    return pairs
 
 
 class LLMError(Exception):
@@ -40,12 +80,22 @@ class OpenAICompatLLMService(BaseLLMService):
     """
     Generic OpenAI-compatible chat client.
 
-    Accepts one or more base_urls and one or more api_keys, rotating over each
-    round-robin per request. When proxy_urls are provided (each pre-authenticated
-    with an OpenRouter key), pass api_keys=_NO_KEY and rotate over the URLs instead.
+    Proxy resolution order (first configured wins):
+      1. proxy_pool (ProxyPool) — open-source proxies fetched and validated at
+         runtime; pool provides the URL, key rotation continues independently.
+      2. http_proxies — static (proxy_url, api_key) pairs from OPENROUTER_HTTP_PROXIES;
+         keys are "loosely tied" (paired at init from the key pool, not 1:1 locked).
+      3. Direct — base_url + key, both rotated round-robin.
     """
 
-    def __init__(self, base_urls: list[str], api_keys: str, model: str) -> None:
+    def __init__(
+        self,
+        base_urls: list[str],
+        api_keys: str | list[str],
+        model: str,
+        http_proxies: list[tuple[str, str]] | None = None,
+        proxy_pool=None,  # ProxyPool | None — avoids circular import at class level
+    ) -> None:
         if not base_urls:
             raise LLMError('OpenAICompatLLMService requires at least one base_url')
         self._model = model
@@ -59,6 +109,15 @@ class OpenAICompatLLMService(BaseLLMService):
         self._key_cycle = itertools.cycle(keys)
         self._key_lock = threading.Lock()
 
+        # Static (proxy_url, api_key) pairs — rotated together.
+        self._proxy_cycle: itertools.cycle | None = (
+            itertools.cycle(http_proxies) if http_proxies else None
+        )
+        self._proxy_lock = threading.Lock()
+
+        # Dynamic open-source pool — takes precedence over static pairs.
+        self._proxy_pool = proxy_pool
+
     def _next_url(self) -> str:
         with self._url_lock:
             return next(self._url_cycle)
@@ -67,9 +126,36 @@ class OpenAICompatLLMService(BaseLLMService):
         with self._key_lock:
             return next(self._key_cycle)
 
+    def _build_client(self, base_url: str) -> OpenAI:
+        """Pick the next proxy + key and return a configured OpenAI client."""
+        # 1. Dynamic open-source pool: proxy URL from pool, key from key cycle.
+        if self._proxy_pool is not None:
+            proxy_url = self._proxy_pool.next_proxy()
+            api_key = self._next_key()
+            if proxy_url:
+                return OpenAI(
+                    base_url=base_url,
+                    api_key=api_key,
+                    http_client=httpx.Client(proxy=proxy_url),
+                )
+            return OpenAI(base_url=base_url, api_key=api_key)
+
+        # 2. Static (proxy_url, api_key) pairs from OPENROUTER_HTTP_PROXIES.
+        if self._proxy_cycle is not None:
+            with self._proxy_lock:
+                proxy_url, api_key = next(self._proxy_cycle)
+            return OpenAI(
+                base_url=base_url,
+                api_key=api_key,
+                http_client=httpx.Client(proxy=proxy_url),
+            )
+
+        # 3. Direct — no proxy.
+        return OpenAI(base_url=base_url, api_key=self._next_key())
+
     def chat(self, messages: list[dict], **kwargs) -> str:
         kwargs.pop('think', None)
-        client = OpenAI(base_url=self._next_url(), api_key=self._next_key())
+        client = self._build_client(self._next_url())
         try:
             completion = client.chat.completions.create(
                 model=self._model,
@@ -163,22 +249,55 @@ def _provider_specs() -> dict[str, dict]:
     """
     Provider definitions. Available providers: openrouter, ollama.
 
-    OpenRouter supports two modes:
-      - Proxy rotation: set OPENROUTER_PROXY_URLS to a comma-separated list of
-        proxy base URLs (each pre-authenticated with one OpenRouter key). The client
-        rotates over these URLs round-robin; no api_key is needed.
-      - Direct: set OPENROUTER_API_KEYS (comma-separated); rotates keys against
-        the standard openrouter.ai endpoint.
+    OpenRouter endpoint modes (configure one):
+      - OPENROUTER_PROXY_URLS: comma-separated pre-authenticated base URLs, rotated
+        round-robin (no api_key needed).
+      - OPENROUTER_API_KEYS: comma-separated keys against the direct openrouter.ai endpoint.
+
+    Network-level proxy options (stackable on top of either endpoint mode):
+      - OPENROUTER_PROXY_POOL_ENABLED=true: auto-fetch + validate open-source proxy lists
+        from GitHub / ProxyScrape; refreshes every OPENROUTER_PROXY_REFRESH_HOURS hours.
+        Custom sources can be set via OPENROUTER_PROXY_SOURCES (comma-separated URLs).
+      - OPENROUTER_HTTP_PROXIES: static 'http://host:port::api_key,...' pairs; the
+        '::api_key' suffix is optional — proxies without a key draw from OPENROUTER_API_KEYS
+        in round-robin (loosely tied: pool and proxy list may differ in length).
+
+    When both pool and static proxies are configured, the pool takes precedence.
     """
     proxy_urls = _parse_csv(getattr(settings, 'OPENROUTER_PROXY_URLS', ''))
+    raw_keys = _parse_csv(getattr(settings, 'OPENROUTER_API_KEYS', ''))
     model = (_parse_csv(settings.OPENROUTER_MODELS) or ['openrouter/free'])[0]
+
+    http_proxy_csv = getattr(settings, 'OPENROUTER_HTTP_PROXIES', '')
+    http_proxies = _parse_proxy_entries(http_proxy_csv, raw_keys) if http_proxy_csv else None
+
+    proxy_pool = None
+    if getattr(settings, 'OPENROUTER_PROXY_POOL_ENABLED', False):
+        from services.proxy_pool import get_proxy_pool
+        sources_csv = getattr(settings, 'OPENROUTER_PROXY_SOURCES', '')
+        sources = _parse_csv(sources_csv) if sources_csv else None
+        proxy_pool = get_proxy_pool(
+            sources=sources,
+            refresh_hours=float(getattr(settings, 'OPENROUTER_PROXY_REFRESH_HOURS', 6)),
+            validate_timeout=int(getattr(settings, 'OPENROUTER_PROXY_VALIDATE_TIMEOUT', 5)),
+            max_pool_size=int(getattr(settings, 'OPENROUTER_PROXY_MAX_POOL', 100)),
+        )
+
     if proxy_urls:
-        openrouter_spec = {'base_urls': proxy_urls, 'api_keys': _NO_KEY, 'model': model}
+        openrouter_spec = {
+            'base_urls': proxy_urls,
+            'api_keys': _NO_KEY,
+            'model': model,
+            'http_proxies': http_proxies,
+            'proxy_pool': proxy_pool,
+        }
     else:
         openrouter_spec = {
             'base_urls': ['https://openrouter.ai/api/v1'],
             'api_keys': settings.OPENROUTER_API_KEYS,
             'model': model,
+            'http_proxies': http_proxies,
+            'proxy_pool': proxy_pool,
         }
 
     return {
@@ -197,7 +316,13 @@ _backend_lock = threading.Lock()
 def _build_backend(name: str, spec: dict) -> BaseLLMService:
     if 'base_url' in spec:
         return OllamaLLMService(spec['base_url'], spec['model'])
-    return OpenAICompatLLMService(spec['base_urls'], spec['api_keys'], spec['model'])
+    return OpenAICompatLLMService(
+        spec['base_urls'],
+        spec['api_keys'],
+        spec['model'],
+        http_proxies=spec.get('http_proxies'),
+        proxy_pool=spec.get('proxy_pool'),
+    )
 
 
 def _get_backend(name: str, specs: dict[str, dict]) -> BaseLLMService | None:

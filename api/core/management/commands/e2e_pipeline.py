@@ -44,6 +44,8 @@ def _article_snapshot(article) -> dict:
         "longitude": article.longitude,
         "sentiment": article.sentiment,
         "event_intensity": article.event_intensity,
+        "importance_score": getattr(article, "importance_score", None),
+        "importance_source": getattr(article, "importance_source", None),
         "entities": (article.entities or [])[:5],  # first 5 entities
         "banner_image_url": article.banner_image_url,
         "llm": (article.extra_data or {}).get("llm"),

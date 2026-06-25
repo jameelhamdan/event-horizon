@@ -9,6 +9,30 @@ from import_export.admin import ImportExportModelAdmin
 from . import models
 
 
+class ImportanceFilter(admin.SimpleListFilter):
+    title = "importance"
+    parameter_name = "importance"
+
+    def lookups(self, request, model_admin):
+        return [
+            ("unscored", "Unscored"),
+            ("high",     "High ≥ 7"),
+            ("medium",   "Medium 4–7"),
+            ("low",      "Low < 4"),
+        ]
+
+    def queryset(self, request, queryset):
+        if self.value() == "unscored":
+            return queryset.filter(importance_score__isnull=True)
+        if self.value() == "high":
+            return queryset.filter(importance_score__gte=7.0)
+        if self.value() == "medium":
+            return queryset.filter(importance_score__gte=4.0, importance_score__lt=7.0)
+        if self.value() == "low":
+            return queryset.filter(importance_score__lt=4.0)
+        return queryset
+
+
 class ArticleStageFilter(admin.SimpleListFilter):
     """Filter articles by which pipeline stage they are stuck at (WA3.6)."""
     title = "pipeline gap"
@@ -82,8 +106,8 @@ class EventResource(resources.ModelResource):
 class SourceAdmin(ImportExportModelAdmin):
     resource_classes = [SourceResource]
     change_list_template = "admin/core/source/change_list.html"
-    list_display = ["code", "name", "type", "author_slug", "is_enabled", "created_on"]
-    list_filter = ["type", "is_enabled"]
+    list_display = ["code", "name", "type", "author_slug", "weight", "weight_locked", "is_enabled", "created_on"]
+    list_filter = ["type", "is_enabled", "weight_locked"]
     search_fields = ["name", "code", "author_slug"]
 
     def get_readonly_fields(self, request, obj=None):
@@ -170,14 +194,15 @@ class ArticleAdmin(ImportExportModelAdmin):
         "source_code",
         "source_type",
         "category",
+        "importance_score",
         "sentiment",
         "location",
         "published_on",
         "processed_on",
     ]
-    list_filter = ["source_type", "source_code", "category", ArticleStageFilter]
+    list_filter = ["source_type", "source_code", "category", ArticleStageFilter, ImportanceFilter]
     search_fields = ["title", "location", "category"]
-    actions = ["reprocess_selected"]
+    actions = ["reprocess_selected", "score_importance_selected"]
 
     @admin.action(description="Reprocess selected (NLP / geocode)")
     def reprocess_selected(self, request, queryset):
@@ -187,6 +212,16 @@ class ArticleAdmin(ImportExportModelAdmin):
         if ids:
             enqueue(process_articles_chunk_task, ids, True, queue="heavy")
         self.message_user(request, f"Reprocess enqueued for {len(ids)} article(s).", messages.SUCCESS)
+
+    @admin.action(description="Score importance (LLM)")
+    def score_importance_selected(self, request, queryset):
+        from services.queue import enqueue
+        from services.tasks import score_articles_task
+        ids = [str(a.id) for a in queryset]
+        if ids:
+            enqueue(score_articles_task, article_ids=ids, queue="heavy")
+        self.message_user(request, f"Importance scoring enqueued for {len(ids)} article(s).", messages.SUCCESS)
+
     readonly_fields = [
         "id",
         "entities",
@@ -197,6 +232,8 @@ class ArticleAdmin(ImportExportModelAdmin):
         "latitude",
         "longitude",
         "processed_on",
+        "importance_score",
+        "importance_source",
         "created_on",
         "updated_on",
     ]
@@ -389,14 +426,9 @@ class TopicAdmin(admin.ModelAdmin):
 
     @admin.action(description="Pin selected topics (always shown in header)")
     def pin_topics(self, request, queryset):
-        count = 0
-        for topic in queryset:
-            topic.is_pinned = True
-            topic.is_current = True
-            topic.is_active = True
-            topic.is_top_level = True
-            topic.save(update_fields=['is_pinned', 'is_current', 'is_active', 'is_top_level'])
-            count += 1
+        count = queryset.update(
+            is_pinned=True, is_current=True, is_active=True, is_top_level=True
+        )
         self.message_user(request, f"{count} topic(s) pinned.")
 
     @admin.action(description="Retroactively tag events for selected topics")

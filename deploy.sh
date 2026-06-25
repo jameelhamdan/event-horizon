@@ -16,12 +16,11 @@ echo "==> deploy: pulling $BRANCH"
 git fetch origin
 git reset --hard "origin/$BRANCH"
 
-echo "==> deploy: rebuilding changed images"
-$COMPOSE build --pull --parallel
+git pull origin $BRANCH
 
-echo "==> deploy: restarting services"
+echo "==> deploy: building and restarting services"
 # --no-deps: only restart the services whose images changed, not their deps
-$COMPOSE up -d --remove-orphans
+$COMPOSE up -d --build --remove-orphans
 
 echo "==> deploy: cleaning up old images"
 docker image prune -f

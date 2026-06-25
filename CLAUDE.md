@@ -52,7 +52,8 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │       ├── fetch_stream.py         # One-off stream fetch (prices/notam/earthquakes/forex)
 │   │       ├── bootstrap_static_points.py # Seeds exchanges, ports, central banks
 │   │       ├── setup_schedule.py       # Registers all periodic jobs with rq-scheduler
-│   │       └── e2e_pipeline.py         # End-to-end pipeline test → JSON report
+│   │       ├── e2e_pipeline.py         # End-to-end pipeline test → JSON report
+│   │       └── e2e_full.py             # Full-system invariant check (exits non-zero on failure); 13 stages
 │   ├── accounts/           # Custom User model + Session + Group proxies
 │   │   ├── apps.py         # name='accounts', label='accounts'
 │   │   ├── models.py       # User (email-based), UserManager
@@ -84,7 +85,10 @@ This file gives Claude everything needed to write correct, consistent code for t
 │   │   ├── tasks.py        # All pipeline task functions (plain Python — no decorator)
 │   │   ├── queue.py        # enqueue() helper — wraps django-rq; sync fallback in dev
 │   │   ├── workflow.py     # Workflow class — orchestrates pipeline steps
-│   │   ├── llm.py          # LLM client wrapper (provider-agnostic)
+│   │   ├── llm.py          # LLM client wrapper (provider-agnostic) + strip_code_fences()
+│   │   ├── scoring.py      # ArticleImportanceScorer (LLM batch 1–10 rating) + score_unscored_articles()
+│   │   ├── text_utils.py   # Shared text primitives: tokenize(), jaccard(), STOP_WORDS
+│   │   ├── tests_scoring.py # Dependency-light unit tests (text_utils, strip_code_fences, scorer, dedup)
 │   │   ├── processing/     # NLP processing pipeline
 │   │   │   ├── analyzer.py     # Article analysis (LLM category/sub-category, geonamescache geocoding, i18n)
 │   │   │   ├── cleaner.py      # Text normalization
@@ -264,6 +268,10 @@ This is a real-time global event intelligence platform. Key feature areas:
   ```
 - `Article.banner_image_url` — nullable URLField; populated by RSS `media:content`/`media:thumbnail`/enclosure extraction at fetch time, or OG image scrape during `process_articles` (best-effort, HTTPS only)
 - `Article.translations` — JSON dict keyed by language code (e.g. `{"ar": {"title": "...", "summary": "..."}}`)
+- `Article.importance_score` — float 1.0–10.0 (nullable); assigned by `score_articles_task` via LLM + source weight multiplier + corroboration bonus. Set by `ArticleImportanceScorer` in `services/scoring.py`
+- `Article.importance_source` — char `'llm'` or `'default'`; `'llm'` if the score came from a real LLM call, `'default'` if the LLM call failed and the fallback score was used
+- `Source.weight` — float multiplier (default 1.0) applied to the LLM importance score; `0` suppresses the source (score → 1.0 minimum); adjusted automatically by `adjust_source_weights_task`
+- `Source.weight_locked` — bool; when True, `adjust_source_weights_task` leaves `weight` unchanged for that source
 - `Event.started_at` is a DateTimeField — always timezone-aware (`django.utils.timezone.now()`)
 - `Event.topic_slugs` — list of matched topic slugs (tagged by `tag_topics_task`)
 - `Event.topics` — dict of `{slug: confidence}` (float 0–1.0)
@@ -276,6 +284,7 @@ This is a real-time global event intelligence platform. Key feature areas:
 - `MarketSymbol` — **single source of truth** for fetched/forecast/UI symbols (replaces hardcoded symbol lists). Fields: `symbol` (unique), `name`, `stream_key`, `provider` (yahoo/coingecko/ecb), `provider_id`, `group`, `is_active` (fetched by streams), `is_forecast` (forecasting panel target), `is_popular`+`rank`, `display_order`, `metadata`. Read via `services/market_symbols.py` helpers (graceful fallback to hardcoded defaults if empty). Seeded by migration `0006`. See [docs/symbols.md](docs/symbols.md).
 - `TaskRun` — legacy per-execution record (status, duration, items, error, job_id). No longer auto-written; job history is now provided by the django-rq admin panel at `/admin/django-rq/`. Migration `0007`.
 - `Article.stage_status` / `Event.stage_status` — per-record `{stage: {ok, at, error}}` written by `services/stages.py::mark_stage` (Article: `process`/`geocode`; Event: `tag`/`route`). Feeds `Workflow.pipeline_coverage()`. Migration `0008`.
+- `Article.word_count` — int; populated at fetch time from the raw body; articles below `ARTICLE_MIN_WORD_COUNT` (default 30) are filtered before saving
 - `misc` app contains only `EmailLog` model — admin panel for monitoring sent emails
 - `Subscriber` in `newsletter/models.py` — fields: `email` (unique), `token` (UUID), `subscribed_at`, `confirmed_at` (nullable), `is_active`, `unsubscribed_at`; lifecycle: pending → confirmed → unsubscribed
 
@@ -317,6 +326,15 @@ All periodic jobs are registered by the `setup_schedule` management command (`ap
 | `aggregate_events_task` | 60m | `AGGREGATE_INTERVAL_MINUTES` |
 | `tag_topics_task` | 75m | `TAG_TOPICS_INTERVAL_MINUTES` |
 | `discover_topics_task` | 150m | `DISCOVER_TOPICS_INTERVAL_MINUTES` |
+| `score_articles_task` | 15m | `SCORE_INTERVAL_MINUTES` |
+
+**Light queue (`default`) — maintenance:**
+
+| Task | Default interval | Env var |
+|---|---|---|
+| `cleanup_low_importance_articles_task` | daily at 03:00 UTC | — |
+| `prune_stale_articles_task` | daily at 02:00 UTC | — |
+| `adjust_source_weights_task` | weekly on Monday | — |
 
 **Cron jobs (heavy queue):**
 
@@ -438,6 +456,44 @@ LightGBM **classifier (calibrated P(up)) + regressor (magnitude)** per horizon (
 - `services/processing/cleaner.py` — HTML tag removal, whitespace normalization, non-ASCII handling
 - `services/processing/clustering.py` — semantic event grouping (see above)
 - `ArticleDocument` and `ArticleFeatures` dataclasses live in `core/models.py`
+
+### Article Importance Scoring
+
+`services/scoring.py`:
+- `ArticleImportanceScorer.score_articles(articles)` — LLM batch scores (1.0–10.0), applies `source.weight` multiplier, cross-source corroboration bonus (+0.5 per extra source, max +2.0), and per-category floor (conflict/disaster ≥ 6.0, political/economic ≥ 4.0)
+- `score_unscored_articles(hours, article_ids=None)` — main entry point for `score_articles_task`; accepts optional `article_ids` list to score specific records without touching the unscored queue
+- `ArticleImportanceScorer.BATCH_SIZE = 30` — headlines per LLM call
+- `ArticleImportanceScorer.DEFAULT_SCORE = 5.0` — fallback when LLM call fails
+- LLM role: `'scoring'`; uses `strip_code_fences()` before JSON parsing
+- `source.weight = 0` is honoured (score clamps to 1.0 minimum, not coerced to neutral 1.0 multiplier)
+- `score_batch_llm(titles, role='scoring')` — accepts a `role` parameter for routing (e.g. `'historical'` for backfill)
+
+### Shared Text Utilities
+
+`services/text_utils.py` — canonical text primitives shared across the codebase:
+- `tokenize(text) → frozenset[str]` — lowercase word tokens, drops stop words and tokens ≤ 2 chars; returns `frozenset` so it's safe to use in set operations and as dict/cache keys
+- `jaccard(a, b) → float` — Jaccard similarity between two token sets; 0.0 if either is empty
+- `STOP_WORDS: frozenset[str]` — 39-word list tuned for news dedup (not the full NLP stop list)
+
+Consumers:
+- `services/data/__init__.py` — `_filter_title_dupes` uses `_tokenize_title` + `_jaccard` (aliased from `text_utils`)
+- `services/scoring.py` — `_corroboration_bonuses` uses `_tokenize` + `_jaccard`
+- `services/topics/matcher.py` — `TopicMatcher._tokenize`
+- `services/topics/sources/current_events.py` — `_emit_topic` keywords
+
+### LLM Utilities
+
+`services/llm.py` also provides:
+- `strip_code_fences(text) → str` — strips `` ```json `` / `` ``` `` markdown wrappers LLMs sometimes return around JSON responses; handles `None` input safely. Use this before every `json.loads()` call on LLM output — do not re-implement inline.
+
+### Title Deduplication
+
+`services/data.__init__._filter_title_dupes(datums, threshold=0.75, hours=24)`:
+- Drops incoming articles whose title is a near-duplicate of a recently fetched one (Jaccard ≥ threshold)
+- Maintains a rolling window of title token sets in Django's cache (Redis key `article_title_dedup`)
+- **Intra-batch dedup**: checked against `new_sets` (grows as batch is accepted), so two near-identical articles in the *same* fetch batch are both caught
+- Controlled by `ARTICLE_DEDUP_TITLE_ENABLED` / `ARTICLE_DEDUP_JACCARD_THRESHOLD` / `ARTICLE_DEDUP_HOURS`
+- Articles with empty title are always kept (no tokens → no match)
 
 ### API (DRF)
 
@@ -612,7 +668,11 @@ Service code: `api/services/data/historical.py` — `HistoricalBackfillService`.
 | Enqueue helper | `api/services/queue.py` → `enqueue()` |
 | Periodic schedule | `api/core/management/commands/setup_schedule.py` |
 | Pipeline orchestration | `api/services/workflow.py` |
-| LLM wrapper | `api/services/llm.py` |
+| LLM wrapper + strip_code_fences | `api/services/llm.py` |
+| Importance scoring | `api/services/scoring.py` → `ArticleImportanceScorer`, `score_unscored_articles()` |
+| Shared text utilities | `api/services/text_utils.py` → `tokenize()`, `jaccard()`, `STOP_WORDS` |
+| Title deduplication | `api/services/data/__init__.py` → `_filter_title_dupes()` |
+| Self-tests (scoring/text) | `api/services/tests_scoring.py` |
 | Semantic clustering | `api/services/processing/clustering.py` |
 | Article NLP analysis | `api/services/processing/analyzer.py` |
 | Topic matching (keyword) | `api/services/topics/matcher.py` → `TopicMatcher` |
@@ -663,6 +723,15 @@ Service code: `api/services/data/historical.py` — `HistoricalBackfillService`.
 ```
 fetch_articles_task (every 10m, default queue, timeout 30m)
   └─ RSSService (feedparser) / requests → Article objects in MongoDB
+     Title dedup: Jaccard ≥ 0.75 against 24h Redis window (ARTICLE_DEDUP_TITLE_ENABLED)
+     Word count filter: articles below ARTICLE_MIN_WORD_COUNT (30) are rejected
+
+score_articles_task (every 15m, heavy queue, timeout 30m)
+  └─ ArticleImportanceScorer:
+       LLM (role='scoring') batch 1–10 ratings → importance_score + source.weight multiplier
+       + cross-source corroboration bonus (+0.5 per corroborating source, max +2.0)
+       + per-category floor (conflict/disaster ≥ 6.0, political/economic ≥ 4.0)
+     Only unscored articles (importance_score__isnull=True) in the last SCORE_INTERVAL_MINUTES×2 window
 
 process_articles_task (every 60m, heavy queue, timeout 30m)
   └─ bert-base-NER + VADER & FinBERT sentiment + geonamescache geocoding → Article metadata
@@ -729,6 +798,12 @@ Stream tasks (default queue, independent of pipeline):
 | `OPENROUTER_PROXY_URLS` | — | Comma-separated proxy base URLs (each pre-authenticated with one OpenRouter key). When set, the client rotates over these URLs round-robin; no `OPENROUTER_API_KEYS` needed |
 | `OPENROUTER_API_KEYS` | — | OpenRouter keys, comma-separated (rotated round-robin). Used only when `OPENROUTER_PROXY_URLS` is not set |
 | `OPENROUTER_MODELS` | `openrouter/free` | OpenRouter model (first value used) |
+| `OPENROUTER_HTTP_PROXIES` | — | Network-level HTTP proxies for LLM calls. Format: `http://host:port::api_key,http://host2:port` — the `::api_key` suffix is optional; proxies without an explicit key draw from `OPENROUTER_API_KEYS` round-robin (loosely tied) |
+| `OPENROUTER_PROXY_POOL_ENABLED` | `false` | When true, auto-fetches open-source proxy lists (GitHub + ProxyScrape), validates each candidate against openrouter.ai, and rotates working proxies round-robin. Takes precedence over `OPENROUTER_HTTP_PROXIES`. Proxies become available once the background validation pass completes (~30s after startup). |
+| `OPENROUTER_PROXY_SOURCES` | — | Override default proxy list sources (TheSpeedX, ShiftyTR, clarketm, ProxyScrape). Comma-separated raw-text URLs, each returning one `host:port` per line |
+| `OPENROUTER_PROXY_REFRESH_HOURS` | `6` | How often the open-source proxy pool re-fetches and re-validates |
+| `OPENROUTER_PROXY_VALIDATE_TIMEOUT` | `5` | Per-proxy HEAD request timeout (seconds) during validation |
+| `OPENROUTER_PROXY_MAX_POOL` | `100` | Maximum working proxies kept in rotation after validation |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `qwen3:4b` | Ollama model name |
 | `FETCH_INTERVAL_MINUTES` | `10` | fetch_articles_task period |
@@ -764,6 +839,16 @@ Stream tasks (default queue, independent of pipeline):
 | `PROCESS_DISPATCH_LIMIT` / `TAG_DISPATCH_LIMIT` / `ROUTE_DISPATCH_LIMIT` | `500` | Per-tick fan-out cap so a cold start doesn't flood the queue |
 | `STUCK_RECOVERY_INTERVAL_MINUTES` | `360` | Safety-net re-dispatch of processed-but-unlocated articles |
 | `BOOTSTRAP_ARTICLE_YEARS` | `1` | First-load article-backfill window (`bootstrap_initial_data_task`) |
+| `ARTICLE_IMPORTANCE_SCORING_ENABLED` | `true` | Feature flag — gates `score_articles_task` + schedule |
+| `ARTICLE_MIN_IMPORTANCE` | `3.0` | Articles below this score are flagged for cleanup by `cleanup_low_importance_articles_task` |
+| `ARTICLE_MIN_IMPORTANCE_TO_PROCESS` | `2.0` | Articles below this threshold are skipped during `process_articles` (NLP step) |
+| `ARTICLE_CLEANUP_GRACE_HOURS` | `48` | Minimum age before a low-importance article can be deleted |
+| `ARTICLE_MIN_WORD_COUNT` | `30` | Articles with fewer words in the body are rejected at fetch time |
+| `ARTICLE_DEDUP_TITLE_ENABLED` | `true` | Enable Jaccard title deduplication in `DataService.refresh_until()` |
+| `ARTICLE_DEDUP_JACCARD_THRESHOLD` | `0.75` | Jaccard overlap threshold for title dedup (0.0–1.0) |
+| `ARTICLE_DEDUP_HOURS` | `24` | Rolling window (hours) for the title dedup cache |
+| `ARTICLE_STALE_PROCESSED_DAYS` | `90` | Processed articles older than this with no event may be pruned by `prune_stale_articles_task` |
+| `SCORE_INTERVAL_MINUTES` | `3` | `score_articles_task` base period (×5 on heavy queue = 15m) |
 | `AWS_ACCESS_KEY_ID` | — | AWS SES credentials |
 | `AWS_SECRET_ACCESS_KEY` | — | AWS SES credentials |
 | `AWS_SES_REGION` | `us-east-1` | AWS SES region |
@@ -805,14 +890,21 @@ Stream tasks (default queue, independent of pipeline):
 - **Topic sources**: single source `WikipediaCurrentEventsAdapter` using `Portal:Current_events` date subpages. `TOPIC_SOURCES_DAYS` env var sets the lookback window (default: `30`). Old sources (`wikipedia-ongoing-conflicts`, `wikipedia-current-situations`, `gdelt-conflicts`) are removed — do not reference them.
 - **`tag_events_with_topics` uses LLM**: `LLMTopicMatcher` sends batches of 10 events per LLM call; `retroactive_tag_topic` still uses the fast keyword-based `TopicMatcher`.
 - **`refresh_topics` runs LLM enrichment**: `Workflow._enrich_topics()` calls the LLM after scraping to generate proper descriptions and expand keywords (batches of 30). Falls back silently — topics are upserted with raw scraped metadata if LLM is unavailable.
-- **LLM responses: always strip code fences**: use `re.sub(r'^```(?:json)?\s*', '', r)` + `re.sub(r'\s*```$', '', r)` before `json.loads()`. All LLM-calling code in the project does this — do not omit it in new code.
-- **LLM routing**: call `get_llm_service(role)` with the use-case role (`analyzer`, `topics`, `newsletter`, `historical`, `routing`; unknown → `default`). Routes live in `settings.LLM_ROUTES` (dict in `settings/base.py`) — a provider name (`'openrouter'`) or an ordered fallback list (`FallbackLLMService` tries each on `LLMError`). Available providers: `openrouter`, `ollama`. Provider config (URLs/keys/model) comes from env vars. There is no `LLM_BACKEND` / `LLM_PROVIDER` / `G4F_*` var anymore.
+- **LLM responses: always strip code fences**: call `strip_code_fences(raw)` from `services.llm` before `json.loads()`. Do not re-implement the two `re.sub` lines inline — the shared helper exists for this purpose and handles `None` safely.
+- **LLM routing**: call `get_llm_service(role)` with the use-case role (`analyzer`, `topics`, `newsletter`, `historical`, `routing`, `scoring`; unknown → `default`). Routes live in `settings.LLM_ROUTES` (dict in `settings/base.py`) — a provider name (`'openrouter'`) or an ordered fallback list (`FallbackLLMService` tries each on `LLMError`). Available providers: `openrouter`, `ollama`. Provider config (URLs/keys/model) comes from env vars. There is no `LLM_BACKEND` / `LLM_PROVIDER` / `G4F_*` var anymore.
 - **OpenRouter proxy rotation**: set `OPENROUTER_PROXY_URLS` to 20 comma-separated proxy base URLs (each pre-keyed). The client cycles them round-robin — no api_key sent. If unset, falls back to direct openrouter.ai with `OPENROUTER_API_KEYS`.
+- **Open-source proxy pool**: set `OPENROUTER_PROXY_POOL_ENABLED=true` to auto-source free proxies from GitHub lists (TheSpeedX, ShiftyTR, clarketm) and ProxyScrape. Validation (~30s background task at startup) tests each candidate with a HEAD request to openrouter.ai; only passing proxies enter rotation. Pool is a singleton (`services/proxy_pool.py::get_proxy_pool()`); takes precedence over `OPENROUTER_HTTP_PROXIES`. During the initial validation window, LLM calls fall back to direct (pool returns `None`).
+- **LLM proxy resolution order**: `proxy_pool` (open-source pool) → `http_proxies` (static `OPENROUTER_HTTP_PROXIES` pairs) → direct. Keys from `_key_cycle` are always used when the pool supplies the URL; for static pairs the key is bundled in the pair.
 - **Static points bootstrap**: run `python manage.py bootstrap_static_points` once to seed `StaticPoint` (exchanges, ports, central banks)
-- **Configurationless deploy**: `docker compose up` self-seeds + self-backfills via `bootstrap_initial_data_task` (triggered by `setup_schedule`, idempotent). No manual `bootstrap_static_points` needed in fresh deploys. See [docs/operations.md](docs/operations.md).
+- **Bootstrap on fresh deploy**: run `python manage.py shell -c "from services.tasks import bootstrap_initial_data_task; bootstrap_initial_data_task()"` manually after first deploy. The scheduler no longer auto-triggers it on startup — trigger it yourself when ready.
 - **Fan-out pipeline**: process/tag/route are light **dispatcher** tasks (`dispatch_*`, default queue) that enqueue idempotent per-record **workers** (`process_article_task`, `tag_events_chunk_task`, `route_events_chunk_task`, etc.) on the heavy queue. Scale via `worker-heavy` replicas. The admin "Run full pipeline" button still uses the sequential `run_pipeline_task`.
 - **Symbols are DB-driven**: never hardcode symbol lists — add a `MarketSymbol` row and read via `services/market_symbols.py`. The forecasting panel is `MarketSymbol.is_forecast` (5 base symbols: `CL=F, GC=F, BTC-USD, SPY, EURUSD=X`); changing it requires a retrain (auto on next daily `train_forecast_model_task`).
 - **Job monitoring**: use the built-in django-rq panel at `/admin/django-rq/` — shows queue depths, worker status, job details, return values, and failed-job tracebacks. Task functions return an `int` count which appears as the job result.
+- **Shared tokenize/jaccard**: always import from `services.text_utils` — never redefine locally. `tokenize()` returns `frozenset[str]` (safe for set operations and cache); `jaccard()` returns 0.0 for empty inputs without raising.
+- **`source.weight=0` vs `None`**: `weight=None` (unset) resolves to 1.0 (neutral); `weight=0` is the operator's signal to suppress a source (score clamps to 1.0 minimum, not boosted). Use `if weight is None: weight = 1.0` — never `weight or 1.0`.
+- **score_articles_task accepts article_ids**: pass `article_ids=[str(a.id), ...]` to re-score specific articles without touching the unscored queue — used by the admin action to re-score selected records.
+- **Title dedup threshold**: default 0.75 Jaccard is conservative to avoid cross-topic false positives. Lower only if you see many near-duplicates slipping through; raising above 0.9 defeats the dedup entirely.
+- **Self-tests**: `python -m services.tests_scoring` (no DB) + `python -m services.forecasting.tests_forecast` (no DB) are the dependency-light test suites. Run both before any merge touching `services/` or `core/models.py`.
 
 ---
 
@@ -923,6 +1015,10 @@ python manage.py rqstats
 # RQ queue inspector (built into django-rq)
 # http://localhost:8000/admin/django-rq/
 
+# Run dependency-light self-tests (no DB or network needed)
+DJANGO_SETTINGS_MODULE=settings.base python -m services.tests_scoring
+DJANGO_SETTINGS_MODULE=settings.base python -m services.forecasting.tests_forecast
+
 # Frontend dev server (port 5173, proxies /api to localhost:8000)
 cd ui && npm run dev
 
@@ -937,7 +1033,10 @@ cd ui && npm run build
 Before shipping any backend change:
 - [ ] `python manage.py check` passes
 - [ ] `python manage.py migrate --check` (no unapplied migrations)
+- [ ] `python -m services.tests_scoring` passes (no DB needed)
+- [ ] `python -m services.forecasting.tests_forecast` passes (no DB needed)
 - [ ] API endpoints return expected shape (test with curl or browser)
+- [ ] `python manage.py e2e_full --fast` passes (structural invariant checks)
 - [ ] `python manage.py e2e_pipeline` completes without errors; inspect the JSON report to verify article → event → topic flow
 
 Before shipping any frontend change:

@@ -18,6 +18,8 @@ What it exercises (with real data):
  10. REST API               — /api/symbols, /api/events, /api/forecasts, /api/prices (Django test client)
  11. Ops dashboard          — throughput / coverage / forecast-status helpers
  12. Bootstrap guard        — idempotency of bootstrap_initial_data_task
+ 13. Scoring helpers        — text_utils tokenize/jaccard, strip_code_fences, ArticleImportanceScorer,
+                             model fields (Article.importance_score, Source.weight), title dedup
 
 Fan-out runs synchronously (this command forces ``TASK_QUEUE_ENABLED=False``) so the
 dispatcher → per-record worker path is fully covered without live RQ workers.
@@ -128,6 +130,7 @@ class Command(BaseCommand):
             self._stage_api(c)
             self._stage_dashboard(c)
             self._stage_bootstrap_guard(c)
+            self._stage_scoring_helpers(c)
         finally:
             settings.TASK_QUEUE_ENABLED = prev_queue
             settings.ALLOWED_HOSTS = prev_hosts
@@ -503,3 +506,68 @@ class Command(BaseCommand):
             c.hard('bootstrap.guard_skips', result == 0, f'returned {result} (expected 0)')
         except Exception as exc:  # noqa: BLE001
             c.hard('bootstrap.guard_runs', False, str(exc))
+
+    # ── Stage 13: scoring helpers & text utilities ────────────────────────
+
+    def _stage_scoring_helpers(self, c):
+        self.stdout.write('→ Stage 13: scoring helpers & text utilities')
+
+        # ── text_utils ─────────────────────────────────────────────────────
+        from services.text_utils import tokenize, jaccard, STOP_WORDS
+
+        a = tokenize('Ukraine ceasefire deal signed')
+        c.hard('text_utils.tokenize_works', 'ukraine' in a and 'ceasefire' in a,
+               f'tokens={sorted(a)}')
+        c.hard('text_utils.tokenize_stopwords', 'the' not in a and 'and' not in a,
+               'stop words not filtered')
+        c.hard('text_utils.tokenize_short_tokens_dropped', 'a' not in a,
+               'single-char token slipped through')
+        b = tokenize('Ukraine Russia peace negotiations')
+        sim = jaccard(a, b)
+        c.hard('text_utils.jaccard_positive', sim > 0.0, f'{sim:.3f}')
+        c.hard('text_utils.jaccard_self', jaccard(a, a) == 1.0)
+        c.hard('text_utils.jaccard_empty', jaccard(frozenset(), a) == 0.0)
+        c.hard('text_utils.stop_words_nonempty', len(STOP_WORDS) >= 30,
+               f'{len(STOP_WORDS)} stop words')
+
+        # ── strip_code_fences ──────────────────────────────────────────────
+        from services.llm import strip_code_fences
+        c.hard('llm.strip_json_fence',
+               strip_code_fences('```json\n[{"i":1}]\n```') == '[{"i":1}]')
+        c.hard('llm.strip_plain_fence',
+               strip_code_fences('```\n{"k":"v"}\n```') == '{"k":"v"}')
+        c.hard('llm.strip_noop', strip_code_fences('[1,2,3]') == '[1,2,3]')
+        c.hard('llm.strip_none_safe', strip_code_fences(None) == '')  # type: ignore[arg-type]
+
+        # ── ArticleImportanceScorer structural ─────────────────────────────
+        from services.scoring import ArticleImportanceScorer, score_unscored_articles
+        scorer = ArticleImportanceScorer()
+        c.hard('scoring.scorer_instantiates', isinstance(scorer, ArticleImportanceScorer))
+        c.hard('scoring.batch_size_positive', scorer.BATCH_SIZE >= 1,
+               f'BATCH_SIZE={scorer.BATCH_SIZE}')
+        c.hard('scoring.default_score_in_range',
+               1.0 <= scorer.DEFAULT_SCORE <= 10.0,
+               f'DEFAULT_SCORE={scorer.DEFAULT_SCORE}')
+        c.hard('scoring.score_unscored_callable', callable(score_unscored_articles))
+
+        # ── Model fields exist ─────────────────────────────────────────────
+        from core import models as core_models
+        article_fields = {f.name for f in core_models.Article._meta.get_fields()}
+        c.hard('model.article_importance_score', 'importance_score' in article_fields,
+               f'fields={sorted(article_fields)}')
+        c.hard('model.article_importance_source', 'importance_source' in article_fields)
+        source_fields = {f.name for f in core_models.Source._meta.get_fields()}
+        c.hard('model.source_weight', 'weight' in source_fields,
+               f'fields={sorted(source_fields)}')
+        c.hard('model.source_weight_locked', 'weight_locked' in source_fields)
+
+        # ── Intra-batch title dedup (C1 fix) ──────────────────────────────
+        from services.data import _filter_title_dupes
+        datums = [
+            {'title': 'Ukraine peace negotiations begin in Vienna'},
+            {'title': 'Ukraine peace negotiations begin in Vienna today'},  # near-duplicate
+            {'title': 'Earthquake strikes Turkey dozens killed'},           # different
+        ]
+        kept = _filter_title_dupes(datums, threshold=0.5, hours=1)
+        c.hard('scoring.title_dedup_intra_batch', len(kept) == 2,
+               f'expected 2 kept from 3, got {len(kept)}')

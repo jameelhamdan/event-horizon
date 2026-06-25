@@ -83,7 +83,6 @@ def iter_weeks(
 
 _SITEMAP_NS = 'http://www.sitemaps.org/schemas/sitemap/0.9'
 _NEWS_NS = 'http://www.google.com/schemas/sitemap-news/0.9'
-_LLM_BATCH_SIZE = 30
 _HTTP_HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; HistoricalBackfiller/1.0)'}
 _HTTP_TIMEOUT = 15
 
@@ -248,10 +247,15 @@ class RSSHistoricalService:
 
     def _score_entries(self, entries: list[dict]) -> list[RankedArticle]:
         """Batch-score entries by LLM significance; return RankedArticle list."""
+        from services.scoring import ArticleImportanceScorer
+        scorer = ArticleImportanceScorer()
         ranked: list[RankedArticle] = []
-        for i in range(0, len(entries), _LLM_BATCH_SIZE):
-            batch = entries[i: i + _LLM_BATCH_SIZE]
-            scores = self._llm_score_batch(batch)
+        for i in range(0, len(entries), scorer.BATCH_SIZE):
+            batch = entries[i: i + scorer.BATCH_SIZE]
+            titles = [entry['title'] or _slug_from_url(entry['url']) for entry in batch]
+            # Use the 'historical' LLM route so operators can assign a separate model/provider
+            # for backfill scoring without touching the live-feed scoring route.
+            scores = scorer.score_batch_llm(titles, role='historical')
             for entry, score in zip(batch, scores):
                 title = entry['title'] or _slug_from_url(entry['url'])
                 datum = ArticleDatum(
@@ -265,54 +269,6 @@ class RSSHistoricalService:
                 )
                 ranked.append(RankedArticle(datum=datum, score=score, rank_signal='llm'))
         return ranked
-
-    def _llm_score_batch(self, entries: list[dict]) -> list[float]:
-        """Ask the LLM to rate a batch of headlines 1–10. Returns a parallel list of scores."""
-        from services.llm import get_llm_service, LLMError
-
-        lines = '\n'.join(
-            f'{i + 1}. {entry["title"] or _slug_from_url(entry["url"])}'
-            for i, entry in enumerate(entries)
-        )
-        prompt = (
-            'Rate each news headline by global significance on a scale of 1.0–10.0.\n'
-            'Consider: geopolitical impact, affected population, economic consequences, novelty.\n\n'
-            f'{lines}\n\n'
-            'Return a JSON array — one object per headline:\n'
-            '[{"i": 1, "score": 7.5}, {"i": 2, "score": 4.0}, ...]\n'
-            'Return only the JSON array, no other text.'
-        )
-        default = [5.0] * len(entries)
-        try:
-            llm = get_llm_service('historical')
-            raw = llm.chat([{'role': 'user', 'content': prompt}])
-            raw = re.sub(r'^```(?:json)?\s*', '', (raw or '').strip())
-            raw = re.sub(r'\s*```$', '', raw)
-            # Models sometimes wrap the array in prose ("Here is the JSON: [...]")
-            # or return nothing at all — isolate the array before parsing.
-            match = re.search(r'\[.*\]', raw, re.DOTALL)
-            if not match:
-                logger.warning(
-                    'LLM batch score returned no JSON array (%r); defaulting to 5.0',
-                    raw[:120],
-                )
-                return default
-            data = json.loads(match.group(0))
-            score_map = {item['i']: float(item['score']) for item in data}
-            expected = set(range(1, len(entries) + 1))
-            missing = expected - score_map.keys()
-            if missing:
-                logger.warning(
-                    'LLM batch score index mismatch: expected 1-%d, missing %s; using 5.0 defaults',
-                    len(entries), sorted(missing),
-                )
-            return [score_map.get(i + 1, 5.0) for i in range(len(entries))]
-        except LLMError as exc:
-            logger.warning('LLM batch scoring failed (%s); defaulting to 5.0', exc)
-            return default
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-            logger.warning('LLM batch score parse error (%s); defaulting to 5.0', exc)
-            return default
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +364,8 @@ class HistoricalBackfillService:
                 'backfill_score': round(item.score, 2),
                 'rank_signal': item.rank_signal,
             }
+            defaults['importance_score']  = round(item.score, 2)
+            defaults['importance_source'] = 'llm'
             _, was_created = m.Article.objects.get_or_create(
                 source_code=self.source.code,
                 source_type=self.source.type,

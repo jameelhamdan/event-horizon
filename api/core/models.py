@@ -30,6 +30,11 @@ class Source(models.Model):
     headers = models.JSONField(default=dict, blank=True)
     is_enabled = models.BooleanField(default=True, help_text=_('Uncheck to disable fetching from this source'))
 
+    # Credibility multiplier applied at importance-scoring time (0.1–2.0).
+    # weight_locked=True prevents the weekly auto-adjust task from nudging it.
+    weight = models.FloatField(default=1.0, help_text=_('Importance score multiplier (0.1–2.0)'))
+    weight_locked = models.BooleanField(default=False, help_text=_('Prevent auto-weight adjustment'))
+
     updated_on = models.DateTimeField(auto_now=True)
     created_on = models.DateTimeField(auto_now_add=True)
 
@@ -103,6 +108,12 @@ class Article(models.Model):
     )
     sub_category = models.CharField(max_length=64, null=True, blank=True)
     processed_on = models.DateTimeField(null=True, blank=True)
+
+    # Importance scoring — set by score_articles_task (LLM batch, every 15 min).
+    # null = unscored (treated as medium priority in the process queue).
+    # importance_source: 'llm' | 'default'
+    importance_score = models.FloatField(null=True, blank=True, db_index=True)
+    importance_source = models.CharField(max_length=16, null=True, blank=True)
 
     # Per-stage pipeline outcome tracking — written by each per-record worker.
     # Shape: {"process": {"ok": true, "at": "ISO-8601", "error": null},

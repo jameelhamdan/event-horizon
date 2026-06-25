@@ -6,30 +6,15 @@ LLMTopicMatcher — LLM-based batch matching (semantic, used for regular tagging
 """
 import json
 import logging
-import re
+
+from services.text_utils import tokenize as _tokenize
 
 logger = logging.getLogger(__name__)
-
-_SPLIT_RE = re.compile(r'[^a-zA-Z0-9]+')
-
-_STOP = frozenset({
-    'the', 'a', 'an', 'in', 'on', 'at', 'to', 'of', 'for', 'and', 'or',
-    'but', 'is', 'are', 'was', 'were', 'be', 'been', 'has', 'have', 'had',
-    'its', 'that', 'this', 'with', 'by', 'from', 'as', 'after', 'amid',
-    'over', 'into', 'also', 'not', 'new', 'says', 'said', 'two', 'three',
-})
 
 # Minimum fraction of topic keywords that must match for a tag to apply
 _MIN_OVERLAP = 0.1
 # Minimum absolute keyword matches (whichever is higher wins)
 _MIN_MATCHES = 1
-
-
-def _tokenize(text: str) -> set[str]:
-    return {
-        t.lower() for t in _SPLIT_RE.split(text or '')
-        if len(t) > 2 and t.lower() not in _STOP
-    }
 
 
 class TopicMatcher:
@@ -100,7 +85,7 @@ class LLMTopicMatcher:
 
         Falls back to TopicMatcher per-event on LLM error.
         """
-        from services.llm import get_llm_service
+        from services.llm import get_llm_service, strip_code_fences
 
         results: dict[str, dict[str, float]] = {str(e.pk): {} for e in events}
         # Default 'keyword' = not confidently LLM-tagged (covers pre-filtered events
@@ -161,9 +146,7 @@ class LLMTopicMatcher:
                     temperature=0,
                     max_tokens=min(1800, 80 * len(batch) + 200),
                 ).strip()
-                # Strip markdown code fences if present
-                response = re.sub(r'^```(?:json)?\s*', '', response)
-                response = re.sub(r'\s*```$', '', response)
+                response = strip_code_fences(response)
                 batch_result = json.loads(response)
                 if not isinstance(batch_result, dict):
                     raise ValueError('LLM returned non-dict')

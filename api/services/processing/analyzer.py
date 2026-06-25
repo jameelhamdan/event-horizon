@@ -2,6 +2,8 @@ import functools
 import json
 import logging
 import re
+
+from services.llm import strip_code_fences
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -267,9 +269,7 @@ class ArticleAnalyzer:
     @staticmethod
     def _loads(raw: str):
         # Free/no-key models often wrap JSON in ```json fences — strip them first.
-        cleaned = re.sub(r'^```(?:json)?\s*', '', raw.strip())
-        cleaned = re.sub(r'\s*```$', '', cleaned)
-        return json.loads(cleaned)
+        return json.loads(strip_code_fences(raw))
 
     def _parse_array(self, raw: str) -> list[ArticleAnalysis]:
         data = self._loads(raw)

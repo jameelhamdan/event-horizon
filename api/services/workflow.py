@@ -13,6 +13,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone as dt_timezone
 from django.utils import timezone
 
+from services.llm import strip_code_fences
+
 logger = logging.getLogger(__name__)
 
 
@@ -129,8 +131,17 @@ class Workflow:
                 articles = [a for a in qs if not (a.extra_data or {}).get('geo_failed')][:limit]
             else:
                 if not reprocess:
+                    from django.conf import settings as _s
                     qs = qs.filter(processed_on__isnull=True)
-                articles = list(qs[:limit])
+                    min_score = getattr(_s, 'ARTICLE_MIN_IMPORTANCE_TO_PROCESS', 0.0)
+                    if min_score > 0:
+                        qs = qs.exclude(
+                            importance_score__isnull=False,
+                            importance_score__lt=min_score,
+                        )
+                    articles = list(qs.order_by('-importance_score')[:limit])
+                else:
+                    articles = list(qs[:limit])
 
         if not articles:
             return 0
@@ -748,9 +759,7 @@ class Workflow:
             )
 
             try:
-                response = llm.chat([{'role': 'user', 'content': prompt}]).strip()
-                response = re.sub(r'^```(?:json)?\s*', '', response)
-                response = re.sub(r'\s*```$', '', response)
+                response = strip_code_fences(llm.chat([{'role': 'user', 'content': prompt}]))
                 enriched = _json.loads(response)
                 if not isinstance(enriched, list):
                     raise ValueError('LLM returned non-list')
@@ -999,9 +1008,7 @@ class Workflow:
             )
 
             try:
-                response_text = llm.chat([{'role': 'user', 'content': prompt}]).strip()
-                response_text = re.sub(r'^```(?:json)?\s*', '', response_text)
-                response_text = re.sub(r'\s*```$', '', response_text)
+                response_text = strip_code_fences(llm.chat([{'role': 'user', 'content': prompt}]))
                 if response_text.strip().lower() == 'null':
                     continue
                 data = _json.loads(response_text)

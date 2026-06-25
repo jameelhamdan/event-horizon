@@ -9,7 +9,9 @@
       "url": "https://feeds.reuters.com/reuters/worldNews",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": false,
+      "weight": 1.3,
+      "weight_locked": true
     }
   },
   {
@@ -22,7 +24,9 @@
       "url": "https://feeds.apnews.com/rss/apf-topnews",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.4,
+      "weight_locked": true
     }
   },
   {
@@ -35,7 +39,9 @@
       "url": "https://www.voanews.com/api/ztmqoyeq_e",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
     }
   },
   {
@@ -48,7 +54,9 @@
       "url": "https://www.politico.eu/feed/",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.1,
+      "weight_locked": false
     }
   },
   {
@@ -61,7 +69,9 @@
       "url": "https://www.japantimes.co.jp/feed/",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
     }
   },
   {
@@ -74,7 +84,9 @@
       "url": "https://www.africanews.com/feed/",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
     }
   },
   {
@@ -87,7 +99,9 @@
       "url": "http://feeds.bbci.co.uk/news/world/middle_east/rss.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.4,
+      "weight_locked": true
     }
   },
   {
@@ -100,7 +114,9 @@
       "url": "https://www.straitstimes.com/news/world/rss.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
     }
   },
   {
@@ -113,7 +129,9 @@
       "url": "https://foreignpolicy.com/feed/",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.2,
+      "weight_locked": true
     }
   },
   {
@@ -126,7 +144,9 @@
       "url": "https://www.ft.com/rss/home/uk",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.3,
+      "weight_locked": true
     }
   },
   {
@@ -139,7 +159,9 @@
       "url": "https://feeds.bloomberg.com/markets/news.rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": false,
+      "weight": 1.3,
+      "weight_locked": true
     }
   },
   {
@@ -152,7 +174,9 @@
       "url": "https://www.forbes.com/business/feed/",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 0.8,
+      "weight_locked": false
     }
   },
   {
@@ -165,20 +189,9 @@
       "url": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
-    }
-  },
-  {
-    "model": "core.source",
-    "fields": {
-      "code": "business-insider",
-      "type": "rss",
-      "name": "Business Insider",
-      "description": "Business and financial news from Business Insider.",
-      "url": "https://feeds.businessinsider.com/custom/all",
-      "author_slug": "",
-      "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.2,
+      "weight_locked": false
     }
   },
   {
@@ -191,7 +204,9 @@
       "url": "https://www.imf.org/en/News/rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.2,
+      "weight_locked": true
     }
   },
   {
@@ -204,7 +219,9 @@
       "url": "https://blogs.worldbank.org/en/feed",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.1,
+      "weight_locked": false
     }
   },
   {
@@ -217,7 +234,9 @@
       "url": "https://www.project-syndicate.org/rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.1,
+      "weight_locked": false
     }
   },
   {
@@ -230,7 +249,9 @@
       "url": "https://www.brookings.edu/feed/",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.1,
+      "weight_locked": false
     }
   },
   {
@@ -243,7 +264,9 @@
       "url": "https://www.oecd.org/newsroom/news.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.2,
+      "weight_locked": true
     }
   },
   {
@@ -256,7 +279,9 @@
       "url": "https://www.theguardian.com/uk/crime/rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.2,
+      "weight_locked": false
     }
   },
   {
@@ -269,7 +294,9 @@
       "url": "https://feeds.reuters.com/reuters/crimeNews",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": false,
+      "weight": 1.3,
+      "weight_locked": true
     }
   },
   {
@@ -282,7 +309,9 @@
       "url": "https://www.interpol.int/en/News-and-Events/News/rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.2,
+      "weight_locked": true
     }
   },
   {
@@ -295,7 +324,9 @@
       "url": "https://news.un.org/feed/subscribe/en/news/topic/crime-prevention-and-criminal-justice/feed/rss.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.2,
+      "weight_locked": true
     }
   },
   {
@@ -308,7 +339,9 @@
       "url": "https://feeds.propublica.org/propublica/main",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.3,
+      "weight_locked": true
     }
   },
   {
@@ -321,7 +354,9 @@
       "url": "https://www.occrp.org/en/rss/",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.2,
+      "weight_locked": true
     }
   },
   {
@@ -334,7 +369,9 @@
       "url": "https://venturebeat.com/feed/",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 0.8,
+      "weight_locked": false
     }
   },
   {
@@ -347,7 +384,9 @@
       "url": "https://www.zdnet.com/news/rss.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 0.8,
+      "weight_locked": false
     }
   },
   {
@@ -360,7 +399,9 @@
       "url": "https://spectrum.ieee.org/feeds/feed.rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 1.1,
+      "weight_locked": false
     }
   },
   {
@@ -373,7 +414,9 @@
       "url": "https://www.engadget.com/rss.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 0.8,
+      "weight_locked": false
     }
   },
   {
@@ -386,7 +429,144 @@
       "url": "https://www.cnet.com/rss/news/",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true
+      "is_enabled": true,
+      "weight": 0.8,
+      "weight_locked": false
+    }
+  },
+  {
+    "model": "core.source",
+    "fields": {
+      "code": "merco-press",
+      "type": "rss",
+      "name": "MercoPress",
+      "description": "South Atlantic news agency covering Latin America and the Falkland Islands.",
+      "url": "https://en.mercopress.com/rss",
+      "author_slug": "",
+      "headers": {},
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
+    }
+  },
+  {
+    "model": "core.source",
+    "fields": {
+      "code": "elpais-english",
+      "type": "rss",
+      "name": "El País English",
+      "description": "International and Latin American news from El País in English.",
+      "url": "https://feeds.elpais.com/mrss-s/pages/ep/site/english.elpais.com/portada",
+      "author_slug": "",
+      "headers": {},
+      "is_enabled": true,
+      "weight": 1.1,
+      "weight_locked": false
+    }
+  },
+  {
+    "model": "core.source",
+    "fields": {
+      "code": "allafrica",
+      "type": "rss",
+      "name": "AllAfrica",
+      "description": "Pan-African news aggregator covering 55 African nations.",
+      "url": "https://allafrica.com/tools/headlines/rdf/world/headlines.rdf",
+      "author_slug": "",
+      "headers": {},
+      "is_enabled": true,
+      "weight": 0.9,
+      "weight_locked": false
+    }
+  },
+  {
+    "model": "core.source",
+    "fields": {
+      "code": "arab-news",
+      "type": "rss",
+      "name": "Arab News",
+      "description": "English-language news from the Arab world published by Arab News.",
+      "url": "https://www.arabnews.com/rss.xml",
+      "author_slug": "",
+      "headers": {},
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
+    }
+  },
+  {
+    "model": "core.source",
+    "fields": {
+      "code": "cna-world",
+      "type": "rss",
+      "name": "Channel NewsAsia World",
+      "description": "World news from Channel NewsAsia, Singapore's international news broadcaster.",
+      "url": "https://www.channelnewsasia.com/rssfeeds/8395986",
+      "author_slug": "",
+      "headers": {},
+      "is_enabled": true,
+      "weight": 1.1,
+      "weight_locked": false
+    }
+  },
+  {
+    "model": "core.source",
+    "fields": {
+      "code": "daily-sabah",
+      "type": "rss",
+      "name": "Daily Sabah",
+      "description": "English-language news from Turkey covering the region and the world.",
+      "url": "https://www.dailysabah.com/rss",
+      "author_slug": "",
+      "headers": {},
+      "is_enabled": true,
+      "weight": 0.9,
+      "weight_locked": false
+    }
+  },
+  {
+    "model": "core.source",
+    "fields": {
+      "code": "kyiv-independent",
+      "type": "rss",
+      "name": "Kyiv Independent",
+      "description": "Independent English-language journalism from Ukraine covering Eastern Europe.",
+      "url": "https://kyivindependent.com/rss",
+      "author_slug": "",
+      "headers": {},
+      "is_enabled": true,
+      "weight": 1.0,
+      "weight_locked": false
+    }
+  },
+  {
+    "model": "core.source",
+    "fields": {
+      "code": "defense-news",
+      "type": "rss",
+      "name": "Defense News",
+      "description": "Global defense and military news from Defense News.",
+      "url": "https://www.defensenews.com/rss/",
+      "author_slug": "",
+      "headers": {},
+      "is_enabled": true,
+      "weight": 1.1,
+      "weight_locked": false
+    }
+  },
+  {
+    "model": "core.source",
+    "fields": {
+      "code": "who-news",
+      "type": "rss",
+      "name": "WHO News",
+      "description": "Health news and alerts from the World Health Organization.",
+      "url": "https://www.who.int/rss-feeds/news-english.xml",
+      "author_slug": "",
+      "headers": {},
+      "is_enabled": true,
+      "weight": 1.2,
+      "weight_locked": true
     }
   }
 ]

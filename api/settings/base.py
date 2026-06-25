@@ -250,6 +250,47 @@ REST_FRAMEWORK = {
 OPENROUTER_PROXY_URLS = config('OPENROUTER_PROXY_URLS', default='')
 OPENROUTER_API_KEYS = config('OPENROUTER_API_KEYS', default='')
 OPENROUTER_MODELS = config('OPENROUTER_MODELS', default='openrouter/free')
+# Network-level HTTP proxies for LLM calls. Format:
+#   http://host:port::api_key,http://host2:port,http://host3:port::api_key3
+# The '::api_key' suffix is optional; proxies without an explicit key draw from
+# OPENROUTER_API_KEYS in round-robin (loosely tied — pool and proxy list may differ
+# in length and are cycled independently before being paired at startup).
+OPENROUTER_HTTP_PROXIES = config('OPENROUTER_HTTP_PROXIES', default='')
+
+# Open-source proxy pool: auto-fetches free HTTP proxies from GitHub-hosted lists
+# and the ProxyScrape API, validates each candidate against openrouter.ai, then
+# rotates working proxies round-robin. Pool refreshes in the background every
+# OPENROUTER_PROXY_REFRESH_HOURS hours. Takes precedence over OPENROUTER_HTTP_PROXIES.
+OPENROUTER_PROXY_POOL_ENABLED = config('OPENROUTER_PROXY_POOL_ENABLED', default=False, cast=bool)
+# Override default sources (TheSpeedX, ShiftyTR, clarketm, ProxyScrape) with a
+# comma-separated list of raw-text URLs, each returning one "host:port" per line.
+OPENROUTER_PROXY_SOURCES = config('OPENROUTER_PROXY_SOURCES', default='')
+OPENROUTER_PROXY_REFRESH_HOURS = config('OPENROUTER_PROXY_REFRESH_HOURS', default=6, cast=float)
+OPENROUTER_PROXY_VALIDATE_TIMEOUT = config('OPENROUTER_PROXY_VALIDATE_TIMEOUT', default=5, cast=int)
+OPENROUTER_PROXY_MAX_POOL = config('OPENROUTER_PROXY_MAX_POOL', default=100, cast=int)
+
+# ── Article importance scoring ────────────────────────────────────────────────
+# LLM-based 1.0–10.0 significance rating applied to live articles every
+# SCORE_INTERVAL_MINUTES. Low-scoring articles are excluded from the NLP
+# pipeline (ARTICLE_MIN_IMPORTANCE_TO_PROCESS) and deleted after a grace period
+# (ARTICLE_MIN_IMPORTANCE + ARTICLE_CLEANUP_GRACE_HOURS).
+ARTICLE_IMPORTANCE_SCORING_ENABLED = config('ARTICLE_IMPORTANCE_SCORING_ENABLED', default=True, cast=bool)
+# Articles below this score are skipped by process_articles_task.
+ARTICLE_MIN_IMPORTANCE_TO_PROCESS = config('ARTICLE_MIN_IMPORTANCE_TO_PROCESS', default=4.0, cast=float)
+# Articles below this score are deleted by cleanup_low_importance_articles_task.
+ARTICLE_MIN_IMPORTANCE = config('ARTICLE_MIN_IMPORTANCE', default=4.0, cast=float)
+# Grace window before low-importance articles are eligible for deletion.
+ARTICLE_CLEANUP_GRACE_HOURS = config('ARTICLE_CLEANUP_GRACE_HOURS', default=48, cast=int)
+# Processed+unlocated articles older than this are pruned by prune_stale_articles_task.
+ARTICLE_STALE_PROCESSED_DAYS = config('ARTICLE_STALE_PROCESSED_DAYS', default=7, cast=int)
+# score_articles_task runs every N minutes (registered in setup_schedule).
+SCORE_INTERVAL_MINUTES = config('SCORE_INTERVAL_MINUTES', default=15, cast=int)
+# Fetch-time filters applied to every RSS article (zero LLM cost).
+ARTICLE_MIN_WORD_COUNT = config('ARTICLE_MIN_WORD_COUNT', default=30, cast=int)
+# Near-duplicate title dedup using Jaccard token overlap (Redis cache, TTL=ARTICLE_DEDUP_HOURS).
+ARTICLE_DEDUP_TITLE_ENABLED = config('ARTICLE_DEDUP_TITLE_ENABLED', default=True, cast=bool)
+ARTICLE_DEDUP_JACCARD_THRESHOLD = config('ARTICLE_DEDUP_JACCARD_THRESHOLD', default=0.75, cast=float)
+ARTICLE_DEDUP_HOURS = config('ARTICLE_DEDUP_HOURS', default=24, cast=int)
 
 # Ollama (self-hosted, no key)
 OLLAMA_BASE_URL = config('OLLAMA_BASE_URL', default='http://localhost:11434')
@@ -259,9 +300,10 @@ OLLAMA_MODEL = config('OLLAMA_MODEL', default='qwen3:4b')
 # Unconfigured providers are skipped; unknown roles fall back to 'default'.
 LLM_ROUTES = {
     'default': 'openrouter',
+    'scoring': 'openrouter',  # article importance scoring (score_articles_task)
 
     # Override per role if needed. Available roles: analyzer, topics, newsletter,
-    # historical, routing. Example with Ollama fallback:
+    # historical, routing, scoring. Example with Ollama fallback:
     #   'analyzer': ['ollama', 'openrouter'],
 }
 
