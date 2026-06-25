@@ -14,7 +14,7 @@ This file gives Claude everything needed to write correct, consistent code for t
 | Storage | MongoDB 8 |
 | Ingestion | feedparser (RSS) + requests |
 | NLP | HuggingFace NER (dslim/bert-base-NER) + LLM category/geo + sentence-transformers + VADER + FinBERT + geonamescache |
-| LLM | Multi-provider via `services/llm.py` — `g4f` (default, headless Docker proxy), `openrouter`, `ollama`; per-use-case routing + fallback chains in `settings.LLM_ROUTES` |
+| LLM | Multi-provider via `services/llm.py` — `openrouter` (default, proxy-URL rotation or direct keys), `ollama`; per-use-case routing + fallback chains in `settings.LLM_ROUTES` |
 | Frontend | React 19 + Vite + react-router-dom + react-leaflet (TypeScript) |
 | Real-time | Server-Sent Events (SSE) over Redis pub/sub |
 | Email | AWS SES (newsletter + confirmation emails) |
@@ -274,7 +274,7 @@ This is a real-time global event intelligence platform. Key feature areas:
 - `PriceBar` — daily OHLC (forecasting substrate, no TTL); fields: `symbol`, `stream_key`, `name`, `interval` (`1d`), `open/high/low/close`, `volume`, `date`; backfilled via `services/forecasting/history.py`
 - `Forecast` — model-backed forecast (one per symbol+horizon); fields: `symbol`, `stream_key`, `generated_at`, `as_of_date`, `horizon_days` (1\|5), `direction`, `proba_up`, `predicted_change_pct`, `predicted_price`, `band_low/high`, `confidence`, `current_value`, `router_source` (llm/rules), `model_version`, `realized_direction/change_pct`, `is_correct`, `scored_at`
 - `MarketSymbol` — **single source of truth** for fetched/forecast/UI symbols (replaces hardcoded symbol lists). Fields: `symbol` (unique), `name`, `stream_key`, `provider` (yahoo/coingecko/ecb), `provider_id`, `group`, `is_active` (fetched by streams), `is_forecast` (forecasting panel target), `is_popular`+`rank`, `display_order`, `metadata`. Read via `services/market_symbols.py` helpers (graceful fallback to hardcoded defaults if empty). Seeded by migration `0006`. See [docs/symbols.md](docs/symbols.md).
-- `TaskRun` — one row per task execution (status, duration, item count, error, job_id), written centrally by the `_execute_tracked` wrapper in `services/queue.py`. Data source for the admin operations dashboard. Migration `0007`.
+- `TaskRun` — legacy per-execution record (status, duration, items, error, job_id). No longer auto-written; job history is now provided by the django-rq admin panel at `/admin/django-rq/`. Migration `0007`.
 - `Article.stage_status` / `Event.stage_status` — per-record `{stage: {ok, at, error}}` written by `services/stages.py::mark_stage` (Article: `process`/`geocode`; Event: `tag`/`route`). Feeds `Workflow.pipeline_coverage()`. Migration `0008`.
 - `misc` app contains only `EmailLog` model — admin panel for monitoring sent emails
 - `Subscriber` in `newsletter/models.py` — fields: `email` (unique), `token` (UUID), `subscribed_at`, `confirmed_at` (nullable), `is_active`, `unsubscribed_at`; lifecycle: pending → confirmed → unsubscribed
@@ -285,12 +285,13 @@ All task functions live in `services/tasks.py` (pipeline + streams + topics) and
 
 - Enqueue: `from services.queue import enqueue; enqueue(my_task, arg1, kwarg=val)`
 - Task names follow the `*_task` suffix convention
+- Task functions must **return a value** (usually an `int` count) — django-rq stores it as the job result, visible in the `/admin/django-rq/` panel
 - Management commands call task functions **directly** for inline/foreground execution; use `--background` to enqueue instead
 - `enqueue()` calls the function synchronously when `TASK_QUEUE_ENABLED=False` (dev default)
 - **Queue routing**: pass `queue='heavy'` to `enqueue()` for NLP/LLM tasks; default queue is `'default'` (light I/O)
 
 To add a new background task:
-1. Write the plain function in `services/tasks.py`
+1. Write the plain function in `services/tasks.py`; return a meaningful value (int count of records affected)
 2. Enqueue it: `from services.queue import enqueue; enqueue(my_task, queue='heavy', ...)`
 3. Add it to `setup_schedule.py` if it should run periodically
 
@@ -323,6 +324,8 @@ All periodic jobs are registered by the `setup_schedule` management command (`ap
 |---|---|---|
 | `refresh_topics_task` | daily at 04:00 UTC | `TOPICS_REFRESH_HOUR` |
 | `generate_newsletter_task` | daily at 06:00 UTC | `NEWSLETTER_GENERATE_HOUR` |
+
+Task functions are scheduled directly — `scheduler.schedule(when, func, ...)` — with no wrapper. Return values flow into RQ's job result store and appear in `/admin/django-rq/`.
 
 To change an interval: update the env var and restart the `scheduler` service (it re-runs `setup_schedule` on startup, clearing and re-registering all jobs).
 
@@ -708,7 +711,6 @@ Stream tasks (default queue, independent of pipeline):
 | `nginx` | reverse proxy | 80, 443 |
 | `redis` | broker + cache + SSE pub/sub | — |
 | `mongo` | database | 27017 |
-| `g4f` | gpt4free OpenAI-compatible LLM proxy (`hlohaus789/g4f:latest-slim`) | 1337 (internal) |
 | `cloudflared` | Cloudflare Tunnel (optional) | — |
 
 ---
@@ -724,12 +726,11 @@ Stream tasks (default queue, independent of pipeline):
 | `DOMAIN` | `localhost` | Public hostname for nginx + Let's Encrypt |
 | `ENV_NAME` | `development` | Shown in X-App-Version header |
 | `TASK_QUEUE_ENABLED` | `false` | If false, `enqueue()` calls functions synchronously (no Redis needed) |
-| `OPENROUTER_API_KEYS` | — | OpenRouter keys, comma-separated (rotated round-robin per request) |
+| `OPENROUTER_PROXY_URLS` | — | Comma-separated proxy base URLs (each pre-authenticated with one OpenRouter key). When set, the client rotates over these URLs round-robin; no `OPENROUTER_API_KEYS` needed |
+| `OPENROUTER_API_KEYS` | — | OpenRouter keys, comma-separated (rotated round-robin). Used only when `OPENROUTER_PROXY_URLS` is not set |
 | `OPENROUTER_MODELS` | `openrouter/free` | OpenRouter model (first value used) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `qwen3:4b` | Ollama model name |
-| `G4F_BASE_URL` | `http://localhost:8080/v1` | g4f proxy URL — the `hlohaus789/g4f` image serves the API on **:8080** (not :1337) |
-| `G4F_MODEL` | `gpt-4o` | g4f model — `gpt-4o-mini` is broken upstream (`KeyError: 'Chatai'`); the image git-pulls main on boot so models drift |
 | `FETCH_INTERVAL_MINUTES` | `10` | fetch_articles_task period |
 | `PROCESS_INTERVAL_MINUTES` | `10` | process_articles_task base period (×6 for heavy queue = 60m) |
 | `AGGREGATE_INTERVAL_MINUTES` | `10` | aggregate_events_task base period (×6 = 60m) |
@@ -779,7 +780,7 @@ Stream tasks (default queue, independent of pipeline):
 - **UUID filtering**: `article_ids` stores strings; convert with `uuid.UUID()` first
 - **`enqueue()` dev mode**: when `TASK_QUEUE_ENABLED=False`, `enqueue()` calls the function synchronously — no Redis or worker needed locally
 - **Pipeline ordering**: with `TASK_QUEUE_ENABLED=True`, enqueuing fetch + process + aggregate as separate jobs **races them** — aggregate can run before process finishes, so no new Events. Chain dependent steps in a single task (see `run_pipeline_task`) instead of enqueuing them separately.
-- **Aggregation needs a location**: `aggregate_events` only buckets articles with a non-empty `Article.location` and `published_on` within the window. An article processed while the LLM/geo step was failing (e.g. g4f down) is saved `processed_on`-set but `location=None` → it **never aggregates**, and `process_articles` won't retry it (it skips processed rows). Recover with `process_articles(only_failed=True)` (admin: **"Reprocess un-located"**); `aggregate_events` logs how many in-window articles it skipped for missing location.
+- **Aggregation needs a location**: `aggregate_events` only buckets articles with a non-empty `Article.location` and `published_on` within the window. An article whose LLM/geo step failed is saved with `processed_on` set but `location=None` → it **never aggregates**, and `process_articles` won't retry it (skips already-processed rows). Recover with `process_articles(only_failed=True)` (admin: **"Reprocess un-located"**); `aggregate_events` logs how many in-window articles it skipped for missing location.
 - **Two queues**: `default` for fast I/O, `heavy` for NLP/LLM. New NLP/LLM tasks must pass `queue='heavy'` to `enqueue()` and `setup_schedule`
 - **Schedule is stored in Redis**: `setup_schedule` clears and re-registers all jobs on every `scheduler` container start — this is intentional and idempotent
 - **Restart scheduler to change intervals**: edit the env var and restart the `scheduler` service; it re-runs `setup_schedule` automatically
@@ -805,12 +806,13 @@ Stream tasks (default queue, independent of pipeline):
 - **`tag_events_with_topics` uses LLM**: `LLMTopicMatcher` sends batches of 10 events per LLM call; `retroactive_tag_topic` still uses the fast keyword-based `TopicMatcher`.
 - **`refresh_topics` runs LLM enrichment**: `Workflow._enrich_topics()` calls the LLM after scraping to generate proper descriptions and expand keywords (batches of 30). Falls back silently — topics are upserted with raw scraped metadata if LLM is unavailable.
 - **LLM responses: always strip code fences**: use `re.sub(r'^```(?:json)?\s*', '', r)` + `re.sub(r'\s*```$', '', r)` before `json.loads()`. All LLM-calling code in the project does this — do not omit it in new code.
-- **LLM routing**: call `get_llm_service(role)` with the use-case role (`analyzer`, `topics`, `newsletter`, `historical`; unknown → `default`). Routes live in `settings.LLM_ROUTES` (dict in `settings/base.py`) — a provider name or an ordered fallback list (`FallbackLLMService` tries each on `LLMError`). Per-provider config (keys/base_url/model) is in `.env`; the who-uses-what routing is in code. There is no `LLM_BACKEND` / `LLM_PROVIDER` var anymore.
+- **LLM routing**: call `get_llm_service(role)` with the use-case role (`analyzer`, `topics`, `newsletter`, `historical`, `routing`; unknown → `default`). Routes live in `settings.LLM_ROUTES` (dict in `settings/base.py`) — a provider name (`'openrouter'`) or an ordered fallback list (`FallbackLLMService` tries each on `LLMError`). Available providers: `openrouter`, `ollama`. Provider config (URLs/keys/model) comes from env vars. There is no `LLM_BACKEND` / `LLM_PROVIDER` / `G4F_*` var anymore.
+- **OpenRouter proxy rotation**: set `OPENROUTER_PROXY_URLS` to 20 comma-separated proxy base URLs (each pre-keyed). The client cycles them round-robin — no api_key sent. If unset, falls back to direct openrouter.ai with `OPENROUTER_API_KEYS`.
 - **Static points bootstrap**: run `python manage.py bootstrap_static_points` once to seed `StaticPoint` (exchanges, ports, central banks)
 - **Configurationless deploy**: `docker compose up` self-seeds + self-backfills via `bootstrap_initial_data_task` (triggered by `setup_schedule`, idempotent). No manual `bootstrap_static_points` needed in fresh deploys. See [docs/operations.md](docs/operations.md).
 - **Fan-out pipeline**: process/tag/route are light **dispatcher** tasks (`dispatch_*`, default queue) that enqueue idempotent per-record **workers** (`process_article_task`, `tag_events_chunk_task`, `route_events_chunk_task`, etc.) on the heavy queue. Scale via `worker-heavy` replicas. The admin "Run full pipeline" button still uses the sequential `run_pipeline_task`.
 - **Symbols are DB-driven**: never hardcode symbol lists — add a `MarketSymbol` row and read via `services/market_symbols.py`. The forecasting panel is `MarketSymbol.is_forecast` (5 base symbols: `CL=F, GC=F, BTC-USD, SPY, EURUSD=X`); changing it requires a retrain (auto on next daily `train_forecast_model_task`).
-- **Ops dashboard**: `/admin/dashboard/` (throughput/coverage/upcoming/in-flight/forecast status + reprocess/cancel actions). Every task run is recorded as a `TaskRun` by the `_execute_tracked` wrapper — including scheduled jobs (scheduled via `_execute_tracked` in `setup_schedule`).
+- **Job monitoring**: use the built-in django-rq panel at `/admin/django-rq/` — shows queue depths, worker status, job details, return values, and failed-job tracebacks. Task functions return an `int` count which appears as the job result.
 
 ---
 

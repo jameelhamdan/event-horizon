@@ -173,8 +173,7 @@ class Workflow:
             article.extra_data = extra
             article.translations = features.translations
 
-            # Per-record stage tracking: 'process' always succeeds here; 'geocode' is the
-            # known g4f-outage gap — ok iff a location was resolved.
+            # Per-record stage tracking: 'geocode' ok iff a location was resolved.
             mark_stage(article, 'process', ok=True)
             mark_stage(article, 'geocode', ok=bool(features.location),
                        error=None if features.location else 'no location resolved')
@@ -521,7 +520,7 @@ class Workflow:
             'need': Article.objects.filter(processed_on__isnull=True).count(),
             'action': 'process', 'error_sample': None,
         })
-        # Article: processed but un-located (the g4f-outage gap → never aggregates)
+        # Article: processed but un-located (no location resolved → never aggregates)
         try:
             unlocated = (
                 Article.objects.filter(processed_on__isnull=False, location__isnull=True).count()
@@ -905,7 +904,23 @@ class Workflow:
             existing.update(result)
             event.topics = existing
             event.topic_slugs = list(existing.keys())
-            event.save(update_fields=['topics', 'topic_slugs'])
+
+            # Re-route so affected_indicators reflect the newly matched topic slug.
+            try:
+                from services.forecasting.routing import route_event_to_weighted_symbols
+                route_sentiment = (
+                    event.avg_finbert_sentiment
+                    if event.avg_finbert_sentiment is not None
+                    else event.avg_sentiment
+                )
+                event.affected_indicators = route_event_to_weighted_symbols(
+                    event.category, event.location_name, event.topic_slugs,
+                    event.sub_categories or [], route_sentiment,
+                )
+            except Exception:
+                pass  # routing is best-effort; topic tags are still saved
+
+            event.save(update_fields=['topics', 'topic_slugs', 'affected_indicators'])
             tagged_count += 1
             logger.info('[topics] Retroactively tagged "%s" → %s', event.title[:60], slug)
 

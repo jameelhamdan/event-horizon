@@ -275,7 +275,7 @@ class ArticleAnalyzer:
         data = self._loads(raw)
         if isinstance(data, dict):
             # Tolerate {"results": [...]} / {"articles": [...]} envelopes.
-            data = data.get('results') or data.get('articles') or []
+            data = data.get('results') if 'results' in data else data.get('articles', [])
         if not isinstance(data, list):
             return []
         return [self._parse_obj(o) if isinstance(o, dict) else self._empty() for o in data]

@@ -195,9 +195,8 @@ class LLMTopicMatcher:
                     '[topics] LLM batch %d/%d failed (%s) — falling back to TopicMatcher',
                     batch_num, total_batches, exc,
                 )
-                fallback = TopicMatcher()
                 for event in batch:
-                    results[str(event.pk)] = fallback.match(event, topics)
+                    results[str(event.pk)] = keyword.match(event, topics)
                     # source stays 'keyword' (default) — flagged for LLM retry later
 
         return results, sources

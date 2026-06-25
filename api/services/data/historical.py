@@ -299,6 +299,13 @@ class RSSHistoricalService:
                 return default
             data = json.loads(match.group(0))
             score_map = {item['i']: float(item['score']) for item in data}
+            expected = set(range(1, len(entries) + 1))
+            missing = expected - score_map.keys()
+            if missing:
+                logger.warning(
+                    'LLM batch score index mismatch: expected 1-%d, missing %s; using 5.0 defaults',
+                    len(entries), sorted(missing),
+                )
             return [score_map.get(i + 1, 5.0) for i in range(len(entries))]
         except LLMError as exc:
             logger.warning('LLM batch scoring failed (%s); defaulting to 5.0', exc)

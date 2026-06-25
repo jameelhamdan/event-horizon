@@ -568,7 +568,7 @@ def score_forecasts_task() -> int:
     now = datetime.now(dt_timezone.utc)
     scored = 0
     for f in pending:
-        if not f.current_value:
+        if f.current_value is None or f.current_value == 0:
             continue
         future = list(
             core_models.PriceBar.objects.filter(

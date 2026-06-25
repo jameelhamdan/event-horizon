@@ -91,7 +91,7 @@ def _yahoo_quote(symbol: str) -> dict | None:
 
 
 def _safe_change_pct(current, previous) -> float | None:
-    if current and previous and previous != 0:
+    if current is not None and previous is not None and previous != 0:
         return round((current - previous) / previous * 100, 4)
     return None
 
@@ -184,32 +184,36 @@ class PriceStream(BaseStream):
         return records
 
     def save(self, records: list[dict]) -> int:
-        from core.models import PriceTick
+        return save_price_ticks(records)
 
-        ticks = [
-            PriceTick(
-                symbol=r['symbol'],
-                stream_key=r['stream_key'],
-                name=r['name'],
-                value=r['value'],
-                change_pct=r.get('change_pct'),
-                volume=r.get('volume'),
-                occurred_at=r['occurred_at'],
-            )
-            for r in records
-        ]
-        PriceTick.objects.bulk_create(ticks)
 
-        # Publish each tick individually for SSE consumers
-        for r in records:
-            redis_publish('sse:prices', {
-                'type': 'price_tick',
-                'symbol': r['symbol'],
-                'stream_key': r['stream_key'],
-                'name': r['name'],
-                'value': r['value'],
-                'change_pct': r.get('change_pct'),
-                'occurred_at': r['occurred_at'].isoformat(),
-            })
+def save_price_ticks(records: list[dict]) -> int:
+    """Persist price records to PriceTick and publish each to SSE. Shared by all price streams."""
+    from core.models import PriceTick
 
-        return len(ticks)
+    ticks = [
+        PriceTick(
+            symbol=r['symbol'],
+            stream_key=r['stream_key'],
+            name=r['name'],
+            value=r['value'],
+            change_pct=r.get('change_pct'),
+            volume=r.get('volume'),
+            occurred_at=r['occurred_at'],
+        )
+        for r in records
+    ]
+    PriceTick.objects.bulk_create(ticks)
+
+    for r in records:
+        redis_publish('sse:prices', {
+            'type': 'price_tick',
+            'symbol': r['symbol'],
+            'stream_key': r['stream_key'],
+            'name': r['name'],
+            'value': r['value'],
+            'change_pct': r.get('change_pct'),
+            'occurred_at': r['occurred_at'].isoformat(),
+        })
+
+    return len(ticks)

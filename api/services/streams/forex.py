@@ -10,7 +10,8 @@ import requests
 from django.conf import settings
 from django.utils import timezone as dj_timezone
 
-from .base import BaseStream, redis_publish
+from .base import BaseStream
+from .prices import save_price_ticks
 
 logger = logging.getLogger(__name__)
 
@@ -77,31 +78,4 @@ class ForexStream(BaseStream):
         return records
 
     def save(self, records: list[dict]) -> int:
-        from core.models import PriceTick
-
-        ticks = [
-            PriceTick(
-                symbol=r['symbol'],
-                stream_key=r['stream_key'],
-                name=r['name'],
-                value=r['value'],
-                change_pct=r.get('change_pct'),
-                volume=r.get('volume'),
-                occurred_at=r['occurred_at'],
-            )
-            for r in records
-        ]
-        PriceTick.objects.bulk_create(ticks)
-
-        for r in records:
-            redis_publish('sse:prices', {
-                'type': 'price_tick',
-                'symbol': r['symbol'],
-                'stream_key': 'forex',
-                'name': r['name'],
-                'value': r['value'],
-                'change_pct': None,
-                'occurred_at': r['occurred_at'].isoformat(),
-            })
-
-        return len(ticks)
+        return save_price_ticks(records)

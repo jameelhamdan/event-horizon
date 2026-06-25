@@ -84,7 +84,7 @@ def _load_events(start, end, router=None):
                 except (TypeError, ValueError):
                     pass
         events.append({
-            't': e['latest_article_at'],
+            't': to_utc_ts(e['latest_article_at']),
             'w': weights,
             'finbert': e['avg_finbert_sentiment'],
             'vader': e['avg_sentiment'],
@@ -238,9 +238,9 @@ def build_training_frame(symbols=None, start=None, end=None, horizons=(1, 5),
             row = {'symbol': sym, 'date': t, 'close': float(close.iloc[pos])}
             row.update(pf)
             if include_events and events:
-                lo_i = bisect.bisect_left(ev_ts, t.to_pydatetime() - timedelta(days=max(EVENT_WINDOWS)))
-                hi_i = bisect.bisect_right(ev_ts, t.to_pydatetime())
-                row.update(_event_features(events[lo_i:hi_i], sym, t.to_pydatetime()))
+                lo_i = bisect.bisect_left(ev_ts, t - timedelta(days=max(EVENT_WINDOWS)))
+                hi_i = bisect.bisect_right(ev_ts, t)
+                row.update(_event_features(events[lo_i:hi_i], sym, t))
             else:
                 row.update(_zero_event_features())
             row.update(_symbol_onehot(sym))
@@ -282,9 +282,9 @@ def build_feature_matrix(as_of_date=None, symbols=None, include_events=True, rou
         row = {'symbol': sym, 'date': t, 'close': float(s['close'].iloc[-1])}
         row.update(pf)
         if include_events and events:
-            lo_i = bisect.bisect_left(ev_ts, t.to_pydatetime() - timedelta(days=max(EVENT_WINDOWS)))
-            hi_i = bisect.bisect_right(ev_ts, t.to_pydatetime())
-            row.update(_event_features(events[lo_i:hi_i], sym, t.to_pydatetime()))
+            lo_i = bisect.bisect_left(ev_ts, t - timedelta(days=max(EVENT_WINDOWS)))
+            hi_i = bisect.bisect_right(ev_ts, t)
+            row.update(_event_features(events[lo_i:hi_i], sym, t))
         else:
             row.update(_zero_event_features())
         row.update(_symbol_onehot(sym))

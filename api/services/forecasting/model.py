@@ -75,12 +75,19 @@ def train(frame, horizon: int) -> dict:
         clf = base_clf
         clf.fit(X, y_dir)
 
-    reg = LGBMRegressor(
+    lgbm_reg_kwargs = dict(
         n_estimators=300, learning_rate=0.05, num_leaves=31,
         subsample=0.8, colsample_bytree=0.8, min_child_samples=20, verbose=-1,
     )
+    # Estimate resid_std on a held-out validation set (last 20% of the time-ordered frame)
+    # so the confidence band reflects out-of-sample error, not in-sample fit.
+    n_val = max(10, int(n * 0.2))
+    val_reg = LGBMRegressor(**lgbm_reg_kwargs)
+    val_reg.fit(X[:-n_val], y_ret[:-n_val])
+    resid_std = float(np.std(y_ret[-n_val:] - val_reg.predict(X[-n_val:])))
+
+    reg = LGBMRegressor(**lgbm_reg_kwargs)
     reg.fit(X, y_ret)
-    resid_std = float(np.std(y_ret - reg.predict(X)))
 
     artifact = {
         'horizon': horizon,

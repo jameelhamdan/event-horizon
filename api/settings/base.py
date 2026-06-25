@@ -190,9 +190,7 @@ LOGGING = {
     },
 }
 
-# WSGI_APPLICATION = 'app.wsgi_application'
 ASGI_APPLICATION = 'app.asgi.application'
-# os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
 
 FILE_UPLOAD_MAX_MEMORY_SIZE = 1024
 DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000
@@ -242,11 +240,14 @@ REST_FRAMEWORK = {
 }
 
 # ── LLM providers + routing ─────────────────────────────────────────────────────
-# Per-provider settings live in .env (below). Routing — which provider serves each
-# use-case — lives in LLM_ROUTES (a Python dict, edited in code, further below).
-# Available providers: openrouter, ollama, g4f.
+# Available providers: openrouter, ollama.
 
-# OpenRouter (https://openrouter.ai) — comma-separated keys rotate round-robin
+# OpenRouter — two modes (configure one):
+#   Proxy rotation: set OPENROUTER_PROXY_URLS to a comma-separated list of proxy
+#   base URLs, each pre-authenticated with one OpenRouter key. The client rotates
+#   over these URLs round-robin (no api_key needed).
+#   Direct: set OPENROUTER_API_KEYS (comma-separated keys, rotated round-robin).
+OPENROUTER_PROXY_URLS = config('OPENROUTER_PROXY_URLS', default='')
 OPENROUTER_API_KEYS = config('OPENROUTER_API_KEYS', default='')
 OPENROUTER_MODELS = config('OPENROUTER_MODELS', default='openrouter/free')
 
@@ -254,26 +255,14 @@ OPENROUTER_MODELS = config('OPENROUTER_MODELS', default='openrouter/free')
 OLLAMA_BASE_URL = config('OLLAMA_BASE_URL', default='http://localhost:11434')
 OLLAMA_MODEL = config('OLLAMA_MODEL', default='qwen3:4b')
 
-# g4f / gpt4free (local proxy, registration-free). NOTE: the hlohaus789/g4f Docker image
-# serves the OpenAI-compatible API on :8080 (not :1337) and git-pulls main on boot, so models
-# drift — keep G4F_MODEL on a working provider (gpt-4o; gpt-4o-mini is broken upstream).
-G4F_BASE_URL = config('G4F_BASE_URL', default='http://localhost:8080/v1')
-G4F_MODEL = config('G4F_MODEL', default='gpt-4o')
-
 # Routing: role -> provider name OR ordered fallback list (tried in order on failure).
 # Unconfigured providers are skipped; unknown roles fall back to 'default'.
 LLM_ROUTES = {
-    # Default chain for every role/use-case. g4f leads — it's the headless, always-on
-    # Docker service (registration-free); then OpenRouter as fallback.
-    'default': ['g4f', 'openrouter'],
+    'default': 'openrouter',
 
-    # Override per role if you want. Roles: analyzer, topics, newsletter,
-    # historical, routing. e.g. lead the per-article analyzer with a local Ollama model for
-    # stronger Arabic/JSON quality:
-    #   'analyzer': ['ollama', 'g4f'],
-
-    # Event→symbol routing (LLMEventRouter). Falls back to deterministic routing.py on error.
-    'routing': ['g4f', 'openrouter'],
+    # Override per role if needed. Available roles: analyzer, topics, newsletter,
+    # historical, routing. Example with Ollama fallback:
+    #   'analyzer': ['ollama', 'openrouter'],
 }
 
 # ── Forecasting (event-fused symbol prediction) ───────────────────────────────
@@ -323,8 +312,6 @@ AWS_SES_REGION = config('AWS_SES_REGION', default='us-east-1')
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='newsletter@localhost')
 NEWSLETTER_BASE_URL = config('NEWSLETTER_BASE_URL', default='http://localhost')
 
-CRON_CLASSES = []
-
 AUTH_USER_MODEL = 'accounts.User'
 SESSION_ENGINE = 'qsessions.backends.cached_db'
 DEFAULT_AUTO_FIELD = 'django_mongodb_backend.fields.ObjectIdAutoField'
@@ -362,12 +349,6 @@ LANGUAGE_CODE = 'en-ca'
 
 TIME_ZONE = 'UTC'
 
-# USE_I18N and USE_L10N are deprecated in Django 6.0 (always enabled)
-# They are kept here for backward compatibility but have no effect
-USE_I18N = False
-
-USE_L10N = False
-
 USE_TZ = True
 
 DATE_FORMAT = 'Y-m-d'
@@ -379,10 +360,9 @@ TIME_FORMAT = 'H:i'
 STATIC_URL = '/django_static/'
 STATIC_ROOT = BACKEND_DIR / '.static'
 
-FILE_STORAGE = 'django.core.files.storage.FileSystemStorage'
 STORAGES = {
     'default': {
-        'BACKEND': FILE_STORAGE,
+        'BACKEND': 'django.core.files.storage.FileSystemStorage',
     },
     'staticfiles': {
         'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',

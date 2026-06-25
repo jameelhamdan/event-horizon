@@ -43,12 +43,12 @@ def _parse_geometry(feature: dict) -> dict:
     if geom:
         return geom
     props = feature.get('properties', {})
-    lat = props.get('latitude') or props.get('lat')
-    lon = props.get('longitude') or props.get('lon')
+    lat = props.get('latitude') if 'latitude' in props else props.get('lat')
+    lon = props.get('longitude') if 'longitude' in props else props.get('lon')
     radius = props.get('radius')
-    if lat and lon and radius:
+    if lat is not None and lon is not None and radius is not None:
         return _circle_to_polygon(float(lat), float(lon), float(radius))
-    if lat and lon:
+    if lat is not None and lon is not None:
         return {'type': 'Point', 'coordinates': [float(lon), float(lat)]}
     return {}
 

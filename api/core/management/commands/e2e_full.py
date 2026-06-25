@@ -6,18 +6,18 @@ real external sources, asserting invariants at each stage. Unlike ``e2e_pipeline
 failure — it is the gradeable "does the whole thing work" test.
 
 What it exercises (with real data):
-  1. Config / symbols (WA1)   — MarketSymbol seed, market_symbols helpers, 5-symbol panel
-  2. Fan-out fetch (WA3)       — real RSS via dispatch_fetch / fetch_source workers
-  3. Fan-out process (WA3/3.6) — real NLP/LLM per-record workers + stage_status
-  4. Aggregate events          — real semantic clustering
-  5. Tag topics (LLM)          — real LLM matcher + stage_status
-  6. Route events (rules)      — deterministic router → affected_indicators + stage_status
-  7. TaskRun tracking (WA2)    — every enqueue() recorded a row
-  8. Pipeline coverage (WA3.6) — Workflow.pipeline_coverage() shape
-  9. Forecasting               — real price backfill → train → run → score
- 10. REST API                  — /api/symbols, /api/events, /api/forecasts, /api/prices (Django test client)
- 11. Ops dashboard (WA5)       — throughput / coverage / forecast-status helpers
- 12. Bootstrap guard (WA4)     — idempotency of bootstrap_initial_data_task
+  1. Config / symbols       — MarketSymbol seed, market_symbols helpers, 5-symbol panel
+  2. Queue & helpers        — enqueue() sync return value, mark_stage behaviour
+  3. Fan-out fetch          — real RSS via dispatch_fetch / fetch_source workers
+  4. Fan-out process        — real NLP/LLM per-record workers + stage_status
+  5. Aggregate events       — real semantic clustering
+  6. Tag topics (LLM)       — real LLM matcher + stage_status
+  7. Route events (rules)   — deterministic router → affected_indicators + stage_status
+  8. Pipeline coverage      — Workflow.pipeline_coverage() shape
+  9. Forecasting            — real price backfill → train → run → score
+ 10. REST API               — /api/symbols, /api/events, /api/forecasts, /api/prices (Django test client)
+ 11. Ops dashboard          — throughput / coverage / forecast-status helpers
+ 12. Bootstrap guard        — idempotency of bootstrap_initial_data_task
 
 Fan-out runs synchronously (this command forces ``TASK_QUEUE_ENABLED=False``) so the
 dispatcher → per-record worker path is fully covered without live RQ workers.
@@ -146,7 +146,6 @@ class Command(BaseCommand):
             'events': core_models.Event.objects.count(),
             'price_bars': core_models.PriceBar.objects.count(),
             'forecasts': core_models.Forecast.objects.count(),
-            'task_runs': core_models.TaskRun.objects.count(),
             'market_symbols': core_models.MarketSymbol.objects.count(),
         }
         report['finished_at'] = datetime.now(dt_timezone.utc).isoformat()
@@ -200,31 +199,16 @@ class Command(BaseCommand):
         c.hard('symbols.coingecko_nonempty', len(get_coingecko_ids()) > 0)
         c.hard('symbols.backfill_nonempty', len(get_backfill_symbols()) > 0)
 
-    # ── Stage 2: TaskRun tracking + stage helper (WA2/WA3.6) ──────────────
+    # ── Stage 2: queue + stage helper ─────────────────────────────────────
 
     def _stage_tracking_and_helpers(self, c):
-        self.stdout.write('→ Stage 2: tracking & helpers')
-        from core import models as core_models
+        self.stdout.write('→ Stage 2: queue & helpers')
         from services.queue import enqueue
         from services.stages import mark_stage
 
-        before = core_models.TaskRun.objects.count()
-
-        # A trivial tracked task: enqueue() runs it synchronously and records a TaskRun.
-        def _probe(n):
-            return n
-        _probe.__name__ = 'e2e_probe_task'
-        result = enqueue(_probe, 7)
+        # Verify enqueue() returns the function's value when TASK_QUEUE_ENABLED=False
+        result = enqueue(lambda n: n, 7)
         c.hard('tracking.sync_result', result == 7)
-
-        after = core_models.TaskRun.objects.count()
-        c.hard('tracking.taskrun_created', after == before + 1, f'{before}→{after}')
-        run = core_models.TaskRun.objects.filter(task_name='e2e_probe_task').order_by('-started_at').first()
-        c.hard('tracking.taskrun_success', run is not None and run.status == 'success',
-               run.status if run else 'missing')
-        c.hard('tracking.taskrun_items', run is not None and run.items == 7,
-               run.items if run else None)
-        c.hard('tracking.taskrun_duration', run is not None and run.duration_ms is not None)
 
         # mark_stage unit behaviour
         class _Rec:
@@ -294,11 +278,6 @@ class Command(BaseCommand):
             c.soft('process.stage_status_process', (ss.get('process') or {}).get('ok') is True,
                    f'stage_status={ss}')
             c.soft('process.stage_status_geocode_present', 'geocode' in ss)
-
-        # Per-record TaskRun rows should exist for the worker function.
-        worker_runs = core_models.TaskRun.objects.filter(
-            task_name__in=['process_article_task', 'process_articles_chunk_task']).count()
-        c.soft('process.worker_taskruns', worker_runs >= 1, f'{worker_runs} worker runs')
 
     # ── Stage 5: aggregate ────────────────────────────────────────────────
 

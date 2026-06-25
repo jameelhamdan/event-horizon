@@ -11,14 +11,24 @@ logger = logging.getLogger(__name__)
 # stored inside CACHES['redis-cache']['LOCATION'] after Django setup.
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
 
+_redis: redis_lib.Redis | None = None
+
+
+def _get_redis() -> redis_lib.Redis:
+    global _redis
+    if _redis is None:
+        _redis = redis_lib.from_url(REDIS_URL)
+    return _redis
+
 
 def redis_publish(channel: str, payload: dict) -> None:
     """Publish a JSON payload to a Redis pub/sub channel."""
     try:
-        r = redis_lib.from_url(REDIS_URL)
-        r.publish(channel, json.dumps(payload))
+        _get_redis().publish(channel, json.dumps(payload))
     except Exception as exc:
         logger.warning(f'[streams] Redis publish failed on {channel}: {exc}')
+        global _redis
+        _redis = None  # reset so the next call reconnects
 
 
 class BaseStream:

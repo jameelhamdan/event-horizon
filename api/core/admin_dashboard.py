@@ -1,21 +1,19 @@
-"""Server-rendered admin operations dashboard (WA5).
+"""Server-rendered admin operations dashboard.
 
 A single page under ``/admin/dashboard/`` summarizing pipeline operations and
-offering POST actions. Data source: ``TaskRun`` (throughput / in-flight),
-rq-scheduler (upcoming runs), ``Workflow.pipeline_coverage()`` (per-stage gaps),
-and the forecast artifacts/rows (model status). Registered on the default admin
-site via a ``get_urls`` shim in ``core/admin.py``.
+offering POST actions. Data sources: rq-scheduler (upcoming runs), RQ
+StartedJobRegistry (in-flight), ``Workflow.pipeline_coverage()`` (per-stage
+gaps), and forecast artifacts/rows. Registered via a ``get_urls`` shim in
+``core/admin.py``.
 """
 from __future__ import annotations
 
 import logging
 import os
-from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from django.contrib import admin, messages
 from django.shortcuts import redirect, render
-from django.utils import timezone as dj_tz
 
 logger = logging.getLogger(__name__)
 
@@ -111,35 +109,23 @@ def _ok(request, msg):
 # ── Data gathering ───────────────────────────────────────────────────────────
 
 def _throughput():
-    """Per-task counts for today and yesterday from TaskRun."""
-    from core.models import TaskRun
-
-    now = dj_tz.now()
-    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    yesterday = today - timedelta(days=1)
-
-    rows = list(TaskRun.objects.filter(started_at__gte=yesterday)
-                .only('task_name', 'status', 'items', 'started_at', 'finished_at', 'error'))
-
-    stats: dict[str, dict] = defaultdict(lambda: {
-        'today_items': 0, 'today_runs': 0, 'today_failed': 0,
-        'yest_items': 0, 'yest_runs': 0, 'yest_failed': 0,
-        'last_success': None, 'last_error': '',
-    })
-    for r in rows:
-        s = stats[r.task_name]
-        bucket = 'today' if r.started_at >= today else 'yest'
-        s[f'{bucket}_runs'] += 1
-        if r.items:
-            s[f'{bucket}_items'] += r.items
-        if r.status == 'failed':
-            s[f'{bucket}_failed'] += 1
-            if r.error and not s['last_error']:
-                s['last_error'] = r.error[:200]
-        if r.status == 'success':
-            if s['last_success'] is None or (r.finished_at and r.finished_at > s['last_success']):
-                s['last_success'] = r.finished_at
-    return dict(sorted(stats.items()))
+    """Queue depth per queue — shown in the throughput table."""
+    try:
+        import django_rq
+        from rq.queue import Queue
+        conn = django_rq.get_connection('default')
+        stats = {}
+        for qname in ('default', 'heavy'):
+            q = Queue(qname, connection=conn)
+            stats[qname] = {
+                'today_items': q.count, 'today_runs': q.count, 'today_failed': 0,
+                'yest_items': 0, 'yest_runs': 0, 'yest_failed': 0,
+                'last_success': None, 'last_error': '',
+            }
+        return stats
+    except Exception as exc:
+        logger.debug('[dashboard] throughput unavailable: %s', exc)
+        return {}
 
 
 def _upcoming():
@@ -160,8 +146,28 @@ def _upcoming():
 
 
 def _in_flight():
-    from core.models import TaskRun
-    return list(TaskRun.objects.filter(status='running').order_by('-started_at')[:25])
+    """Currently executing jobs from the RQ StartedJobRegistry."""
+    try:
+        import django_rq
+        from rq.job import Job
+        from rq.registry import StartedJobRegistry
+        conn = django_rq.get_connection('default')
+        running = []
+        for qname in ('default', 'heavy'):
+            for job_id in StartedJobRegistry(qname, connection=conn).get_job_ids():
+                try:
+                    job = Job.fetch(job_id, connection=conn)
+                    running.append({
+                        'task_name': job.func_name.split('.')[-1],
+                        'started_at': job.started_at,
+                        'job_id': job.id,
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
+        return sorted(running, key=lambda x: x['started_at'] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)[:25]
+    except Exception as exc:  # noqa: BLE001
+        logger.debug('[dashboard] in_flight unavailable: %s', exc)
+        return []
 
 
 def _forecast_status():

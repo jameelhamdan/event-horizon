@@ -106,7 +106,7 @@ class Article(models.Model):
 
     # Per-stage pipeline outcome tracking — written by each per-record worker.
     # Shape: {"process": {"ok": true, "at": "ISO-8601", "error": null},
-    #         "geocode": {"ok": false, "at": "...", "error": "g4f down"}, ...}
+    #         "geocode": {"ok": false, "at": "...", "error": "LLM unavailable"}, ...}
     # Makes the *reason* a stage is missing visible (not just that it's missing).
     stage_status = models.JSONField(default=dict, blank=True)
 

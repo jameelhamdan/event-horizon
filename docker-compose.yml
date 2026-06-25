@@ -47,8 +47,6 @@ services:
         condition: service_started
       redis:
         condition: service_started
-      g4f:
-        condition: service_healthy
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
@@ -63,8 +61,6 @@ services:
         condition: service_started
       redis:
         condition: service_started
-      g4f:
-        condition: service_healthy
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
@@ -90,21 +86,6 @@ services:
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
-
-  g4f:
-    image: hlohaus789/g4f:latest-slim
-    restart: always
-    # NOTE: this image serves the OpenAI-compatible API on 8080 (not 1337), and it
-    # git-pulls g4f main on every boot — so providers/models drift. Keep G4F_MODEL on a
-    # provider that works (gpt-4o); gpt-4o-mini is currently broken upstream (KeyError 'Chatai').
-    expose:
-      - "8080"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/v1/models', timeout=5).status==200 else 1)"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
 
   redis:
     image: redis:7-alpine
