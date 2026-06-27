@@ -31,15 +31,15 @@ def _handle_action(request):
                     aggregate_hours=24, tag=True, queue='heavy', job_timeout=-1)
             _ok(request, 'Full pipeline enqueued (fetch → process → aggregate → tag).')
         elif action == 'backfill_prices':
-            enqueue(T.backfill_prices_task, years=5, queue='default', job_timeout=-1)
-            _ok(request, 'Price backfill enqueued (5y, all active symbols).')
+            enqueue(T.backfill_prices_task, years=10, queue='bulk', job_timeout=-1)
+            _ok(request, 'Price backfill enqueued (10y, all active symbols).')
         elif action == 'backfill_articles':
-            enqueue(T.backfill_articles_task, queue='heavy', job_timeout=-1)
-            _ok(request, 'Article backfill enqueued (top-10/week, all sources).')
+            enqueue(T.backfill_articles_task, queue='bulk', job_timeout=-1)
+            _ok(request, 'Article backfill enqueued (weighted per-source, all sources).')
         elif action == 'retrain_forecast':
-            enqueue(T.train_forecast_model_task, queue='heavy', job_timeout=-1)
-            enqueue(T.run_forecast_task, queue='heavy', job_timeout=-1)
-            _ok(request, 'Forecast retrain + run enqueued.')
+            # Single chained task so run_forecast always uses the freshly trained model.
+            enqueue(T.retrain_and_run_forecast_task, queue='bulk', job_timeout=-1)
+            _ok(request, 'Forecast retrain + run enqueued (sequential, bulk queue).')
         elif action == 'rerun_bootstrap':
             enqueue(T.bootstrap_initial_data_task, True, queue='default', job_timeout=-1)
             _ok(request, 'First-load bootstrap re-triggered (force).')
@@ -115,7 +115,7 @@ def _throughput():
         from rq.queue import Queue
         conn = django_rq.get_connection('default')
         stats = {}
-        for qname in ('default', 'heavy'):
+        for qname in ('default', 'heavy', 'bulk'):
             q = Queue(qname, connection=conn)
             stats[qname] = {
                 'today_items': q.count, 'today_runs': q.count, 'today_failed': 0,
@@ -153,7 +153,7 @@ def _in_flight():
         from rq.registry import StartedJobRegistry
         conn = django_rq.get_connection('default')
         running = []
-        for qname in ('default', 'heavy'):
+        for qname in ('default', 'heavy', 'bulk'):
             for job_id in StartedJobRegistry(qname, connection=conn).get_job_ids():
                 try:
                     job = Job.fetch(job_id, connection=conn)

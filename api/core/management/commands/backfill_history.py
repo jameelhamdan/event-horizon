@@ -65,10 +65,11 @@ class Command(BaseTaskCommand):
         parser.add_argument(
             '--top-n',
             type=int,
-            default=10,
+            default=None,
             dest='top_n',
             metavar='N',
-            help='Articles to keep per week (default: 10)',
+            help='Articles to keep per week. Default: derived from each source\'s '
+                 'weight (10–25 by priority).',
         )
         parser.add_argument(
             '--delay',
@@ -132,13 +133,14 @@ class Command(BaseTaskCommand):
                 self.stderr.write(self.style.ERROR('--dry-run cannot be combined with --background.'))
                 return
             from services.queue import enqueue
-            # No timeout (-1): multi-year / multi-source backfills outlast the 30-min cap.
+            # bulk queue + no timeout (-1): multi-year / multi-source backfills outlast
+            # the 30-min cap and must not block the live NLP pipeline on the heavy queue.
             if all_sources:
                 enqueue(
                     backfill_all_sources_task,
                     start_date, end_date,
                     top_n=top_n, delay_seconds=delay, resume=resume,
-                    queue='heavy', job_timeout=-1,
+                    queue='bulk', job_timeout=-1,
                 )
                 label = f'all enabled RSS sources ({count})'
                 task_name = 'backfill_all_sources_task'
@@ -147,13 +149,13 @@ class Command(BaseTaskCommand):
                     backfill_history_task,
                     source_code, start_date, end_date,
                     top_n=top_n, delay_seconds=delay, resume=resume,
-                    queue='heavy', job_timeout=-1,
+                    queue='bulk', job_timeout=-1,
                 )
                 label = f'"{source_code}"'
                 task_name = 'backfill_history_task'
             self.stdout.write(self.style.SUCCESS(
                 f'Enqueued {task_name} for {label} '
-                f'({start_date.date()} → {end_date.date()}) on the heavy queue.'
+                f'({start_date.date()} → {end_date.date()}) on the bulk queue.'
             ))
             return
 
@@ -162,12 +164,17 @@ class Command(BaseTaskCommand):
         dry_label = '  [DRY RUN — nothing will be written]' if dry_run else ''
 
         def header(source):
+            from services.tasks import _weighted_top_n
+            top_n_label = (
+                f'{top_n} per week' if top_n is not None
+                else f'{_weighted_top_n(source.weight)} per week (weight {source.weight})'
+            )
             self.stdout.write(
                 self.style.MIGRATE_HEADING(
                     f'\nBackfilling  {source.name}  ({source.type})\n'
                     f'  Range   : {start_date.date()} → {end_date.date()}\n'
                     f'  Weeks   : {total_weeks}\n'
-                    f'  Top-N   : {top_n} per week\n'
+                    f'  Top-N   : {top_n_label}\n'
                     f'  Delay   : {delay}s between weeks'
                     + dry_label
                 )

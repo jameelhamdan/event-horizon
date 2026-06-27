@@ -142,7 +142,7 @@ class ArticleImportanceScorer:
         recent_pairs = list(
             m.Article.objects.filter(created_on__gte=cutoff)
             .exclude(id__in=article_ids)
-            .values_list('title', 'source_code')
+            .values_list('title', 'source_code')[:2000]
         )
         recent_tokensets: list[tuple[frozenset, str]] = [
             (_tokenize(title), src) for title, src in recent_pairs

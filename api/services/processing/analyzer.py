@@ -33,6 +33,20 @@ _OBJECT_SCHEMA = """\
   }
 }"""
 
+# Lean schema for backfill: English-only (drops the token-heavy Arabic summary).
+# Geocoding + category still work, articles still render on the map; we just skip
+# the Arabic localization for historical records.
+_OBJECT_SCHEMA_LITE = """\
+{
+  "category": conflict|disaster|economic|political|health|general,
+  "sub_category": sub-category slug for the chosen category (see guide) or null,
+  "country": English country name or null,
+  "city": English city/region name or null,
+  "translations": {
+    "en": {"title": English title, "summary": 2-3 sentence factual English summary, "country": English country or null, "city": English city or null}
+  }
+}"""
+
 _CATEGORY_GUIDE = """\
 Pick the best top-level category, then the most specific sub-category:
 - conflict  [war|airstrike|insurgency|terrorism|border-clash|other]: any deliberate armed/military action — strikes, drones, shelling, clashes, terrorism. Country A attacking Country B is ALWAYS conflict, even with explosions, fires, or mass casualties.
@@ -44,18 +58,28 @@ Pick the best top-level category, then the most specific sub-category:
 
 conflict vs disaster: caused by a deliberate armed/military action? YES → conflict (even if buildings burned or people died); NO → disaster."""
 
-_SYSTEM_PROMPT = (
-    'You are a news article analyzer. Respond with a single valid JSON object — '
-    'no markdown, no explanation, just JSON.\n\nSchema:\n'
-    + _OBJECT_SCHEMA + '\n\n' + _CATEGORY_GUIDE
-)
+def _single_prompt(schema: str) -> str:
+    return (
+        'You are a news article analyzer. Respond with a single valid JSON object — '
+        'no markdown, no explanation, just JSON.\n\nSchema:\n'
+        + schema + '\n\n' + _CATEGORY_GUIDE
+    )
 
-_BATCH_SYSTEM_PROMPT = (
-    'You are a news article analyzer. You will receive several numbered articles. '
-    'Respond with a JSON array of one object per article, IN THE SAME ORDER — '
-    'no markdown, no explanation, just the JSON array.\n\nEach object schema:\n'
-    + _OBJECT_SCHEMA + '\n\n' + _CATEGORY_GUIDE
-)
+
+def _batch_prompt(schema: str) -> str:
+    return (
+        'You are a news article analyzer. You will receive several numbered articles. '
+        'Respond with a JSON array of one object per article, IN THE SAME ORDER — '
+        'no markdown, no explanation, just the JSON array.\n\nEach object schema:\n'
+        + schema + '\n\n' + _CATEGORY_GUIDE
+    )
+
+
+# Full prompts carry EN+AR translations; lite prompts are EN-only (backfill).
+_SYSTEM_PROMPT = _single_prompt(_OBJECT_SCHEMA)
+_SYSTEM_PROMPT_LITE = _single_prompt(_OBJECT_SCHEMA_LITE)
+_BATCH_SYSTEM_PROMPT = _batch_prompt(_OBJECT_SCHEMA)
+_BATCH_SYSTEM_PROMPT_LITE = _batch_prompt(_OBJECT_SCHEMA_LITE)
 
 
 @dataclass
@@ -192,12 +216,16 @@ class ArticleAnalyzer:
     _MAX_CHARS = 1200
     # Articles per LLM call in analyze_batch — amortizes the static system prompt
     # across many articles (the dominant pipeline cost). Kept modest so the JSON
-    # array output stays well within the model's response window.
+    # array output stays well within the model's response window. The lite path
+    # (EN-only) emits far less per article, so it batches more aggressively.
     _BATCH_SIZE = 6
+    _BATCH_SIZE_LITE = 12
     # Per-article output ceiling. Generous on purpose: a truncated JSON array
     # fails the whole batch, and the Arabic summary is token-heavy. max_tokens is
     # only a cap, so short responses cost nothing — we size to avoid truncation.
+    # Lite (no Arabic) needs roughly half the budget.
     _OUTPUT_PER_ARTICLE = 480
+    _OUTPUT_PER_ARTICLE_LITE = 240
     _MAX_OUTPUT = 3400
 
     def __init__(self) -> None:
@@ -213,47 +241,58 @@ class ArticleAnalyzer:
             llm_data={}, translations={},
         )
 
-    def analyze(self, text: str) -> ArticleAnalysis:
+    def analyze(self, text: str, translate: bool = True) -> ArticleAnalysis:
         """
         Analyze a single article. Returns a zeroed-out ArticleAnalysis on failure.
+
+        translate=False uses the lite (English-only) schema — used for backfilled
+        historical articles where the Arabic localization isn't worth the tokens.
         """
+        system = _SYSTEM_PROMPT if translate else _SYSTEM_PROMPT_LITE
+        per = self._OUTPUT_PER_ARTICLE if translate else self._OUTPUT_PER_ARTICLE_LITE
         try:
             raw = self._llm.chat(
                 messages=[
-                    {'role': 'system', 'content': _SYSTEM_PROMPT},
+                    {'role': 'system', 'content': system},
                     {'role': 'user', 'content': text[: self._MAX_CHARS]},
                 ],
                 temperature=0,
-                max_tokens=self._OUTPUT_PER_ARTICLE + 220,
+                max_tokens=per + 220,
             )
             return self._parse_obj(self._loads(raw))
         except Exception:
             logger.exception('ArticleAnalyzer.analyze failed')
             return self._empty()
 
-    def analyze_batch(self, texts: list[str]) -> list[ArticleAnalysis]:
+    def analyze_batch(self, texts: list[str], translate: bool = True) -> list[ArticleAnalysis]:
         """
         Analyze many articles, chunked into single multi-article LLM calls.
         Always returns one ArticleAnalysis per input text, in order; missing or
         malformed entries degrade to a 'general' ArticleAnalysis.
+
+        translate=False uses the lite (English-only) schema and a larger batch
+        size, since each article emits far fewer output tokens.
         """
+        size = self._BATCH_SIZE if translate else self._BATCH_SIZE_LITE
         results: list[ArticleAnalysis] = []
-        for start in range(0, len(texts), self._BATCH_SIZE):
-            results.extend(self._analyze_chunk(texts[start: start + self._BATCH_SIZE]))
+        for start in range(0, len(texts), size):
+            results.extend(self._analyze_chunk(texts[start: start + size], translate))
         return results
 
-    def _analyze_chunk(self, chunk: list[str]) -> list[ArticleAnalysis]:
+    def _analyze_chunk(self, chunk: list[str], translate: bool = True) -> list[ArticleAnalysis]:
+        system = _BATCH_SYSTEM_PROMPT if translate else _BATCH_SYSTEM_PROMPT_LITE
+        per = self._OUTPUT_PER_ARTICLE if translate else self._OUTPUT_PER_ARTICLE_LITE
         user = '\n\n'.join(
             f'[{i + 1}]\n{t[: self._MAX_CHARS]}' for i, t in enumerate(chunk)
         )
         try:
             raw = self._llm.chat(
                 messages=[
-                    {'role': 'system', 'content': _BATCH_SYSTEM_PROMPT},
+                    {'role': 'system', 'content': system},
                     {'role': 'user', 'content': user},
                 ],
                 temperature=0,
-                max_tokens=min(self._MAX_OUTPUT, self._OUTPUT_PER_ARTICLE * len(chunk) + 200),
+                max_tokens=min(self._MAX_OUTPUT, per * len(chunk) + 200),
             )
             objs = self._parse_array(raw)
         except Exception:

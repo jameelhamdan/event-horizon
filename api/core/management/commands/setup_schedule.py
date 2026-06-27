@@ -51,15 +51,15 @@ class Command(BaseCommand):
             pipeline_health_task,
             prune_stale_articles_task,
             refresh_topics_task,
-            run_forecast_task,
+            retrain_and_run_forecast_task,
             score_articles_task,
             score_forecasts_task,
-            train_forecast_model_task,
         )
 
         conn = django_rq.get_connection('default')
         light = Scheduler(queue_name='default', connection=conn)
         heavy = Scheduler(queue_name='heavy', connection=conn)
+        bulk = Scheduler(queue_name='bulk', connection=conn)
 
         cron_timeout = int(os.getenv('JOB_TIMEOUT_SECONDS', '1800'))
 
@@ -76,6 +76,8 @@ class Command(BaseCommand):
             light.cancel(job)
         for job in heavy.get_jobs():
             heavy.cancel(job)
+        for job in bulk.get_jobs():
+            bulk.cancel(job)
         self.stdout.write('Cleared existing scheduled jobs.')
 
         now = datetime.now(timezone.utc)
@@ -134,13 +136,15 @@ class Command(BaseCommand):
         # ── Forecasting ────────────────────────────────────────────────────────
         if settings.FORECAST_ENABLED:
             week = 7 * 24 * 60 * 60
-            sched(light, now, backfill_prices_task, interval=week, timeout=cron_timeout)
+            # Price backfill + model training are long jobs → bulk queue (the first
+            # price run pulls full 10y history; weekly runs are incremental).
+            sched(bulk, now, backfill_prices_task, interval=week, timeout=-1)
             route_interval = _minutes('ROUTE_EVENTS_INTERVAL_MINUTES', '90')
             sched(light, now, dispatch_route_events_task, interval=route_interval,
                   timeout=_interval_timeout(route_interval))
             train_hour = int(os.getenv('FORECAST_TRAIN_HOUR', '5'))
-            cron(heavy, f'0 {train_hour} * * *',  train_forecast_model_task, timeout=cron_timeout)
-            cron(heavy, f'30 {train_hour} * * *', run_forecast_task,         timeout=cron_timeout)
+            # Sequential: train then run in one bulk job so forecasts always use fresh artifacts.
+            cron(bulk, f'0 {train_hour} * * *', retrain_and_run_forecast_task, timeout=-1)
             cron(light, '0 7 * * *',              score_forecasts_task,      timeout=cron_timeout)
 
         # rq-scheduler keeps a single shared job registry (not split per queue),

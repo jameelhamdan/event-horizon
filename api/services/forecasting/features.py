@@ -44,12 +44,18 @@ def _load_bars(symbols):
     import pandas as pd
     from core.models import PriceBar
 
+    # Single query for all symbols instead of N round-trips.
+    all_rows = list(
+        PriceBar.objects.filter(symbol__in=symbols, interval='1d')
+        .order_by('symbol', 'date').values('symbol', 'date', 'close', 'volume')
+    )
+    grouped: dict[str, list] = {}
+    for row in all_rows:
+        grouped.setdefault(row['symbol'], []).append(row)
+
     out = {}
     for sym in symbols:
-        rows = list(
-            PriceBar.objects.filter(symbol=sym, interval='1d')
-            .order_by('date').values('date', 'close', 'volume')
-        )
+        rows = grouped.get(sym, [])
         if len(rows) < MIN_HISTORY:
             continue
         df = pd.DataFrame(rows)
@@ -149,7 +155,9 @@ def _event_features(window_events, symbol, t):
 
     for e in window_events:
         weight = e['w'].get(symbol)
-        age_days = (t - e['t']).total_seconds() / 86400.0
+        # Clamp to ≥ 0: sub-second rounding or clock skew can yield a tiny
+        # negative value, which would flip the exp() decay into amplification.
+        age_days = max(0.0, (t - e['t']).total_seconds() / 86400.0)
         touches = weight is not None and weight != 0.0
         if touches:
             for w in EVENT_WINDOWS:

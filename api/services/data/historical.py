@@ -15,6 +15,7 @@ Both return List[RankedArticle].  HistoricalBackfillService sorts, slices
 to top-N, and saves via Article.objects.get_or_create — fully idempotent.
 """
 import datetime
+import html as _html
 import json
 import logging
 import re
@@ -105,8 +106,14 @@ class RSSHistoricalService:
     On LLM failure the whole batch defaults to 5.0.
     """
 
-    def __init__(self, source: 'core.models.Source') -> None:
+    def __init__(
+        self, source: 'core.models.Source', max_candidates: int | None = None,
+    ) -> None:
         self._source = source
+        # Cap on entries LLM-scored per week. Only top-N survive ranking, so scoring
+        # every sitemap entry is wasted LLM calls; we keep the most recent
+        # ``max_candidates`` (recency as a weak relevance proxy) before scoring.
+        self._max_candidates = max_candidates
         parsed = urlparse(source.url)
         self._base_url = f'{parsed.scheme}://{parsed.netloc}'
 
@@ -122,6 +129,13 @@ class RSSHistoricalService:
                 self._source.code, week_start.date(),
             )
             return []
+
+        if self._max_candidates and len(entries) > self._max_candidates:
+            entries.sort(
+                key=lambda e: e['date'] or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+                reverse=True,
+            )
+            entries = entries[: self._max_candidates]
 
         scored = self._score_entries(entries)
         logger.info(
@@ -300,18 +314,29 @@ class HistoricalBackfillService:
         end_date: datetime.datetime,
         top_n: int = 10,
         delay_seconds: float = 1.0,
+        fetch_body: bool = True,
+        candidate_factor: int = 4,
     ) -> None:
         self.source = source
         self.start_date = start_date
         self.end_date = end_date
         self.top_n = top_n
         self.delay_seconds = delay_seconds
+        self.fetch_body = fetch_body
+        # Score at most top_n * candidate_factor entries per week (0 = unlimited).
+        self.candidate_factor = candidate_factor
         self._strategy = self._build_strategy()
 
     def _build_strategy(self):
         import core.models as m
         if self.source.type == m.SourceType.RSS:
-            return RSSHistoricalService(self.source)
+            if self.top_n is None:
+                raise TypeError(
+                    'HistoricalBackfillService.top_n must be a resolved int; '
+                    'use _weighted_top_n(source.weight) before constructing the service.'
+                )
+            max_candidates = self.top_n * self.candidate_factor if self.candidate_factor else None
+            return RSSHistoricalService(self.source, max_candidates=max_candidates)
         raise HistoricalServiceError(
             f'No historical strategy for source type "{self.source.type}". '
             'Supported: rss.'
@@ -353,32 +378,57 @@ class HistoricalBackfillService:
         ranked: list[RankedArticle],
         week_start: datetime.datetime,
     ) -> int:
+        """Fan out one body-fetch+save job per new article onto the worker pool.
+
+        Parallelism for the (network-bound) body fetch comes from the worker pool —
+        not in-process threads — so it scales with ``worker-light`` replicas and stays
+        consistent with the rest of the fan-out pipeline. Returns the number of jobs
+        dispatched (= new articles). When ``TASK_QUEUE_ENABLED`` is off (dev), each
+        ``enqueue`` runs synchronously, so the save still happens inline.
+        """
         import core.models as m
-        created = 0
-        for item in ranked:
+        from services.queue import enqueue, make_retry
+        from services.tasks import backfill_save_article_task
+        if not ranked:
+            return 0
+
+        # One existence query for the whole week instead of a query per article.
+        urls = [item.datum['source_url'] for item in ranked]
+        existing = set(
+            m.Article.objects.filter(
+                source_code=self.source.code,
+                source_type=self.source.type,
+                source_url__in=urls,
+            ).values_list('source_url', flat=True)
+        )
+        # Skip already-stored URLs, and de-dupe within the week (sitemaps can list a
+        # URL twice). ranked is score-sorted, so the first occurrence kept is highest.
+        new_items, seen = [], set(existing)
+        for it in ranked:
+            url = it.datum['source_url']
+            if url in seen:
+                continue
+            seen.add(url)
+            new_items.append(it)
+        if not new_items:
+            return 0
+
+        retry = make_retry()
+        for item in new_items:
             datum = item.datum
-            defaults: dict = {**datum}
-            defaults['extra_data'] = {
+            extra = {
                 **datum.get('extra_data', {}),
                 'backfill_week': week_start.isoformat(),
                 'backfill_score': round(item.score, 2),
                 'rank_signal': item.rank_signal,
             }
-            defaults['importance_score']  = round(item.score, 2)
-            defaults['importance_source'] = 'llm'
-            _, was_created = m.Article.objects.get_or_create(
-                source_code=self.source.code,
-                source_type=self.source.type,
-                source_url=datum['source_url'],
-                defaults=defaults,
+            enqueue(
+                backfill_save_article_task,
+                self.source.code, self.source.type, dict(datum),
+                extra, round(item.score, 2), self.fetch_body,
+                queue='default', retry=retry,
             )
-            if was_created:
-                created += 1
-                logger.info(
-                    '[backfill] %s | score=%.0f | %s',
-                    week_start.date(), item.score, datum['title'][:80],
-                )
-        return created
+        return len(new_items)
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +473,40 @@ def _parse_sitemap_date(value: str) -> datetime.datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.timezone.utc)
     return dt
+
+
+_BODY_MAX_CHARS = 4000
+_SCRIPT_STYLE_RE = re.compile(r'(?is)<(script|style|noscript)[^>]*>.*?</\1>')
+_PARAGRAPH_RE = re.compile(r'(?is)<p[^>]*>(.*?)</p>')
+_TAG_RE = re.compile(r'(?s)<[^>]+>')
+
+
+def fetch_article_body(url: str, timeout: int = _HTTP_TIMEOUT) -> str | None:
+    """Best-effort plain-text body for a historical article URL.
+
+    Backfill candidates come from sitemaps/CDX as title-only; without body text the
+    NLP step can't geocode them, so they'd never aggregate into Events (and never
+    hit the map). This pulls the page and extracts paragraph text — good enough for
+    NER/geocoding + category. Returns None on any failure (caller falls back to the
+    title).
+
+    Called from the per-article ``backfill_save_article_task`` worker, so parallelism
+    comes from the worker pool — no in-process threads here.
+    """
+    try:
+        resp = requests.get(url, headers=_HTTP_HEADERS, timeout=timeout)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.debug('body fetch failed url=%r: %s', url, exc)
+        return None
+
+    # Cap before regex work: the backreference pattern degrades O(N) per unclosed
+    # <script>/<style> tag; 200 KB is ample for any news article's paragraph text.
+    html = _SCRIPT_STYLE_RE.sub(' ', resp.text[:200_000])
+    paragraphs = _PARAGRAPH_RE.findall(html)
+    text = ' '.join(_TAG_RE.sub(' ', p) for p in paragraphs)
+    text = _html.unescape(re.sub(r'\s+', ' ', text)).strip()
+    return text[:_BODY_MAX_CHARS] or None
 
 
 def _slug_from_url(url: str) -> str:

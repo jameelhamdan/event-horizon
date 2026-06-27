@@ -66,6 +66,9 @@ class EarthquakeStream(BaseStream):
     def save(self, records: list[dict]) -> int:
         from core.models import EarthquakeRecord
 
+        if not records:
+            return 0
+
         existing_ids = set(
             EarthquakeRecord.objects.filter(
                 usgs_id__in=[r['usgs_id'] for r in records]
@@ -81,7 +84,9 @@ class EarthquakeStream(BaseStream):
             and r.get('magnitude') is not None
         ]
         if new:
-            EarthquakeRecord.objects.bulk_create(new)
+            # ignore_conflicts guards against two concurrent fetch_earthquakes_task
+            # workers racing on the same USGS page and trying to insert the same usgs_id.
+            EarthquakeRecord.objects.bulk_create(new, ignore_conflicts=True)
             redis_publish('sse:earthquakes', {
                 'type': 'earthquake_update',
                 'new_count': len(new),

@@ -168,7 +168,7 @@ class SourceAdmin(ImportExportModelAdmin):
             start_date,
             end_date,
             top_n,
-            queue="heavy",
+            queue="bulk",
             job_timeout=-1,
         )
         self.message_user(

@@ -16,10 +16,7 @@ echo "==> deploy: pulling $BRANCH"
 git fetch origin
 git reset --hard "origin/$BRANCH"
 
-git pull origin $BRANCH
-
 echo "==> deploy: building and restarting services"
-# --no-deps: only restart the services whose images changed, not their deps
 $COMPOSE up -d --build --remove-orphans
 
 echo "==> deploy: cleaning up old images"

@@ -328,10 +328,16 @@ RQ_QUEUES = {
         'URL': _REDIS_URL,
         'DEFAULT_TIMEOUT': _JOB_TIMEOUT,
     },
-    # Heavy queue — NLP / LLM tasks (processing, clustering, topic matching)
+    # Heavy queue — steady NLP / LLM tasks (processing, clustering, topic matching)
     'heavy': {
         'URL': _REDIS_URL,
         'DEFAULT_TIMEOUT': _JOB_TIMEOUT,
+    },
+    # Bulk queue — long one-shot jobs (multi-year backfills, model training). Kept
+    # off the heavy queue so a hours-long job never blocks the live NLP pipeline.
+    'bulk': {
+        'URL': _REDIS_URL,
+        'DEFAULT_TIMEOUT': -1,
     },
 }
 

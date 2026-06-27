@@ -162,11 +162,16 @@ class Workflow:
             )
             for article in articles
         ]
-        # Batch the NLP + LLM analysis (one multi-article LLM call per chunk).
-        feature_list = cleaner.clean_batch(docs)
+        # Backfilled historical articles get the lean path: English-only analysis
+        # (no Arabic) and no banner scrape. They still geocode + categorize, so they
+        # aggregate into Events and render on the map like any other article.
+        lite_flags = [bool((a.extra_data or {}).get('backfill_week')) for a in articles]
+
+        # Batch the NLP + LLM analysis (one multi-article LLM call per chunk/mode).
+        feature_list = cleaner.clean_batch(docs, lite_flags=lite_flags)
 
         processed = 0
-        for article, features in zip(articles, feature_list):
+        for article, features, lite in zip(articles, feature_list, lite_flags):
             article.entities = features.entities
             article.sentiment = features.sentiment
             article.finbert_sentiment = features.finbert_sentiment
@@ -195,7 +200,11 @@ class Workflow:
                 'event_intensity', 'category', 'sub_category', 'processed_on',
                 'extra_data', 'translations', 'stage_status',
             ]
-            if not article.banner_image_url and article.source_url and article.source_url.startswith('https://'):
+            if (
+                not lite
+                and not article.banner_image_url
+                and article.source_url and article.source_url.startswith('https://')
+            ):
                 og = _fetch_og_image(article.source_url)
                 if og:
                     article.banner_image_url = og
@@ -379,7 +388,7 @@ class Workflow:
                 event.source_codes = source_codes
                 event.sub_categories = sub_categories
                 event.affected_indicators = affected_indicators
-                event.translations = event_translations
+                event.translations = {**(event.translations or {}), **event_translations}
                 event.save()
                 updated_count += 1
                 logger.info(f'[aggregate] Updated  {location} [{category}] — {len(group)} article(s)')

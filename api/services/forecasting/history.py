@@ -9,7 +9,7 @@ high-frequency ``PriceTick`` live stream.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -32,14 +32,26 @@ def _day_anchor(dt: datetime) -> datetime:
     return dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def fetch_daily_bars(symbol: str, years: int = 5) -> list[dict]:
-    """Return a list of OHLC dicts for ``symbol`` going back ``years``. Empty on failure."""
-    if symbol in get_coingecko_ids():
-        return _fetch_coingecko(symbol, years)
-    return _fetch_yfinance(symbol, years)
+def fetch_daily_bars(symbol: str, years: int = 10, start: datetime | None = None) -> list[dict]:
+    """Return a list of OHLC dicts for ``symbol``. Empty on failure.
+
+    Crypto is fetched via **yfinance** too (BTC-USD/ETH-USD resolve natively),
+    because the CoinGecko free tier caps history at ~365 days — useless for a
+    10-year backfill. CoinGecko stays the live-tick source; here it's only a
+    fallback if yfinance returns nothing.
+
+    ``start`` (optional) fetches only from that date forward (incremental top-up);
+    otherwise ``years`` of history is pulled.
+    """
+    bars = _fetch_yfinance(symbol, years, start=start)
+    if not bars and start is None and symbol in get_coingecko_ids():
+        # CoinGecko is a full-history fallback only: skip in incremental mode
+        # (start is set) to avoid requesting 3,650 days just for a 3-day top-up.
+        bars = _fetch_coingecko(symbol, years)
+    return bars
 
 
-def _fetch_yfinance(symbol: str, years: int) -> list[dict]:
+def _fetch_yfinance(symbol: str, years: int, start: datetime | None = None) -> list[dict]:
     try:
         import yfinance as yf
     except ImportError:
@@ -47,9 +59,12 @@ def _fetch_yfinance(symbol: str, years: int) -> list[dict]:
         return []
 
     stream_key, name = get_symbol_meta().get(symbol, ('stock', symbol))
-    period = f'{max(years, 1)}y'
     try:
-        df = yf.Ticker(symbol).history(period=period, interval='1d', auto_adjust=False)
+        ticker = yf.Ticker(symbol)
+        if start is not None:
+            df = ticker.history(start=start.date().isoformat(), interval='1d', auto_adjust=False)
+        else:
+            df = ticker.history(period=f'{max(years, 1)}y', interval='1d', auto_adjust=False)
     except Exception as exc:  # noqa: BLE001 — yfinance raises many shapes
         logger.warning('[history] yfinance %s: %s', symbol, exc)
         return []
@@ -111,28 +126,49 @@ def _num(value) -> float | None:
         return None
 
 
-def backfill_symbol(symbol: str, years: int = 5, dry_run: bool = False) -> int:
-    """Fetch + upsert daily bars for one symbol. Returns count of new bars inserted."""
-    from core.models import PriceBar
+def backfill_symbol(symbol: str, years: int = 10, dry_run: bool = False, full: bool = False) -> int:
+    """Fetch + upsert daily bars for one symbol. Returns count of new bars inserted.
 
-    bars = fetch_daily_bars(symbol, years)
+    Incremental by default: if bars already exist, only the tail since the last
+    stored date is fetched (cheap weekly top-up). ``full=True`` re-pulls the whole
+    ``years`` window — use for the one-time deep seed or to repair gaps.
+    """
+    from core.models import PriceBar
+    from django.db.models import Max
+
+    # Incremental top-up: only fetch the tail since the last stored bar.
+    # Use Max() instead of loading all dates — avoids pulling ~2500+ datetimes
+    # per symbol just to find the latest one.
+    start = None
+    if not full:
+        result = PriceBar.objects.filter(symbol=symbol, interval='1d').aggregate(Max('date'))
+        latest = result['date__max']
+        if latest is not None:
+            start = latest - timedelta(days=3)
+
+    bars = fetch_daily_bars(symbol, years, start=start)
     if not bars:
         return 0
-    # Idempotent: skip dates already stored for this symbol+interval.
+
+    # Scope the existing-dates query to the fetched window so we never load all bars.
+    bar_dates = [b['date'] for b in bars]
     existing = set(
-        PriceBar.objects.filter(symbol=symbol, interval='1d').values_list('date', flat=True)
+        PriceBar.objects.filter(symbol=symbol, interval='1d', date__in=bar_dates)
+        .values_list('date', flat=True)
     )
     new_bars = [b for b in bars if b['date'] not in existing]
     if dry_run:
         logger.info('[history] %s: %d fetched, %d new (dry-run)', symbol, len(bars), len(new_bars))
         return len(new_bars)
     if new_bars:
-        PriceBar.objects.bulk_create([PriceBar(**b) for b in new_bars])
+        PriceBar.objects.bulk_create([PriceBar(**b) for b in new_bars], ignore_conflicts=True)
     logger.info('[history] %s: %d fetched, %d inserted', symbol, len(bars), len(new_bars))
     return len(new_bars)
 
 
-def backfill_all(symbols: list[str] | None = None, years: int = 5, dry_run: bool = False) -> dict[str, int]:
+def backfill_all(
+    symbols: list[str] | None = None, years: int = 10, dry_run: bool = False, full: bool = False,
+) -> dict[str, int]:
     """Backfill every active symbol (or a given subset). Returns {symbol: inserted}."""
     symbols = symbols or get_backfill_symbols()
-    return {s: backfill_symbol(s, years, dry_run) for s in symbols}
+    return {s: backfill_symbol(s, years, dry_run, full) for s in symbols}

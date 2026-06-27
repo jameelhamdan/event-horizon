@@ -245,19 +245,22 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
     now = datetime.now(dt_timezone.utc)
     start = now - timedelta(days=365 * BOOTSTRAP_ARTICLE_YEARS)
 
-    enqueue(backfill_prices_task, years=5, queue='default', job_timeout=-1, retry=retry)
-    enqueue(backfill_all_sources_task, start, now, 10, queue='heavy', job_timeout=-1, retry=retry)
+    # Long one-shot seeds go on the bulk queue so they don't block the live pipeline.
+    enqueue(backfill_prices_task, years=10, queue='bulk', job_timeout=-1, retry=retry)
+    # top_n=None → each source's per-week cap derives from its weight (10–25 by priority).
+    enqueue(backfill_all_sources_task, start, now, None, queue='bulk', job_timeout=-1, retry=retry)
     if settings.FORECAST_ENABLED:
-        enqueue(train_forecast_model_task, queue='heavy', job_timeout=-1)
-        enqueue(run_forecast_task, queue='heavy', job_timeout=-1)
+        # Sequential: train then run in one bulk job so forecasts always use fresh artifacts.
+        enqueue(retrain_and_run_forecast_task, queue='bulk', job_timeout=-1)
 
     cache.set(FLAG, True, timeout=None)
     log.info('[bootstrap] initial data backfill enqueued (article window %dy)', BOOTSTRAP_ARTICLE_YEARS)
     return 1
 
 
-def backfill_articles_task(top_n: int = 10, days: int = 14) -> dict:
-    """Rolling recent-window article backfill (top-N/week) across all enabled RSS sources.
+def backfill_articles_task(top_n: int | None = None, days: int = 14) -> dict:
+    """Rolling recent-window article backfill across all enabled RSS sources.
+    top_n=None → each source's per-week cap derives from its weight (10–25 by priority).
     Scheduled weekly so article history stays filled without manual action (WA4)."""
     now = datetime.now(dt_timezone.utc)
     start = now - timedelta(days=days)
@@ -363,11 +366,24 @@ def pipeline_health_task() -> dict:
 
 # ── Backfill tasks ─────────────────────────────────────────────────────────────
 
+def _weighted_top_n(weight: float | None, lo: int = 10, hi: int = 25) -> int:
+    """Map a Source.weight (0.1–2.0 credibility multiplier) to a per-week article cap.
+
+    Higher-priority sources keep more articles per week. weight 0.1 → ``lo``,
+    1.0 → ~17, 2.0 → ``hi``. Reuses the existing credibility signal so backfill
+    volume tracks source priority with no extra config.
+    """
+    if weight is not None and weight == 0:
+        return 0  # weight=0 means suppressed — skip backfill entirely
+    w = 1.0 if weight is None else min(max(weight, 0.1), 2.0)
+    return round(lo + (w - 0.1) / 1.9 * (hi - lo))
+
+
 def backfill_history_task(
     source_code: str,
     start_date: datetime,
     end_date: datetime,
-    top_n: int = 10,
+    top_n: int | None = None,
     delay_seconds: float = 0.5,
     dry_run: bool = False,
     resume: bool = False,
@@ -381,6 +397,8 @@ def backfill_history_task(
 
     ``start_date`` / ``end_date`` accept either ``datetime`` objects or
     ``YYYY-MM-DD`` strings (the latter so the task is trivially enqueueable).
+    ``top_n=None`` derives the per-week cap from the source's ``weight`` (10–25 by
+    priority); pass an int to override for all weeks.
     ``resume`` skips ISO weeks already recorded in the Django cache checkpoint;
     ``progress`` is an optional ``callable(WeekResult)`` invoked per week (the
     management command passes one to echo per-week lines to stdout).
@@ -399,11 +417,15 @@ def backfill_history_task(
     end_date = _parse_backfill_date(end_date)
 
     source = m.Source.objects.get(code=source_code)
+    resolved_top_n = top_n if top_n is not None else _weighted_top_n(source.weight)
+    if resolved_top_n == 0:
+        logger.info('backfill_history_task %s: skipped (weight=0)', source_code)
+        return {'weeks': 0, 'fetched': 0, 'saved': 0}
     service = HistoricalBackfillService(
         source=source,
         start_date=start_date,
         end_date=end_date,
-        top_n=top_n,
+        top_n=resolved_top_n,
         delay_seconds=delay_seconds,
     )
 
@@ -429,7 +451,7 @@ def backfill_history_task(
 def backfill_all_sources_task(
     start_date: datetime,
     end_date: datetime,
-    top_n: int = 10,
+    top_n: int | None = None,
     delay_seconds: float = 0.5,
     dry_run: bool = False,
     resume: bool = False,
@@ -441,7 +463,9 @@ def backfill_all_sources_task(
 
     Only ``SourceType.RSS`` sources are eligible (the historical backfill has no
     strategy for other types); disabled sources are skipped. Running sources one
-    at a time keeps API rate-limit pressure bounded. ``on_source_start`` is an
+    at a time keeps API rate-limit pressure bounded. ``top_n=None`` lets each
+    source derive its per-week cap from its own ``weight`` (10–25 by priority);
+    pass an int to force the same cap everywhere. ``on_source_start`` is an
     optional ``callable(Source)`` invoked before each source; ``progress`` is
     forwarded per week to :func:`backfill_history_task`.
 
@@ -492,12 +516,59 @@ def _parse_backfill_date(value) -> datetime:
     return d.replace(tzinfo=dt_timezone.utc)
 
 
+def backfill_save_article_task(
+    source_code: str,
+    source_type: str,
+    datum: dict,
+    extra_data: dict,
+    importance_score: float,
+    fetch_body: bool = True,
+) -> int:
+    """Per-article backfill worker: fetch the body (so the article geocodes + renders
+    on the map) and save one Article. Idempotent via get_or_create on source_url.
+
+    Fanned out one-per-article from the backfill onto the light queue, so the worker
+    pool provides the concurrency for the network-bound body fetch — no in-process
+    threads. Returns 1 if a new Article was created, else 0.
+    """
+    import core.models as m
+    from services.data.historical import fetch_article_body
+
+    if m.Article.objects.filter(
+        source_code=source_code, source_type=source_type, source_url=datum['source_url'],
+    ).exists():
+        return 0
+
+    fields = {**datum}
+    if fetch_body:
+        body = fetch_article_body(datum['source_url'])
+        if body:
+            fields['content'] = body
+    fields['extra_data'] = extra_data
+    fields['importance_score'] = importance_score
+    fields['importance_source'] = 'llm'
+    _, created = m.Article.objects.get_or_create(
+        source_code=source_code,
+        source_type=source_type,
+        source_url=datum['source_url'],
+        defaults=fields,
+    )
+    return 1 if created else 0
+
+
 # ── Forecasting tasks (event-fused symbol prediction) ────────────────────────────
 
-def backfill_prices_task(symbols: list[str] | None = None, years: int = 5) -> int:
-    """Backfill daily OHLC PriceBar history for the indicator panel."""
+def backfill_prices_task(
+    symbols: list[str] | None = None, years: int = 10, full: bool = False,
+) -> int:
+    """Backfill daily OHLC PriceBar history for the indicator panel.
+
+    Incremental by default (only the tail since the last stored bar is fetched), so
+    the weekly scheduled run is cheap; the first run on an empty table pulls the full
+    ``years`` window. ``full=True`` forces a complete re-pull.
+    """
     from services.forecasting.history import backfill_all
-    results = backfill_all(symbols=symbols, years=years)
+    results = backfill_all(symbols=symbols, years=years, full=full)
     return sum(results.values())
 
 
@@ -536,6 +607,15 @@ def train_forecast_model_task() -> int:
             import logging
             logging.getLogger(__name__).warning('[forecast] train h%d skipped: %s', h, exc)
     return trained
+
+
+def retrain_and_run_forecast_task() -> dict:
+    """Train models then immediately write forecasts — sequential so run always uses the
+    freshly trained artifacts. Enqueue on the bulk queue so the paired heavy-queue
+    run_forecast_task can never race ahead of training."""
+    trained = train_forecast_model_task()
+    ran = run_forecast_task()
+    return {'trained_horizons': trained, 'forecasts_written': ran}
 
 
 def run_forecast_task() -> int:

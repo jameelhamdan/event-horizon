@@ -13,7 +13,7 @@ class Command(BaseTaskCommand):
 
         if kwargs['background']:
             from services.queue import enqueue
-            enqueue(train_forecast_model_task, queue='heavy')
+            enqueue(train_forecast_model_task, queue='bulk', job_timeout=-1)
             self.stdout.write(self.style.SUCCESS('Enqueued train_forecast_model_task'))
             return
 

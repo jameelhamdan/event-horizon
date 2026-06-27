@@ -52,10 +52,11 @@ services:
       - ./media_data:/app/media
       - static_data:/app/.static
 
+  # Steady NLP/LLM work — 2 workers (matches the LLM key/proxy rotation depth).
   worker-heavy:
     build: ./api
     restart: always
-    command: sh -c "python manage.py rqworker   heavy"
+    command: sh -c "python manage.py rqworker-pool heavy --num-workers 2"
     depends_on:
       mongo:
         condition: service_started
@@ -65,10 +66,24 @@ services:
     volumes:
       - ./media_data:/app/media
 
+  # Fast I/O (fetchers, stream collectors, dispatchers) — 4 workers.
   worker-light:
     build: ./api
     restart: always
-    command: sh -c "python manage.py rqworker default"
+    command: sh -c "python manage.py rqworker-pool default --num-workers 4"
+    depends_on:
+      - mongo
+      - redis
+    env_file: .env.app
+    volumes:
+      - ./media_data:/app/media
+
+  # Long one-shot jobs (multi-year backfills, model training) — 1 worker, isolated
+  # so a hours-long job never blocks the live pipeline on the heavy queue.
+  worker-bulk:
+    build: ./api
+    restart: always
+    command: sh -c "python manage.py rqworker-pool bulk --num-workers 1"
     depends_on:
       - mongo
       - redis

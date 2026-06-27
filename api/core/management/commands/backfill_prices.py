@@ -10,8 +10,13 @@ class Command(BaseTaskCommand):
             help='Comma-separated symbols (default: all panel symbols)',
         )
         parser.add_argument(
-            '--years', type=int, default=5,
-            help='How many years of history to fetch (default: 5)',
+            '--years', type=int, default=10,
+            help='How many years of history to fetch (default: 10)',
+        )
+        parser.add_argument(
+            '--full', action='store_true',
+            help='Re-pull the whole window instead of only the missing tail '
+                 '(incremental is the default)',
         )
         parser.add_argument(
             '--dry-run', action='store_true',
@@ -30,11 +35,17 @@ class Command(BaseTaskCommand):
         if kwargs['background']:
             from services.queue import enqueue
             from services.tasks import backfill_prices_task
-            enqueue(backfill_prices_task, symbols=symbols, years=kwargs['years'], queue='default')
+            enqueue(
+                backfill_prices_task,
+                symbols=symbols, years=kwargs['years'], full=kwargs['full'],
+                queue='bulk', job_timeout=-1,
+            )
             self.stdout.write(self.style.SUCCESS('Enqueued backfill_prices_task'))
             return
 
-        results = backfill_all(symbols=symbols, years=kwargs['years'], dry_run=kwargs['dry_run'])
+        results = backfill_all(
+            symbols=symbols, years=kwargs['years'], dry_run=kwargs['dry_run'], full=kwargs['full'],
+        )
         total = sum(results.values())
         for sym, n in results.items():
             self.stdout.write(f'  {sym}: {n} new bars')

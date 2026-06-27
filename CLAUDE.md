@@ -201,9 +201,9 @@ This file gives Claude everything needed to write correct, consistent code for t
 ├── nginx/
 │   └── templates/
 │       └── default.conf.template  # nginx reverse proxy template (envsubst)
-├── version.txt             # Application version string
+│                           # (backend version lives in api/version.txt; frontend in ui/package.json)
 ├── docker-compose.yml      # All services: nginx, api, worker-heavy, worker-light,
-│                           # scheduler, frontend, mongo, redis, cloudflared
+│                           # worker-bulk, scheduler, frontend, mongo, redis, cloudflared
 └── CLAUDE.md               # ← you are here
 ```
 
@@ -231,6 +231,15 @@ This is a real-time global event intelligence platform. Key feature areas:
 ---
 
 ## Conventions
+
+### Versioning
+
+The app version lives in **two** files that must be bumped **together** on every release:
+
+- `api/version.txt` — backend version (read at startup by `app/__init__.py`, exposed via the `X-App-Version` header)
+- `ui/package.json` — frontend version (`"version"` field)
+
+Keep both at the same value (e.g. `2.11.0`). When you bump the version, update both — never one without the other.
 
 ### Django Apps
 
@@ -347,16 +356,22 @@ Task functions are scheduled directly — `scheduler.schedule(when, func, ...)` 
 
 To change an interval: update the env var and restart the `scheduler` service (it re-runs `setup_schedule` on startup, clearing and re-registering all jobs).
 
-### Worker (Two Queues)
+### Workers (Three Queues)
 
-Two separate RQ workers are run in Docker:
+Three RQ worker pools run in Docker, sized by workload (concurrency = process count
+via `rqworker-pool --num-workers`, **not** threads — an RQ worker runs one job at a time):
 
 ```bash
-python manage.py rqworker default    # worker-light service: I/O tasks
-python manage.py rqworker heavy      # worker-heavy service: NLP/LLM tasks
+python manage.py rqworker-pool default --num-workers 4   # worker-light: fast I/O
+python manage.py rqworker-pool heavy   --num-workers 2   # worker-heavy: steady NLP/LLM
+python manage.py rqworker-pool bulk    --num-workers 1   # worker-bulk: long one-shots
 ```
 
-`RQ_QUEUES` in settings defines both `default` and `heavy` queues (both pointing to Redis). When adding new tasks, decide which queue based on CPU/LLM cost: fast I/O → `default`, NLP or LLM → `heavy`.
+`RQ_QUEUES` defines `default`, `heavy`, and `bulk` (all on Redis). Pick the queue by
+workload, not just cost:
+- **`default`** (4 workers) — fast I/O: fetchers, stream collectors, dispatchers.
+- **`heavy`** (2 workers) — steady NLP/LLM: process/tag/route/score per-record workers. Sized to the LLM key/proxy rotation depth (rate-limiting belongs in the LLM client, not in worker count).
+- **`bulk`** (1 worker, `DEFAULT_TIMEOUT=-1`) — long one-shot jobs: multi-year `backfill_history`/`backfill_all_sources`/`backfill_prices` and `train_forecast_model_task`. Isolated so an hours-long job never blocks the live pipeline.
 
 ### Scheduler
 
@@ -413,7 +428,7 @@ LightGBM **classifier (calibrated P(up)) + regressor (magnitude)** per horizon (
 - **Two routers** (both write `Event.affected_indicators` + `Event.router_source`):
   - `services/forecasting/routing.py` — deterministic weight product (baseline + fallback).
   - `services/routing/llm_router.py` `LLMEventRouter` — batched LLM (role `'routing'`), falls back per-event to the deterministic router on any error.
-- **Data:** `PriceBar` (daily OHLC, backfilled via yfinance + CoinGecko in `services/forecasting/history.py`) is the training/charting substrate, distinct from the high-frequency `PriceTick`.
+- **Data:** `PriceBar` (daily OHLC, backfilled via **yfinance** in `services/forecasting/history.py`) is the training/charting substrate, distinct from the high-frequency `PriceTick`. **Crypto OHLC is fetched via yfinance too** (BTC-USD/ETH-USD resolve natively) because the CoinGecko free tier caps history at ~365 days — CoinGecko stays the live-tick source and a yfinance fallback only. Backfill is **incremental** (only the tail since the last stored bar; `--full` forces a full re-pull) and defaults to **10 years**.
 - **Models:** `Forecast` (model-backed) + `PriceBar`. Artifacts persist per horizon under `FORECAST_MODEL_DIR` (`model_h{h}.joblib`), loaded lazily/cached.
 - **Backtest** (the gradeable artifact): `services/forecasting/backtest.py` — walk-forward, 4 ablation arms (naive / price-only / price+rule-events / price+llm-events), reports accuracy/F1/AUC/Brier + reliability, with a leakage self-check; `evaluate_forecast` writes a JSON report.
 - **Tasks:** `backfill_prices_task`, `route_events_task`, `train_forecast_model_task`, `run_forecast_task`, `score_forecasts_task` (all in `services/tasks.py`, scheduled in `setup_schedule.py`, gated by `FORECAST_ENABLED`).
@@ -611,9 +626,11 @@ Consumers:
 python manage.py backfill_history <source_code> \
     --start-date 2022-01-01 --end-date 2025-01-01 --dry-run
 
-# Run the backfill (top 10 per week, 1s delay between weeks)
+# Run the backfill — per-week cap defaults to the source's weight (10–25 by priority)
 python manage.py backfill_history <source_code> \
-    --start-date 2022-01-01 --end-date 2025-01-01 --top-n 10
+    --start-date 2016-01-01 --end-date 2026-01-01           # ~10 years
+python manage.py backfill_history <source_code> \
+    --start-date 2022-01-01 --end-date 2025-01-01 --top-n 15  # override the cap
 
 # Resume after interruption (checkpoint in Django cache)
 python manage.py backfill_history <source_code> \
@@ -625,6 +642,10 @@ python manage.py process_articles --limit 5000
 
 RSS sources rank by LLM significance score (batch of 30 headlines per call).
 Service code: `api/services/data/historical.py` — `HistoricalBackfillService`.
+
+- **Per-source priority:** `--top-n` defaults to `None` → each source's per-week cap is derived from its `Source.weight` (0.1–2.0) via `services.tasks._weighted_top_n` (weight 0.1→10, 1.0→~17, 2.0→25). Pass `--top-n N` to force a fixed cap. Same for the all-sources run (omit the source code).
+- **Body fetch:** the kept top-N per week are fanned out one-per-article as `backfill_save_article_task` jobs on the **light queue**, which fetch the full body (`historical.fetch_article_body`) and save — so they geocode and render on the map (title-only would never aggregate into Events). Concurrency comes from the worker pool, not in-process threads; bounded to top-N, not all candidates.
+- **Lean NLP for backfill:** articles tagged with `extra_data['backfill_week']` are auto-processed in lean mode — English-only LLM analysis (no Arabic) and no banner scrape — by `Workflow.process_articles`. They still geocode + categorize, so they aggregate and appear on the map. No flag needed; the normal scheduler handles them.
 
 ### Add a new stream data type
 
@@ -773,8 +794,9 @@ Stream tasks (default queue, independent of pipeline):
 | Service | Command | Port |
 |---------|---------|------|
 | `api` | `uvicorn app.asgi:application` | 8000 (internal) |
-| `worker-light` | `python manage.py rqworker default` | — |
-| `worker-heavy` | `python manage.py rqworker heavy` | — |
+| `worker-light` | `rqworker-pool default --num-workers 4` | — |
+| `worker-heavy` | `rqworker-pool heavy --num-workers 2` | — |
+| `worker-bulk` | `rqworker-pool bulk --num-workers 1` | — |
 | `scheduler` | `setup_schedule && rqscheduler --url $REDIS_URL` | — |
 | `frontend` | build → copy dist | — |
 | `nginx` | reverse proxy | 80, 443 |
@@ -962,7 +984,8 @@ python manage.py fetch_stream forex
 python manage.py bootstrap_static_points
 
 # Forecasting (event-fused symbol prediction)
-python manage.py backfill_prices --years 5            # seed daily OHLC PriceBar
+python manage.py backfill_prices --years 10           # seed daily OHLC PriceBar (incremental by default)
+python manage.py backfill_prices --years 10 --full    # force full re-pull (repair gaps)
 python manage.py route_events --router llm --hours 720 # (re)route events → affected_indicators
 python manage.py train_forecast                        # fit LightGBM clf+reg per horizon
 python manage.py run_forecast                          # write Forecast rows
@@ -999,9 +1022,11 @@ python manage.py e2e_pipeline --samples 10 --output /tmp/report.json
 # Report written to ./e2e_report_<timestamp>.json — contains per-step counts,
 # ok/error flags, and sample article/event/topic snapshots at each stage.
 
-# Run RQ workers locally (run each in a separate terminal)
+# Run RQ workers locally (run each in a separate terminal). Single-worker rqworker is
+# fine for dev; prod uses rqworker-pool --num-workers (default 4 / heavy 2 / bulk 1).
 python manage.py rqworker default    # light I/O queue
-python manage.py rqworker heavy      # NLP/LLM queue
+python manage.py rqworker heavy      # steady NLP/LLM queue
+python manage.py rqworker bulk       # long one-shot jobs (backfills, training)
 
 # Register periodic schedule with rq-scheduler (run once, or on every scheduler start)
 python manage.py setup_schedule
