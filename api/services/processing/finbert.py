@@ -1,7 +1,7 @@
 """FinBERT news-domain sentiment scorer.
 
-FinBERT (``ProsusAI/finbert``) is domain-matched for financial/news text (~72% vs
-VADER ~50% on financial news). It is computed **once at process time** on the heavy
+FinBERT (``ProsusAI/finbert``) is domain-matched for financial/news text (~72%
+accuracy on financial news). It is computed **once at process time** on the heavy
 queue and cached on the Article (plan §"Performance notes"); never re-run at feature
 time. Sentiment is a *feature*, never the predictor.
 
@@ -28,7 +28,7 @@ def _enabled() -> bool:
     Lets a lean deployment skip the ~500 MB model download + its memory/CPU cost
     without removing transformers (still required by core sentence-transformers
     clustering). When off, scores fall back to None and the pipeline degrades
-    gracefully — VADER remains the available sentiment signal.
+    gracefully — the LLM-extracted sentiment remains the available signal.
     """
     return os.getenv('FINBERT_ENABLED', 'true').strip().lower() not in ('0', 'false', 'no')
 

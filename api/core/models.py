@@ -92,7 +92,7 @@ class Article(models.Model):
 
     # NLP fields — populated by process_articles
     entities = models.JSONField(default=list, blank=True)
-    # sentiment = VADER compound [-1, 1]; retained for social/short text (plan §0).
+    # sentiment = LLM-extracted polarity [-1, 1].
     sentiment = models.FloatField(null=True, blank=True)
     # FinBERT signed sentiment [-1, 1] for news article text (domain-matched).
     # Both scores are exposed as separate downstream features; never the predictor.
@@ -182,7 +182,7 @@ class Event(models.Model):
 
     # Aggregated metrics
     article_count = models.IntegerField(default=1)
-    avg_sentiment = models.FloatField(null=True, blank=True)          # VADER mean over articles
+    avg_sentiment = models.FloatField(null=True, blank=True)          # mean article sentiment
     avg_finbert_sentiment = models.FloatField(null=True, blank=True)  # FinBERT mean over articles
     avg_intensity = models.FloatField(null=True, blank=True)
 
@@ -662,12 +662,12 @@ class ArticleFeatures:
     """NLP output for a single article, returned by ArticleCleaner."""
     id: str
     entities: list[dict]    # [{text: str, label: str}]
-    sentiment: float        # VADER compound score [-1, 1]
+    sentiment: float        # LLM-extracted sentiment polarity [-1, 1]
     finbert_sentiment: float | None  # FinBERT signed sentiment [-1, 1], news-domain
     location: str | None    # 'City, Country' from LLM analysis
     latitude: float | None  # from geonamescache city lookup
     longitude: float | None # from geonamescache city lookup
-    event_intensity: float  # computed score [0, 1]
+    event_intensity: float  # LLM-rated newsworthiness/severity [0, 1]
     category: str           # LLM-assigned category slug
     sub_category: str | None  # LLM-assigned sub-category slug within category
     llm_data: dict          # raw LLM response — stored in article.extra_data['llm']

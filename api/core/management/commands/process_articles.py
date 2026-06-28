@@ -2,7 +2,7 @@ from core.management.base import BaseTaskCommand
 
 
 class Command(BaseTaskCommand):
-    help = 'Run NLP pipeline (NER + VADER + categorization) on unprocessed articles'
+    help = 'Run NLP pipeline (LLM analysis + FinBERT + categorization) on unprocessed articles'
 
     def add_arguments(self, parser):
         parser.add_argument(

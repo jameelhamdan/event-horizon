@@ -78,11 +78,11 @@ Raw news item from one source, enriched **in place** by the processing stage.
 | `content` | text | Body text |
 | `published_on` | datetime | Publish timestamp (UTC); drives all as-of cuts |
 | `related` | FK→self | Optional link to a related article |
-| `entities` | `[]` | spaCy NER output `[{text, label}]` |
-| `sentiment` | float \| null | **VADER** compound [-1, 1] — kept for social/short text |
+| `entities` | `[]` | LLM-extracted entities `[{text, label}]` |
+| `sentiment` | float \| null | LLM-extracted polarity [-1, 1] |
 | `finbert_sentiment` | float \| null | **FinBERT** signed sentiment [-1, 1] — news-domain (new) |
 | `location` | str(255) \| null | `City, Country` from LLM analysis |
-| `event_intensity` | float \| null | Computed intensity score [0, 1] |
+| `event_intensity` | float \| null | LLM-rated newsworthiness/severity [0, 1] |
 | `category` | str → `EventCategory` | Top-level category (rule/LLM) |
 | `sub_category` | str(64) \| null | LLM sub-category within the top-level |
 | `processed_on` | datetime \| null | Set when NLP processing completes |
@@ -112,7 +112,7 @@ An aggregated real-world happening; **one event, many source articles**. Built b
 | `started_at` | datetime | Timestamp of the **earliest** article |
 | `latest_article_at` | datetime \| null | **= max(`published_on`)** over members — the **event-time** used for all as-of forecasting cuts (not the day bucket) ★new |
 | `article_count` | int | Number of constituent articles |
-| `avg_sentiment` | float \| null | VADER mean over articles |
+| `avg_sentiment` | float \| null | Mean article sentiment |
 | `avg_finbert_sentiment` | float \| null | FinBERT mean over articles ★new |
 | `avg_intensity` | float \| null | Mean event intensity |
 | `affected_indicators` | `[]` | Deterministically routed `[{symbol, weight}]` (weight signed) ★new |

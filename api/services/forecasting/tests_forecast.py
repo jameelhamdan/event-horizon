@@ -44,7 +44,7 @@ def _synthetic_events(symbols, n=200, seed=1):
         sym = symbols[i % len(symbols)]
         events.append({
             't': t, 'w': {sym: float(rng.normal(0, 0.5))},
-            'finbert': float(rng.normal(0, 0.3)), 'vader': float(rng.normal(0, 0.3)),
+            'finbert': float(rng.normal(0, 0.3)), 'sentiment': float(rng.normal(0, 0.3)),
             'category': 'economic', 'topics': {'inflation'} if i % 3 == 0 else set(),
         })
     events.sort(key=lambda e: e['t'])
@@ -109,7 +109,7 @@ def test_asof_no_leakage():
 
     # Inject an event dated AFTER as_of, rebuild, and confirm features are identical.
     future_t = as_of + timedelta(days=10)
-    events.append({'t': future_t, 'w': {'GC=F': 5.0}, 'finbert': 1.0, 'vader': 1.0,
+    events.append({'t': future_t, 'w': {'GC=F': 5.0}, 'finbert': 1.0, 'sentiment': 1.0,
                    'category': 'economic', 'topics': {'inflation'}})
     events.sort(key=lambda e: e['t'])
     F._load_events = lambda start, end, router=None: (events, [e['t'] for e in events])  # noqa: E731

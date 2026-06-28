@@ -33,7 +33,7 @@ flowchart TD
 
     ART --> S2
     subgraph S2["Stage 2 · Process"]
-        NLP[spaCy NER · geocode · LLM category/sub-category<br/>FinBERT + VADER · i18n en/ar]
+        NLP[LLM entities/sentiment/category/sub-category · geocode<br/>FinBERT · i18n en/ar]
     end
     S2 --> ARTE[(Article · enriched)]
 

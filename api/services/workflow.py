@@ -102,7 +102,7 @@ class Workflow:
         ids: list | None = None,
     ) -> int:
         """
-        Step 2 — Clean: run HuggingFace NER + VADER sentiment on Articles; use LLM for category + location.
+        Step 2 — Clean: LLM analyzer extracts category, location, entities, and sentiment; FinBERT adds financial sentiment.
         Returns the number of articles processed.
 
         only_failed: re-run NLP on articles that were processed but ended up with no location
@@ -115,7 +115,7 @@ class Workflow:
         """
         import uuid as _uuid
         from core.models import Article, ArticleDocument
-        from services.processing.cleaner import ArticleCleaner, CleaningError
+        from services.processing.cleaner import ArticleCleaner
         from services.stages import mark_stage
 
         if ids is not None:
@@ -146,11 +146,7 @@ class Workflow:
         if not articles:
             return 0
 
-        try:
-            cleaner = ArticleCleaner()
-        except CleaningError:
-            logger.exception('NLP pipeline failed')
-            raise
+        cleaner = ArticleCleaner()
 
         docs = [
             ArticleDocument(
@@ -311,7 +307,8 @@ class Workflow:
             sub_categories = sorted({a.sub_category for a in group if a.sub_category})
 
             # Deterministic affected-indicator weights (plan §2). Prefer FinBERT
-            # (news-domain) sentiment for the signed amplification, fall back to VADER.
+            # (news-domain) sentiment for the signed amplification, fall back to the
+            # article sentiment mean (LLM-extracted).
             from services.forecasting.routing import route_event_to_weighted_symbols
             route_sentiment = avg_finbert_sentiment if avg_finbert_sentiment is not None else avg_sentiment
             affected_indicators = route_event_to_weighted_symbols(

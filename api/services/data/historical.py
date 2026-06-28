@@ -487,7 +487,7 @@ def fetch_article_body(url: str, timeout: int = _HTTP_TIMEOUT) -> str | None:
     Backfill candidates come from sitemaps/CDX as title-only; without body text the
     NLP step can't geocode them, so they'd never aggregate into Events (and never
     hit the map). This pulls the page and extracts paragraph text — good enough for
-    NER/geocoding + category. Returns None on any failure (caller falls back to the
+    geocoding + category. Returns None on any failure (caller falls back to the
     title).
 
     Called from the per-article ``backfill_save_article_task`` worker, so parallelism

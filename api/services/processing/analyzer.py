@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 # protest → political/protest-policy; crime → conflict (terrorism/insurgency) or general.
 _CATEGORIES = {'conflict', 'disaster', 'economic', 'political', 'health', 'general'}
 
+# Neutral-low fallback when the LLM omits/garbles intensity on an otherwise-parsed
+# article — keeps the event in play without overstating it.
+_DEFAULT_INTENSITY = 0.3
+
 _SUB_CATEGORIES: dict[str, set[str]] = {
     'conflict':  {'war', 'airstrike', 'insurgency', 'terrorism', 'border-clash', 'other'},
     'disaster':  {'earthquake', 'flood', 'storm', 'wildfire', 'industrial-accident', 'other'},
@@ -27,6 +31,9 @@ _OBJECT_SCHEMA = """\
   "sub_category": sub-category slug for the chosen category (see guide) or null,
   "country": English country name or null,
   "city": English city/region name or null,
+  "entities": [{"text": named entity surface form, "label": PER|ORG|LOC|MISC}],
+  "sentiment": float -1.0 (very negative) to 1.0 (very positive),
+  "intensity": float 0.0 to 1.0 (newsworthiness/severity — see guide),
   "translations": {
     "en": {"title": English title, "summary": 2-3 sentence factual English summary, "country": English country or null, "city": English city or null},
     "ar": {"title": Arabic title, "summary": 2-3 sentence factual Arabic summary, "country": Arabic country or null, "city": Arabic city or null}
@@ -42,6 +49,9 @@ _OBJECT_SCHEMA_LITE = """\
   "sub_category": sub-category slug for the chosen category (see guide) or null,
   "country": English country name or null,
   "city": English city/region name or null,
+  "entities": [{"text": named entity surface form, "label": PER|ORG|LOC|MISC}],
+  "sentiment": float -1.0 (very negative) to 1.0 (very positive),
+  "intensity": float 0.0 to 1.0 (newsworthiness/severity — see guide),
   "translations": {
     "en": {"title": English title, "summary": 2-3 sentence factual English summary, "country": English country or null, "city": English city or null}
   }
@@ -55,7 +65,13 @@ Category + sub-category:
 - political [election|legislation|diplomacy|leadership-change|protest-policy|other]
 - health [outbreak|pandemic|healthcare-system|other]
 - general [other]: anything else, incl. ordinary crime.
-Rule: deliberate armed action → conflict; accidental/natural → disaster."""
+Rule: deliberate armed action → conflict; accidental/natural → disaster.
+
+Intensity (newsworthiness/severity of the event, not your opinion of it):
+- 0.0-0.2: routine/minor — local notices, ordinary crime, scheduled procedure, opinion/analysis.
+- 0.3-0.5: notable — regional impact, single-casualty incidents, policy proposals, market moves.
+- 0.6-0.8: major — many casualties, national-scale crises, significant attacks/disasters, central-bank decisions.
+- 0.9-1.0: severe/historic — mass-casualty events, wars, major disasters, globally market-moving shocks."""
 
 def _single_prompt(schema: str) -> str:
     return (
@@ -86,6 +102,9 @@ class ArticleAnalysis:
     city: str | None          # e.g. "Kyiv"
     latitude: float | None
     longitude: float | None
+    entities: list            # [{"text": ..., "label": PER|ORG|LOC|MISC}] — LLM-extracted
+    sentiment: float          # -1.0..1.0 polarity — LLM-extracted
+    intensity: float          # 0.0..1.0 newsworthiness/severity — LLM-rated
     llm_data: dict            # raw parsed LLM response for storage in extra_data
     translations: dict        # i18n subdocument: {"en": {...}, "ar": {...}}
 
@@ -162,38 +181,6 @@ def _geocode(city: str | None, country: str | None = None) -> tuple[float | None
     return None, None
 
 
-def geocode_from_entities(
-    entities: list[dict],
-) -> tuple[str | None, str | None, float | None, float | None]:
-    """Best-effort (city, country, lat, lon) from NER entities when the LLM gave no location.
-
-    Scans LOC/MISC entities for a known country or city (geonamescache). Prefers a country
-    match as the anchor (country-level event); uses a matched city's coords when available.
-    Returns (None, None, None, None) if nothing geocodes.
-    """
-    city_idx = _city_index()
-    country_idx = _country_index()
-    country = city = None
-    for e in entities:
-        if e.get('label') not in ('LOC', 'MISC'):
-            continue
-        name = (e.get('text') or '').strip()
-        low = name.lower()
-        if not low:
-            continue
-        if country is None and low in country_idx:
-            country = name
-        if city is None and low in city_idx:
-            city = name
-    if city:
-        lat, lon = city_idx.get(city.lower(), (None, None))
-        return city, country, lat, lon
-    if country:
-        lat, lon = country_idx.get(country.lower(), (None, None))
-        return None, country, lat, lon
-    return None, None, None, None
-
-
 class ArticleAnalyzer:
     """
     Uses the LLM to extract category, country, city, and coordinates from article text.
@@ -220,9 +207,9 @@ class ArticleAnalyzer:
     # fails the whole batch, and the Arabic summary is token-heavy. max_tokens is
     # only a cap, so short responses cost nothing — we size to avoid truncation.
     # Lite (no Arabic) needs roughly half the budget.
-    _OUTPUT_PER_ARTICLE = 480
-    _OUTPUT_PER_ARTICLE_LITE = 240
-    _MAX_OUTPUT = 3400
+    _OUTPUT_PER_ARTICLE = 560
+    _OUTPUT_PER_ARTICLE_LITE = 320
+    _MAX_OUTPUT = 4000
 
     def __init__(self) -> None:
         from services.llm import get_llm_service
@@ -248,8 +235,56 @@ class ArticleAnalyzer:
             category='general', sub_category=None,
             country=None, city=None,
             latitude=None, longitude=None,
+            entities=[], sentiment=0.0, intensity=0.0,
             llm_data={}, translations={},
         )
+
+    @staticmethod
+    def _parse_entities(raw) -> list:
+        """Normalise the LLM entities field to [{'text','label'}] with valid labels.
+
+        Accepts a list of {text,label} dicts (preferred) or bare strings (labelled
+        MISC). Drops malformed/empty entries. Output shape is
+        [{'text','label'}] — stored on Article.entities.
+        """
+        if not isinstance(raw, list):
+            return []
+        valid = {'PER', 'ORG', 'LOC', 'MISC'}
+        out = []
+        for e in raw:
+            if isinstance(e, str):
+                text, label = e.strip(), 'MISC'
+            elif isinstance(e, dict):
+                text = str(e.get('text') or '').strip()
+                label = str(e.get('label') or 'MISC').upper()
+            else:
+                continue
+            if not text:
+                continue
+            out.append({'text': text, 'label': label if label in valid else 'MISC'})
+        return out
+
+    @staticmethod
+    def _parse_sentiment(raw) -> float:
+        """Coerce the LLM sentiment field to a float clamped to [-1.0, 1.0]."""
+        try:
+            return round(max(-1.0, min(1.0, float(raw))), 4)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _parse_intensity(raw, default: float = _DEFAULT_INTENSITY) -> float:
+        """Coerce the LLM intensity field to a float clamped to [0.0, 1.0].
+
+        Falls back to ``default`` (neutral-low) when the field is missing or
+        unparseable, so an omitted value never zeroes out an otherwise real event.
+        """
+        if raw is None:
+            return default
+        try:
+            return round(max(0.0, min(1.0, float(raw))), 4)
+        except (TypeError, ValueError):
+            return default
 
     def analyze(self, text: str, translate: bool = True) -> ArticleAnalysis:
         """
@@ -346,6 +381,9 @@ class ArticleAnalyzer:
         for lang_key in list(translations.keys()):
             if not isinstance(translations[lang_key], dict):
                 del translations[lang_key]
+        entities = self._parse_entities(data.get('entities'))
+        sentiment = self._parse_sentiment(data.get('sentiment'))
+        intensity = self._parse_intensity(data.get('intensity'))
         llm_data = {
             'category': category,
             'sub_category': sub_category,
@@ -356,6 +394,7 @@ class ArticleAnalyzer:
             category=category, sub_category=sub_category,
             country=country, city=city,
             latitude=lat, longitude=lon,
+            entities=entities, sentiment=sentiment, intensity=intensity,
             llm_data=llm_data,
             translations=translations,
         )

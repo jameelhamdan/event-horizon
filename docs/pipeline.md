@@ -85,9 +85,9 @@ Per article, enrich in place:
 
 | Field | How |
 |-------|-----|
-| Entities / locations | spaCy NER + geopy geocode |
+| Entities / locations | LLM entities + geonamescache geocode |
 | Category + **sub-category** | LLM, two-level taxonomy (see below) |
-| Sentiment (VADER) | `Article.sentiment` — kept for social/short text |
+| Sentiment | `Article.sentiment` — LLM-extracted polarity [-1, 1] |
 | Sentiment (**FinBERT**) | `Article.finbert_sentiment` — news-domain, batched on the heavy queue, computed **once at process time** |
 | i18n (en/ar) | LLM translations → `Article.translations` |
 
@@ -110,7 +110,7 @@ always a **feature**, never the predictor.
 2. Semantically sub-cluster within a bucket (`SemanticClusterer`,
    cosine ≥ 0.55, multilingual MiniLM).
 3. Upsert an `Event` keyed on `(location_name, category, day)`, aggregating:
-   - `avg_sentiment` (VADER mean), `avg_finbert_sentiment` (FinBERT mean), `avg_intensity`
+   - `avg_sentiment` (mean article sentiment), `avg_finbert_sentiment` (FinBERT mean), `avg_intensity`
    - **`latest_article_at` = max(published_on)** over constituent articles — this is
      the **event-time** used for all as-of forecasting cuts (not the day bucket).
    - **`affected_indicators`** = `route_event_to_weighted_symbols(...)` — a

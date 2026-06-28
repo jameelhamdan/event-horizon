@@ -9,7 +9,7 @@
 | Task queue | django-rq + Redis — two queues: `default` (light I/O) and `heavy` (NLP/LLM) |
 | Scheduling | rq-scheduler, registered by the `setup_schedule` management command |
 | Ingestion | feedparser (RSS) + requests |
-| NLP | spaCy (NER) · sentence-transformers (clustering) · VADER + **FinBERT** (sentiment) · geopy |
+| NLP | LLM (entities · sentiment · category/sub-category · geocode) · sentence-transformers (clustering) · **FinBERT** (financial sentiment) · geonamescache |
 | LLM | Multi-provider via `services/llm.py` — `g4f` (default), `openrouter`, `ollama`; per-use-case routing + fallback chains (`settings.LLM_ROUTES`) |
 | Forecasting | as-of feature engineering + LLM v1 + **LightGBM v2** (optional dep) |
 | Frontend | React 19 + Vite + react-router-dom + react-leaflet (TypeScript) |

@@ -93,7 +93,7 @@ def _load_events(start, end, router=None):
             't': to_utc_ts(e['latest_article_at']),
             'w': weights,
             'finbert': e['avg_finbert_sentiment'],
-            'vader': e['avg_sentiment'],
+            'sentiment': e['avg_sentiment'],
             'category': e['category'],
             'topics': set(e['topic_slugs'] or []),
         })
@@ -149,7 +149,7 @@ def _event_features(window_events, symbol, t):
         feat[f'evw_cnt_{w}d'] = 0.0
         feat[f'evw_maxabs_{w}d'] = 0.0
     feat['evw_decay_7d'] = 0.0
-    fb_vals, vd_vals = [], []
+    fb_vals, sent_vals = [], []
     cat_cnt = {c: 0.0 for c in CATEGORIES}
     topics_present = {tp: 0.0 for tp in TOPIC_FEATURES}
 
@@ -169,8 +169,8 @@ def _event_features(window_events, symbol, t):
             if age_days <= SENT_WINDOW:
                 if e['finbert'] is not None:
                     fb_vals.append(e['finbert'])
-                if e['vader'] is not None:
-                    vd_vals.append(e['vader'])
+                if e['sentiment'] is not None:
+                    sent_vals.append(e['sentiment'])
                 if e['category'] in cat_cnt:
                     cat_cnt[e['category']] += 1.0
             for tp in e['topics']:
@@ -179,7 +179,7 @@ def _event_features(window_events, symbol, t):
 
     feat['news_finbert_mean'] = (sum(fb_vals) / len(fb_vals)) if fb_vals else 0.0
     feat['news_finbert_min'] = min(fb_vals) if fb_vals else 0.0
-    feat['news_vader_mean'] = (sum(vd_vals) / len(vd_vals)) if vd_vals else 0.0
+    feat['news_sentiment_mean'] = (sum(sent_vals) / len(sent_vals)) if sent_vals else 0.0
     for c in CATEGORIES:
         feat[f'cat_{c}'] = cat_cnt[c]
     for tp in TOPIC_FEATURES:
@@ -193,7 +193,7 @@ def _zero_event_features():
     for w in EVENT_WINDOWS:
         feat[f'evw_sum_{w}d'] = feat[f'evw_cnt_{w}d'] = feat[f'evw_maxabs_{w}d'] = 0.0
     feat['evw_decay_7d'] = 0.0
-    feat['news_finbert_mean'] = feat['news_finbert_min'] = feat['news_vader_mean'] = 0.0
+    feat['news_finbert_mean'] = feat['news_finbert_min'] = feat['news_sentiment_mean'] = 0.0
     for c in CATEGORIES:
         feat[f'cat_{c}'] = 0.0
     for tp in TOPIC_FEATURES:

@@ -14,7 +14,7 @@ See [project.md](project.md) for full requirements and architecture. See [CLAUDE
 | Task queue | Redis + RQ + django-rq |
 | Storage | MongoDB 8 |
 | Ingestion | feedparser (RSS) + requests |
-| NLP | spaCy NER + VADER sentiment + geopy geocoding |
+| NLP | LLM entity/sentiment/category + sentence-transformers clustering + FinBERT + geonamescache geocoding |
 | Email | AWS SES (prod) / SMTP (dev) |
 | Newsletter | LLM-generated daily briefing → subscriber list |
 | Frontend | React 19 + Vite + react-leaflet |
@@ -124,10 +124,9 @@ fetch_data        (every 10m, timeout 30m)
   └─ feedparser (RSS) / requests → Article objects in MongoDB
 
 process_articles  (every 10m, timeout 30m)
-  └─ spaCy NER — named entity extraction
-  └─ VADER — sentiment score [-1, 1]
-  └─ geopy (Nominatim) — geocoding, 30-day cache
-  └─ Keyword heuristics — intensity + category
+  └─ LLM analyzer — entities, sentiment, category/sub-category, city/country
+  └─ FinBERT — financial sentiment [-1, 1]
+  └─ geonamescache — city/country → coordinates
   └─ → Article NLP fields written back to MongoDB
 
 aggregate_events  (every 10m, timeout 30m)
@@ -152,7 +151,7 @@ backend/
   api/           DRF serializers + APIView endpoints (events, sources, newsletter)
   newsletter/    Subscriber + DailyNewsletter models, subscribe/confirm/unsubscribe views
   services/
-    cleaning/    ArticleCleaner — spaCy NER + VADER + categorization
+    cleaning/    ArticleCleaner — LLM entities/sentiment/category + FinBERT
     location/    Geocoder — Nominatim via geopy, Django cache
     data/        Ingestion — RSS (feedparser) + HTTP
     email/       Email service — AWS SES (prod) or SMTP (dev)

@@ -13,7 +13,7 @@ This file gives Claude everything needed to write correct, consistent code for t
 | Scheduling | rq-scheduler (`setup_schedule` management command) |
 | Storage | MongoDB 8 |
 | Ingestion | feedparser (RSS) + requests |
-| NLP | HuggingFace NER (dslim/bert-base-NER) + LLM category/geo + sentence-transformers + VADER + FinBERT + geonamescache |
+| NLP | LLM entities/sentiment/category/geo + sentence-transformers + FinBERT + geonamescache |
 | LLM | Multi-provider via `services/llm.py` — `openrouter` (default, proxy-URL rotation or direct keys), `ollama`; per-use-case routing + fallback chains in `settings.LLM_ROUTES` |
 | Frontend | React 19 + Vite + react-router-dom + react-leaflet (TypeScript) |
 | Real-time | Server-Sent Events (SSE) over Redis pub/sub |
@@ -216,7 +216,7 @@ This is a real-time global event intelligence platform. Key feature areas:
 | Feature | Description |
 |---------|-------------|
 | **Multi-source ingestion** | RSS feeds (feedparser) + web sources (requests) → Article objects |
-| **NLP pipeline** | HuggingFace NER (bert-base-NER) + LLM category/sub-category + VADER & FinBERT sentiment + geonamescache geocoding + i18n translations |
+| **NLP pipeline** | LLM entities + category/sub-category + sentiment + FinBERT financial sentiment + geonamescache geocoding + i18n translations |
 | **Event aggregation** | Articles bucketed by (location, category, day) + semantic sub-clustering (multilingual sentence-transformers) |
 | **Global topic tracking** | Wikipedia Portal:Current_events scraped daily → LLM-enriched topics → LLM semantic matching to events |
 | **Stream data** | Real-time prices (Yahoo Finance + CoinGecko), NOTAMs (aviationweather.gov), earthquakes (USGS), forex (ECB) |
@@ -475,7 +475,7 @@ LightGBM **classifier (calibrated P(up)) + regressor (magnitude)** per horizon (
 
 ### NLP / Processing
 
-- `services/processing/analyzer.py` — LLM category + sub-category assignment, geonamescache geocoding, LLM i18n translations (en + ar). NER (dslim/bert-base-NER) + VADER run in `cleaner.py`; FinBERT in `finbert.py`
+- `services/processing/analyzer.py` — single LLM call per article: category + sub-category, city/country, entities, sentiment, intensity (0–1 newsworthiness/severity), and i18n translations (en + ar). geonamescache geocoding. `cleaner.py` orchestrates the analyzer + FinBERT (`finbert.py`); no local NLP heuristics — `event_intensity` is the LLM `intensity`
 - `services/processing/cleaner.py` — HTML tag removal, whitespace normalization, non-ASCII handling
 - `services/processing/clustering.py` — semantic event grouping (see above)
 - `ArticleDocument` and `ArticleFeatures` dataclasses live in `core/models.py`
@@ -763,8 +763,8 @@ score_articles_task (every 60m, heavy queue, timeout 30m)
      Only unscored articles (importance_score__isnull=True) in the last SCORE_INTERVAL_MINUTES×2 window
 
 process_articles_task (every 240m, heavy queue, timeout 30m)
-  └─ bert-base-NER + VADER & FinBERT sentiment + geonamescache geocoding → Article metadata
-     LLM: category + sub-category assignment
+  └─ LLM: entities + sentiment + intensity + category/sub-category + city/country
+     FinBERT sentiment + geonamescache geocoding → Article metadata
      LLM: English + Arabic translations → Article.translations (backfill: English only)
 
 aggregate_events_task (every 240m, heavy queue, timeout 30m)
