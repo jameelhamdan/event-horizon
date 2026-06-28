@@ -56,7 +56,7 @@ services:
   worker-heavy:
     build: ./api
     restart: always
-    command: sh -c "python manage.py rqworker-pool heavy --num-workers 2"
+    command: sh -c "python manage.py worker heavy --num-workers 2"
     depends_on:
       mongo:
         condition: service_started
