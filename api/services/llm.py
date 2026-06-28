@@ -14,6 +14,10 @@ _THINK_RE = re.compile(r'<think>.*?</think>', re.DOTALL)
 
 _NO_KEY = 'none'
 
+# Per-request LLM timeout (seconds). Generous default (5m) so slow local models
+# (Ollama) and busy free-tier providers don't get cut off mid-generation.
+_LLM_TIMEOUT = float(getattr(settings, 'LLM_TIMEOUT_SECONDS', 300))
+
 
 def _parse_csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(',') if v.strip()]
@@ -160,6 +164,7 @@ class OpenAICompatLLMService(BaseLLMService):
             completion = client.chat.completions.create(
                 model=self._model,
                 messages=messages,
+                timeout=_LLM_TIMEOUT,
                 **kwargs,
             )
             content = completion.choices[0].message.content
@@ -208,7 +213,7 @@ class OllamaLLMService(BaseLLMService):
                     'think': kwargs.get('think', False),
                     **(({'options': options}) if options else {}),
                 },
-                timeout=60,
+                timeout=_LLM_TIMEOUT,
             )
             response.raise_for_status()
             content = response.json()['message']['content']

@@ -296,6 +296,10 @@ ARTICLE_DEDUP_HOURS = config('ARTICLE_DEDUP_HOURS', default=24, cast=int)
 OLLAMA_BASE_URL = config('OLLAMA_BASE_URL', default='http://localhost:11434')
 OLLAMA_MODEL = config('OLLAMA_MODEL', default='qwen3:14b')
 
+# Per-request LLM timeout (seconds) — applies to both OpenRouter and Ollama clients.
+# Generous so slow local models / busy free-tier providers aren't cut off mid-generation.
+LLM_TIMEOUT_SECONDS = config('LLM_TIMEOUT_SECONDS', default=300, cast=int)
+
 # Routing: role -> provider name OR ordered fallback list (tried in order on failure).
 # Unconfigured providers are skipped; unknown roles fall back to 'default'.
 #
