@@ -1,11 +1,10 @@
-"""Dependency-light self-tests for scoring, text_utils, and LLM helpers.
+"""Dependency-light self-tests for scoring, utils, and LLM helpers.
 
 No database or network required — all logic is pure Python.
 
 Run standalone:
     DJANGO_SETTINGS_MODULE=settings.base python -m services.tests_scoring
 """
-from __future__ import annotations
 
 import os
 import sys
@@ -23,7 +22,7 @@ except Exception:
 
 
 def test_tokenize_basic():
-    from services.text_utils import tokenize
+    from services.utils import tokenize
     tokens = tokenize('Ukraine ceasefire deal signed')
     assert 'ukraine' in tokens
     assert 'ceasefire' in tokens
@@ -36,33 +35,33 @@ def test_tokenize_basic():
 
 
 def test_tokenize_empty():
-    from services.text_utils import tokenize
+    from services.utils import tokenize
     assert tokenize('') == frozenset()
     assert tokenize(None) == frozenset()  # type: ignore[arg-type]
 
 
 def test_tokenize_stop_words():
-    from services.text_utils import tokenize, STOP_WORDS
+    from services.utils import tokenize, STOP_WORDS
     # Every stop word is filtered
     text = ' '.join(STOP_WORDS)
     assert tokenize(text) == frozenset()
 
 
 def test_jaccard_identical():
-    from services.text_utils import jaccard
+    from services.utils import jaccard
     a = frozenset({'ukraine', 'ceasefire', 'deal'})
     assert jaccard(a, a) == 1.0
 
 
 def test_jaccard_disjoint():
-    from services.text_utils import jaccard
+    from services.utils import jaccard
     a = frozenset({'ukraine', 'ceasefire'})
     b = frozenset({'earthquake', 'tsunami'})
     assert jaccard(a, b) == 0.0
 
 
 def test_jaccard_partial():
-    from services.text_utils import jaccard
+    from services.utils import jaccard
     a = frozenset({'ukraine', 'ceasefire', 'deal'})
     b = frozenset({'ukraine', 'ceasefire', 'talks'})
     # intersection=2, union=4 → 0.5
@@ -70,7 +69,7 @@ def test_jaccard_partial():
 
 
 def test_jaccard_empty():
-    from services.text_utils import jaccard
+    from services.utils import jaccard
     assert jaccard(frozenset(), frozenset({'x'})) == 0.0
     assert jaccard(frozenset({'x'}), frozenset()) == 0.0
 
@@ -166,7 +165,7 @@ def test_tokenize_consistency_scoring_vs_data():
     if not _DJANGO_READY:
         return
 
-    from services.text_utils import tokenize
+    from services.utils import tokenize
     from services.scoring import _tokenize as scoring_tok
     from services.data import _tokenize_title as data_tok
 
@@ -179,7 +178,7 @@ def test_jaccard_consistency():
     if not _DJANGO_READY:
         return
 
-    from services.text_utils import jaccard
+    from services.utils import jaccard
     from services.scoring import _jaccard as scoring_jac
     from services.data import _jaccard as data_jac
 

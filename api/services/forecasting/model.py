@@ -9,7 +9,6 @@ Artifacts persist to ``settings.FORECAST_MODEL_DIR`` as ``model_h{horizon}.jobli
 lazily (cached). LightGBM/sklearn/joblib are optional at import time: if missing, training
 raises a clear error and prediction returns an empty list.
 """
-from __future__ import annotations
 
 import logging
 import os

@@ -336,6 +336,7 @@ class Forecast(models.Model):
             models.Index(fields=['symbol', 'horizon_days', 'generated_at']),
             models.Index(fields=['as_of_date']),
             models.Index(fields=['generated_at']),
+            models.Index(fields=['realized_direction']),
         ]
 
     def __str__(self):

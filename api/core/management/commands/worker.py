@@ -21,7 +21,7 @@ class Command(_pool_cmd.Command):
     help = "rqworker-pool that preloads ML models into the parent (COW-shared to job horses)."
 
     def handle(self, *args, **options):
-        from init_models import preload_into_memory
+        from scripts.init_models import preload_into_memory
 
         preload_into_memory()
         super().handle(*args, **options)

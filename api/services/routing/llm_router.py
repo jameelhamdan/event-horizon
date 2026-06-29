@@ -7,7 +7,6 @@ output is a *feature/hypothesis* stored on ``Event.affected_indicators`` — nev
 Mirrors ``services.topics.matcher.LLMTopicMatcher``: batched calls, code-fence stripping,
 deterministic per-event fallback (``services.forecasting.routing``) on any error.
 """
-from __future__ import annotations
 
 import json
 import logging
@@ -142,7 +141,7 @@ def route_events(events: list, source: str = 'llm') -> int:
     else:
         routed = {str(e.pk): _fallback(e) for e in events}
 
-    from services.stages import mark_stage
+    from services.utils import mark_stage
 
     updated = 0
     for event in events:

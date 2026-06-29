@@ -15,7 +15,7 @@ RUN apt-get update && apt-get upgrade -y \
 ENV HF_HOME=/py/huggingface
 ENV UV_INDEX_STRATEGY=unsafe-best-match
 
-COPY ./init_models.py /init_models.py
+COPY ./scripts/init_models.py /init_models.py
 
 RUN pip install --no-cache-dir uv \
     && uv venv /py \

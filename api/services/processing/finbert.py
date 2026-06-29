@@ -10,7 +10,6 @@ The signed score in [-1, 1] is derived from the 3-class softmax:
 (neutral mass is implicitly the residual). Loaded lazily; CPU-only.
 """
 
-from __future__ import annotations
 
 import functools
 import logging
@@ -61,12 +60,6 @@ def _to_signed(scores: list[dict]) -> float:
     """Convert a list of {label, score} into a signed compound in [-1, 1]."""
     by_label = {str(s['label']).lower(): float(s['score']) for s in scores}
     return round(by_label.get('positive', 0.0) - by_label.get('negative', 0.0), 4)
-
-
-def score(text: str) -> float | None:
-    """Score a single text. Returns None if FinBERT is unavailable."""
-    result = score_batch([text])
-    return result[0] if result else None
 
 
 def score_batch(texts: list[str]) -> list[float | None]:

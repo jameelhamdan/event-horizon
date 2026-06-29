@@ -12,7 +12,6 @@ disk ("Loading weights ..." on every task). By warming the same cached accessors
 the tasks use, here in the parent, the forked horses inherit the already-loaded
 weights via copy-on-write — the model loads once and is shared across all jobs.
 """
-from __future__ import annotations
 
 import logging
 

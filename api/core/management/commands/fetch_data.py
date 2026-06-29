@@ -46,6 +46,6 @@ class Command(BaseTaskCommand):
                 self.stdout.write(self.style.SUCCESS('Enqueued dispatch_fetch_task'))
             return
 
-        from services.workflow import Workflow
-        count = Workflow.fetch_articles(source_code, start_date)
+        from services.workflow import fetch_articles
+        count = fetch_articles(source_code, start_date)
         self.stdout.write(self.style.SUCCESS(f'Fetched {count} new article(s) from {label}'))

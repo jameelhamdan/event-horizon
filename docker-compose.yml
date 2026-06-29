@@ -1,3 +1,7 @@
+x-api-build: &api-build
+  build: ./api
+  image: happinga-meter-api
+
 services:
   frontend:
     build:
@@ -37,7 +41,7 @@ services:
         condition: service_started
 
   api:
-    build: ./api
+    <<: *api-build
     restart: always
     command: uvicorn app.asgi:application --host 0.0.0.0 --port 8000 --workers 4
     expose:
@@ -54,7 +58,7 @@ services:
 
   # Steady NLP/LLM work — 2 workers (matches the LLM key/proxy rotation depth).
   worker-heavy:
-    build: ./api
+    <<: *api-build
     restart: always
     command: sh -c "python manage.py worker heavy --num-workers 2"
     depends_on:
@@ -68,7 +72,7 @@ services:
 
   # Fast I/O (fetchers, stream collectors, dispatchers) — 4 workers.
   worker-light:
-    build: ./api
+    <<: *api-build
     restart: always
     command: sh -c "python manage.py rqworker-pool default --num-workers 4"
     depends_on:
@@ -81,7 +85,7 @@ services:
   # Long one-shot jobs (multi-year backfills, model training) — 1 worker, isolated
   # so a hours-long job never blocks the live pipeline on the heavy queue.
   worker-bulk:
-    build: ./api
+    <<: *api-build
     restart: always
     command: sh -c "python manage.py rqworker-pool bulk --num-workers 1"
     depends_on:

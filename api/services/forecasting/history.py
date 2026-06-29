@@ -6,7 +6,6 @@ Non-crypto symbols via **yfinance** (already a project dependency); crypto (BTC/
 This is the training + charting substrate for the forecasting layer. Distinct from the
 high-frequency ``PriceTick`` live stream.
 """
-from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone

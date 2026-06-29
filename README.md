@@ -18,125 +18,105 @@ See [project.md](project.md) for full requirements and architecture. See [CLAUDE
 | Email | AWS SES (prod) / SMTP (dev) |
 | Newsletter | LLM-generated daily briefing → subscriber list |
 | Frontend | React 19 + Vite + react-leaflet |
-| Serving | uvicorn + nginx (reverse proxy + TLS) |
-| TLS | Let's Encrypt via certbot |
+| Serving | uvicorn + nginx (reverse proxy) |
+| Tunnel | Cloudflare Tunnel (TLS termination) |
 | Containers | Docker Compose |
 
 ---
 
 ## Quick Start
 
-### Production (with HTTPS)
-
-Point your domain's DNS A record at the server, then:
+### Production
 
 ```bash
-export DOMAIN=yourdomain.com
-export CERTBOT_EMAIL=admin@yourdomain.com
-
-bash init-letsencrypt.sh           # one-time: gets the TLS cert
-DOMAIN=$DOMAIN docker compose up -d
-docker compose exec backend python manage.py migrate
-docker compose exec backend python manage.py createsuperuser
+cp api/.env.example .env.app   # fill in SECRET_KEY, CLOUDFLARE_TUNNEL_TOKEN, etc.
+docker compose up -d
+docker compose exec api python manage.py migrate
+docker compose exec api python manage.py createsuperuser
 ```
 
-Deployment is **configurationless**: migrations seed config/reference data
-(`MarketSymbol`, `StaticPoint`). Bootstrap backfill (prices + articles) plus the first
-forecast train/run is triggered from the admin dashboard — no manual
-`bootstrap_static_points` or backfill commands. See [docs/operations.md](docs/operations.md).
-Operate it from the admin dashboard at `/admin/dashboard/`.
+Deployment is **configurationless**: migrations seed reference data (`MarketSymbol`, `StaticPoint`). Bootstrap backfill (prices + articles) and the first forecast train/run are triggered from the admin dashboard. See [docs/operations.md](docs/operations.md).
 
 Access:
 
-- Map: <https://yourdomain.com>
-- API: <https://yourdomain.com/api/>
-- Admin: <https://yourdomain.com/admin/>
-- Worker health: <http://yourdomain.com:8001/>
-
-### Local / HTTP-only
-
-```bash
-DOMAIN=localhost docker compose up --build
-docker compose exec backend python manage.py migrate
-```
-
-Access at <http://localhost>.
+- Map: `https://yourdomain.com`
+- Admin: `https://yourdomain.com/admin/`
+- API: `https://yourdomain.com/api/`
 
 ### Local Development (no Docker)
 
 Prerequisites: Python 3.13+, MongoDB, Redis, Node 22+
 
 ```bash
-# Backend (from project root — decouple reads .env from CWD)
-cd backend
+# Backend
+cd api
+cp .env.example .env.app       # set SECRET_KEY, TASK_QUEUE_ENABLED=true
 python manage.py migrate
-python manage.py runserver        # Django on :8000
+python manage.py runserver     # Django on :8000
 
-# Worker (separate terminal)
-python worker.py                  # RQ workers + scheduler + health on :8001
+# Workers (separate terminals, from api/)
+python manage.py worker heavy --num-workers 2
+python manage.py rqworker-pool default --num-workers 4
 
 # Frontend (separate terminal)
-cd frontend
+cd ui
 npm install
-npm run dev                       # Vite dev server on :5173, proxies /api to :8000
+npm run dev                    # Vite on :5173, proxies /api → :8000
 ```
 
 ---
 
 ## Environment Variables
 
+See `api/.env.example` for the full annotated list. Key variables:
+
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `SECRET_KEY` | — | Django secret key (required) |
 | `DATABASE_URL` | `mongodb://root:1234@localhost:27017/radar-live?authSource=admin` | MongoDB URI |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URI |
-| `DOMAIN` | `localhost` | Public domain name (nginx + Let's Encrypt) |
+| `DOMAIN` | `localhost` | Public domain name |
 | `ENV_NAME` | `development` | Shown in `X-App-Version` header |
-| `TASK_QUEUE_ENABLED` | `false` | Enable RQ task enqueueing |
-| `WORKER_COUNT` | `4` | Number of RQ worker processes |
-| `FETCH_INTERVAL_MINUTES` | `10` | Fetch schedule interval |
-| `PROCESS_INTERVAL_MINUTES` | `10` | NLP pipeline schedule interval |
-| `AGGREGATE_INTERVAL_MINUTES` | `10` | Event aggregation schedule interval |
-| `DEFAULT_FROM_EMAIL` | — | Verified sender address |
-| `EMAIL_PROVIDER` | `ses` | `ses` or `smtp` |
-| `AWS_SES_ACCESS_KEY_ID` | — | AWS key with `ses:SendRawEmail` |
+| `TASK_QUEUE_ENABLED` | `false` | Enable RQ task enqueueing (set `true` in prod) |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server (default LLM backend) |
+| `GROQ_API_KEYS` | — | Groq API key(s), comma-separated (free cloud fallback) |
+| `CEREBRAS_API_KEYS` | — | Cerebras API key(s), comma-separated (free cloud fallback) |
+| `OPENROUTER_API_KEYS` | — | OpenRouter key(s) (last-resort fallback) |
+| `NEWSLETTER_ENABLED` | `true` | Enable newsletter generation + sending |
+| `FORECAST_ENABLED` | `true` | Enable forecasting pipeline |
+| `EMAIL_PROVIDER` | `smtp` | `smtp` or `ses` |
+| `DEFAULT_FROM_EMAIL` | `newsletter@localhost` | Verified sender address |
+| `AWS_SES_ACCESS_KEY_ID` | — | AWS key with `ses:SendRawEmail` (when `EMAIL_PROVIDER=ses`) |
 | `AWS_SES_SECRET_KEY` | — | AWS secret key |
-| `AWS_SES_REGION` | `eu-north-1` | SES region |
+| `AWS_SES_REGION` | `us-east-1` | SES region |
 | `NEWSLETTER_BASE_URL` | `http://localhost` | Base URL for unsubscribe/confirm links |
-
-Example `.env` for local dev:
-
-```bash
-SECRET_KEY=your-secret-key-here-make-it-long
-DATABASE_URL=mongodb://root:1234@localhost:27017/radar-live?authSource=admin
-REDIS_URL=redis://localhost:6379/0
-ENV_NAME=development
-TASK_QUEUE_ENABLED=true
-EMAIL_PROVIDER=smtp
-```
+| `CLOUDFLARE_TUNNEL_TOKEN` | — | Cloudflare Tunnel token (prod) |
 
 ---
 
 ## Pipeline
 
 ```text
-fetch_data        (every 10m, timeout 30m)
+fetch            (every 10m)
   └─ feedparser (RSS) / requests → Article objects in MongoDB
 
-process_articles  (every 10m, timeout 30m)
+process          (every 4h, fan-out to heavy workers)
   └─ LLM analyzer — entities, sentiment, category/sub-category, city/country
   └─ FinBERT — financial sentiment [-1, 1]
-  └─ geonamescache — city/country → coordinates
-  └─ → Article NLP fields written back to MongoDB
+  └─ geonamescache — city/country → lat/lng
 
-aggregate_events  (every 10m, timeout 30m)
-  └─ Groups articles by (location, category, time window) → Event objects
+aggregate        (every 4h, 30m after process)
+  └─ Groups articles by (location, category, day) + semantic clustering → Event objects
 
-generate_newsletter  (daily, timeout 30m)
-  └─ Top events for the day → LLM → prose briefing stored as DailyNewsletter
+tag + route      (every 6h)
+  └─ LLM topic matcher → Event.topic_slugs
+  └─ Deterministic routing → Event.affected_indicators (market symbols)
 
-send_newsletter   (daily, timeout 30m)
-  └─ DailyNewsletter → per-subscriber HTML email via AWS SES
+forecast         (daily)
+  └─ LightGBM trained on event features + price history → directional predictions
+
+newsletter       (daily)
+  └─ Top events → LLM prose → DailyNewsletter → subscriber emails
 ```
 
 ---
@@ -144,30 +124,38 @@ send_newsletter   (daily, timeout 30m)
 ## Project Structure
 
 ```text
-backend/
-  app/           WSGI/ASGI entry, root URLs, middleware, auth backend
-  core/          Article, Event, Source models + pipeline tasks + management commands
+api/
+  app/           ASGI entry, root URLs, middleware, auth backend
+  core/          Article, Event, Source, Topic models + admin dashboard
   accounts/      Custom User model (email-based auth)
-  api/           DRF serializers + APIView endpoints (events, sources, newsletter)
+  api/           DRF serializers + APIView endpoints
   newsletter/    Subscriber + DailyNewsletter models, subscribe/confirm/unsubscribe views
+  misc/          Static pages, sitemap
   services/
-    cleaning/    ArticleCleaner — LLM entities/sentiment/category + FinBERT
-    location/    Geocoder — Nominatim via geopy, Django cache
-    data/        Ingestion — RSS (feedparser) + HTTP
-    email/       Email service — AWS SES (prod) or SMTP (dev)
-    llm/         LLM service — newsletter generation
+    data/        RSS + HTTP ingestion
+    processing/  ArticleCleaner — LLM analyzer, FinBERT, clustering
+    forecasting/ LightGBM model, features, backtest, event router
+    topics/      Topic scraper, LLM matcher, dedup
+    routing/     LLM event → symbol router
+    streams/     Price, NOTAM, earthquake, forex live feeds
+    newsletter/  Newsletter generator
+    email/       SES / SMTP email service
+    llm/         LLM provider abstraction (Ollama, Groq, Cerebras, OpenRouter)
+    workflow/    Pipeline orchestration (articles, events, topics)
+    tasks.py     RQ task definitions
+    queue.py     Enqueue helpers + task run tracking
+  scripts/       One-off / startup scripts (init_models.py — preloads ML weights)
+  tests/         E2E and diagnostic commands (e2e_full, e2e_pipeline, test_llm, …)
   settings/      Django configuration
-  worker.py      RQ workers + scheduler + health check
-  templates/
-    newsletter/  email.html, email.txt, confirm_email.html, confirm_email.txt
-frontend/
+  templates/     Email + admin HTML templates
+  crontab        Periodic schedule (run by supercronic inside the api container)
+  release.sh     Container entrypoint: collectstatic → migrate → supercronic → uvicorn
+ui/
   src/
-    pages/       Page components (_layout.tsx, index, newsletter, about, privacy, terms)
-    components/  App.tsx, MapView.jsx, EventList.jsx, EventCard.jsx, NewsletterList.tsx, NewsletterView.tsx
-    api/         events.js, newsletter.ts — fetch helpers
-    types.ts     Shared TypeScript types
-  vite.config.js Dev proxy /api → localhost:8000
+    pages/       Page components
+    components/  Map, event list, newsletter views
+    api/         Fetch helpers
 nginx/
-  templates/default.conf.template  Reverse proxy config (envsubst)
-init-letsencrypt.sh  One-time Let's Encrypt bootstrap script
+  templates/     nginx reverse proxy config
+docker-compose.yml
 ```

@@ -8,7 +8,6 @@ All accessors degrade gracefully: if the ``MarketSymbol`` table is empty or the 
 is unavailable (e.g. during a migration or in a unit test with no Mongo), they fall
 back to the historical hardcoded defaults so nothing breaks.
 """
-from __future__ import annotations
 
 import logging
 

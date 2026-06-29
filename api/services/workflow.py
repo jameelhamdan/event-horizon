@@ -6,7 +6,6 @@ The management commands (fetch_data, process_articles, aggregate_events) are
 thin wrappers that parse CLI args and call or enqueue these functions.
 """
 import logging
-import os
 import re
 import requests
 from collections import defaultdict
@@ -116,7 +115,7 @@ class Workflow:
         import uuid as _uuid
         from core.models import Article, ArticleDocument
         from services.processing.cleaner import ArticleCleaner
-        from services.stages import mark_stage
+        from services.utils import mark_stage
 
         if ids is not None:
             uuids = [i if isinstance(i, _uuid.UUID) else _uuid.UUID(str(i)) for i in ids]
@@ -584,7 +583,7 @@ class Workflow:
         """
         from core.models import Topic, Event
 
-        stale_days = stale_days or int(os.getenv('TOPIC_STALE_DAYS', '90'))
+        stale_days = stale_days or 90
         now = timezone.now()
         cutoff = now - timedelta(days=stale_days)
 
@@ -677,7 +676,7 @@ class Workflow:
         Records the per-record 'tag' stage. Returns the number of events processed."""
         from services.topics.matcher import LLMTopicMatcher
         from services.forecasting.routing import route_event_to_weighted_symbols
-        from services.stages import mark_stage
+        from services.utils import mark_stage
 
         llm_matcher = LLMTopicMatcher()
         # Use all active topics — named conflicts span years so temporal filtering
@@ -811,7 +810,7 @@ class Workflow:
         from collections import Counter
         from core.models import Event
 
-        THRESHOLD = float(os.getenv('TOP_LEVEL_SCORE_THRESHOLD', '3.0'))
+        THRESHOLD = 3.0
 
         now = timezone.now()
         window_7d = now - timedelta(hours=168)
@@ -955,8 +954,8 @@ class Workflow:
         from services.queue import enqueue
         from services.tasks import retroactive_tag_topic_task
 
-        DISCOVERY_MIN_UNTAGGED = int(os.getenv('DISCOVERY_MIN_UNTAGGED_EVENTS', '3'))
-        DISCOVERY_MAX_CLUSTERS = int(os.getenv('DISCOVERY_MAX_CLUSTERS', '5'))
+        DISCOVERY_MIN_UNTAGGED = 3
+        DISCOVERY_MAX_CLUSTERS = 5
 
         lookback = timezone.now() - timedelta(hours=hours)
         untagged = list(

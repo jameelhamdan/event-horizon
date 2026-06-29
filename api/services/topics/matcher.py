@@ -7,7 +7,7 @@ LLMTopicMatcher — LLM-based batch matching (semantic, used for regular tagging
 import json
 import logging
 
-from services.text_utils import tokenize as _tokenize
+from services.utils import tokenize as _tokenize
 
 logger = logging.getLogger(__name__)
 

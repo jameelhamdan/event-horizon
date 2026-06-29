@@ -33,8 +33,7 @@ import requests
 from django.conf import settings
 from django.utils.text import slugify
 from scrapling.parser import Selector
-
-from services.text_utils import tokenize as _tokenize
+from services.utils import tokenize as _tokenize
 from services.topics.types import TopicDict
 
 logger = logging.getLogger(__name__)

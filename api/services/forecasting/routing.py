@@ -14,7 +14,6 @@ Two entry points:
   * ``route_event_to_weighted_symbols(...)`` → list[{'symbol', 'weight'}]  (new)
 """
 
-from __future__ import annotations
 
 # ── Indicator panel ───────────────────────────────────────────────────────────
 # The forecasting target panel is now DB-driven (MarketSymbol.is_forecast). The

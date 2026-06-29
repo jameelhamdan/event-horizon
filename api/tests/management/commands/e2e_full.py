@@ -13,12 +13,12 @@ What it exercises (with real data):
   5. Aggregate events       — real semantic clustering
   6. Tag topics (LLM)       — real LLM matcher + stage_status
   7. Route events (rules)   — deterministic router → affected_indicators + stage_status
-  8. Pipeline coverage      — Workflow.pipeline_coverage() shape
+  8. Pipeline coverage      — pipeline_coverage() shape
   9. Forecasting            — real price backfill → train → run → score
  10. REST API               — /api/symbols, /api/events, /api/forecasts, /api/prices (Django test client)
  11. Ops dashboard          — throughput / coverage / forecast-status helpers
  12. Bootstrap guard        — idempotency of bootstrap_initial_data_task
- 13. Scoring helpers        — text_utils tokenize/jaccard, strip_code_fences, ArticleImportanceScorer,
+ 13. Scoring helpers        — utils tokenize/jaccard, strip_code_fences, ArticleImportanceScorer,
                              model fields (Article.importance_score, Source.weight), title dedup
 
 Fan-out runs synchronously (this command forces ``TASK_QUEUE_ENABLED=False``) so the
@@ -96,7 +96,6 @@ class Command(BaseCommand):
 
     def handle(self, *args, **opts):
         from core import models as core_models
-        from services.workflow import Workflow
 
         c = _Checks(self.stdout, self.style)
         report: dict = {'started_at': datetime.now(dt_timezone.utc).isoformat(),
@@ -207,7 +206,7 @@ class Command(BaseCommand):
     def _stage_tracking_and_helpers(self, c):
         self.stdout.write('→ Stage 2: queue & helpers')
         from services.queue import enqueue
-        from services.stages import mark_stage
+        from services.utils import mark_stage
 
         # Verify enqueue() returns the function's value when TASK_QUEUE_ENABLED=False
         result = enqueue(lambda n: n, 7)
@@ -358,9 +357,9 @@ class Command(BaseCommand):
 
     def _stage_coverage(self, c):
         self.stdout.write('→ Stage 8: pipeline coverage')
-        from services.workflow import Workflow
+        from services.workflow import pipeline_coverage
         try:
-            cov = Workflow.pipeline_coverage()
+            cov = pipeline_coverage()
         except Exception as exc:  # noqa: BLE001
             c.hard('coverage.runs', False, str(exc))
             return
@@ -512,22 +511,22 @@ class Command(BaseCommand):
     def _stage_scoring_helpers(self, c):
         self.stdout.write('→ Stage 13: scoring helpers & text utilities')
 
-        # ── text_utils ─────────────────────────────────────────────────────
-        from services.text_utils import tokenize, jaccard, STOP_WORDS
+        # ── utils ─────────────────────────────────────────────────────
+        from services.utils import tokenize, jaccard, STOP_WORDS
 
         a = tokenize('Ukraine ceasefire deal signed')
-        c.hard('text_utils.tokenize_works', 'ukraine' in a and 'ceasefire' in a,
+        c.hard('utils.tokenize_works', 'ukraine' in a and 'ceasefire' in a,
                f'tokens={sorted(a)}')
-        c.hard('text_utils.tokenize_stopwords', 'the' not in a and 'and' not in a,
+        c.hard('utils.tokenize_stopwords', 'the' not in a and 'and' not in a,
                'stop words not filtered')
-        c.hard('text_utils.tokenize_short_tokens_dropped', 'a' not in a,
+        c.hard('utils.tokenize_short_tokens_dropped', 'a' not in a,
                'single-char token slipped through')
         b = tokenize('Ukraine Russia peace negotiations')
         sim = jaccard(a, b)
-        c.hard('text_utils.jaccard_positive', sim > 0.0, f'{sim:.3f}')
-        c.hard('text_utils.jaccard_self', jaccard(a, a) == 1.0)
-        c.hard('text_utils.jaccard_empty', jaccard(frozenset(), a) == 0.0)
-        c.hard('text_utils.stop_words_nonempty', len(STOP_WORDS) >= 30,
+        c.hard('utils.jaccard_positive', sim > 0.0, f'{sim:.3f}')
+        c.hard('utils.jaccard_self', jaccard(a, a) == 1.0)
+        c.hard('utils.jaccard_empty', jaccard(frozenset(), a) == 0.0)
+        c.hard('utils.stop_words_nonempty', len(STOP_WORDS) >= 30,
                f'{len(STOP_WORDS)} stop words')
 
         # ── strip_code_fences ──────────────────────────────────────────────

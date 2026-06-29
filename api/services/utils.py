@@ -1,5 +1,6 @@
-"""Shared text primitives — tokenization, Jaccard similarity, stop words."""
 import re
+from datetime import datetime, timezone
+
 
 STOP_WORDS: frozenset[str] = frozenset({
     'the', 'a', 'an', 'in', 'on', 'at', 'to', 'of', 'for', 'and', 'or',
@@ -24,3 +25,19 @@ def jaccard(a: frozenset, b: frozenset) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
+
+
+def mark_stage(record, stage: str, ok: bool, error: str | None = None) -> dict:
+    """Record ``stage``'s outcome on ``record.stage_status`` (in place). Returns the dict.
+
+    Shape: {"<stage>": {"ok": bool, "at": "ISO-8601", "error": str | None}, ...}
+    Caller is responsible for including 'stage_status' in save(update_fields=...).
+    """
+    status = dict(getattr(record, 'stage_status', None) or {})
+    status[stage] = {
+        'ok': bool(ok),
+        'at': datetime.now(timezone.utc).isoformat(),
+        'error': (error or None) if not ok else None,
+    }
+    record.stage_status = status
+    return status

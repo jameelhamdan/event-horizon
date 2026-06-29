@@ -120,7 +120,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         from core import models as core_models
-        from services.workflow import Workflow
+        from services.workflow import fetch_articles, process_articles, aggregate_events, tag_events_with_topics
 
         source = options["source"]
         fetch_hours = options["fetch_hours"]
@@ -161,7 +161,7 @@ class Command(BaseCommand):
             start_date = datetime.now(dt_timezone.utc) - timedelta(hours=fetch_hours)
 
             try:
-                fetched = Workflow.fetch_articles(source_code=source, start_date=start_date)
+                fetched = fetch_articles(source_code=source, start_date=start_date)
                 articles_after = core_models.Article.objects.count()
                 # Sample the most-recently-created articles
                 recent_articles = list(
@@ -187,7 +187,7 @@ class Command(BaseCommand):
             unprocessed_before = core_models.Article.objects.filter(processed_on__isnull=True).count()
 
             try:
-                processed = Workflow.process_articles(
+                processed = process_articles(
                     limit=process_limit,
                     source_code=source,
                     reprocess=False,
@@ -218,7 +218,7 @@ class Command(BaseCommand):
             events_before = core_models.Event.objects.count()
 
             try:
-                created, updated = Workflow.aggregate_events(hours=hours, min_articles=1)
+                created, updated = aggregate_events(hours=hours, min_articles=1)
                 events_after = core_models.Event.objects.count()
                 recent_events = list(
                     core_models.Event.objects.filter(started_at__gte=lookback).order_by("-started_at")[:n]
@@ -246,7 +246,7 @@ class Command(BaseCommand):
             topics_available = core_models.Topic.objects.filter(is_active=True).count()
 
             try:
-                tagged = Workflow.tag_events_with_topics(hours=hours, force_retag=False)
+                tagged = tag_events_with_topics(hours=hours, force_retag=False)
                 # Sample events that actually received topic tags
                 tagged_events = list(
                     core_models.Event.objects.filter(

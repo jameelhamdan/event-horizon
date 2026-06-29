@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     'misc',
     'api',
     'services',
+    'tests',
     'django_rq',
 ]
 
@@ -222,20 +223,18 @@ CACHES = {
 
 TASK_QUEUE_ENABLED = config('TASK_QUEUE_ENABLED', default=False, cast=bool)
 
-# ── Feature flags (A4) — let a deployment run a lean core without code changes. ──
-# Each gates both scheduling (api/crontab) and the task function itself.
+# ── Feature flags — gates both scheduling (api/crontab) and the task function itself.
 NEWSLETTER_ENABLED = config('NEWSLETTER_ENABLED', default=True, cast=bool)
 STREAM_PRICES_ENABLED = config('STREAM_PRICES_ENABLED', default=True, cast=bool)
 STREAM_NOTAM_ENABLED = config('STREAM_NOTAM_ENABLED', default=True, cast=bool)
 STREAM_EARTHQUAKE_ENABLED = config('STREAM_EARTHQUAKE_ENABLED', default=True, cast=bool)
 STREAM_FOREX_ENABLED = config('STREAM_FOREX_ENABLED', default=True, cast=bool)
 
-# ── DRF throttling (A3) — the public read API is exposed; rate-limit anon traffic.
-# Backed by the default cache (Redis, below). Tune the rate via env.
+# ── DRF throttling — rate-limit anonymous traffic on the public read API.
 REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_CLASSES': ['rest_framework.throttling.AnonRateThrottle'],
     'DEFAULT_THROTTLE_RATES': {
-        'anon': config('API_THROTTLE_ANON', default='120/min'),
+        'anon': '120/min',
     },
 }
 
@@ -243,71 +242,42 @@ REST_FRAMEWORK = {
 # Available providers: openrouter, ollama.
 
 # OpenRouter — two modes (configure one):
-#   Proxy rotation: set OPENROUTER_PROXY_URLS to a comma-separated list of proxy
-#   base URLs, each pre-authenticated with one OpenRouter key. The client rotates
-#   over these URLs round-robin (no api_key needed).
-#   Direct: set OPENROUTER_API_KEYS (comma-separated keys, rotated round-robin).
+#   Proxy rotation: OPENROUTER_PROXY_URLS = comma-separated pre-authenticated base URLs.
+#   Direct:         OPENROUTER_API_KEYS   = comma-separated keys, rotated round-robin.
 OPENROUTER_PROXY_URLS = config('OPENROUTER_PROXY_URLS', default='')
 OPENROUTER_API_KEYS = config('OPENROUTER_API_KEYS', default='')
 OPENROUTER_MODELS = config('OPENROUTER_MODELS', default='openrouter/free')
-# Network-level HTTP proxies for LLM calls. Format:
-#   http://host:port::api_key,http://host2:port,http://host3:port::api_key3
-# The '::api_key' suffix is optional; proxies without an explicit key draw from
-# OPENROUTER_API_KEYS in round-robin (loosely tied — pool and proxy list may differ
-# in length and are cycled independently before being paired at startup).
+# Network-level HTTP proxies. Format: http://host:port::api_key,http://host2:port
 OPENROUTER_HTTP_PROXIES = config('OPENROUTER_HTTP_PROXIES', default='')
 
-# Open-source proxy pool: auto-fetches free HTTP proxies from GitHub-hosted lists
-# and the ProxyScrape API, validates each candidate against openrouter.ai, then
-# rotates working proxies round-robin. Pool refreshes in the background every
-# OPENROUTER_PROXY_REFRESH_HOURS hours. Takes precedence over OPENROUTER_HTTP_PROXIES.
-OPENROUTER_PROXY_POOL_ENABLED = config('OPENROUTER_PROXY_POOL_ENABLED', default=False, cast=bool)
-# Override default sources (TheSpeedX, ShiftyTR, clarketm, ProxyScrape) with a
-# comma-separated list of raw-text URLs, each returning one "host:port" per line.
-OPENROUTER_PROXY_SOURCES = config('OPENROUTER_PROXY_SOURCES', default='')
-OPENROUTER_PROXY_REFRESH_HOURS = config('OPENROUTER_PROXY_REFRESH_HOURS', default=6, cast=float)
-OPENROUTER_PROXY_VALIDATE_TIMEOUT = config('OPENROUTER_PROXY_VALIDATE_TIMEOUT', default=5, cast=int)
-OPENROUTER_PROXY_MAX_POOL = config('OPENROUTER_PROXY_MAX_POOL', default=100, cast=int)
-
 # ── Article importance scoring ────────────────────────────────────────────────
-# LLM-based 1.0–10.0 significance rating applied hourly (see api/crontab).
-# Low-scoring articles are excluded from the NLP pipeline
-# (ARTICLE_MIN_IMPORTANCE_TO_PROCESS) and deleted after a grace period
-# (ARTICLE_MIN_IMPORTANCE + ARTICLE_CLEANUP_GRACE_HOURS).
+# LLM-based 1.0–10.0 significance rating. Low-scoring articles are skipped by the
+# NLP pipeline and deleted after a grace period.
 ARTICLE_IMPORTANCE_SCORING_ENABLED = config('ARTICLE_IMPORTANCE_SCORING_ENABLED', default=True, cast=bool)
-# Articles below this score are skipped by process_articles_task.
-ARTICLE_MIN_IMPORTANCE_TO_PROCESS = config('ARTICLE_MIN_IMPORTANCE_TO_PROCESS', default=4.0, cast=float)
-# Articles below this score are deleted by cleanup_low_importance_articles_task.
-ARTICLE_MIN_IMPORTANCE = config('ARTICLE_MIN_IMPORTANCE', default=4.0, cast=float)
-# Grace window before low-importance articles are eligible for deletion.
-ARTICLE_CLEANUP_GRACE_HOURS = config('ARTICLE_CLEANUP_GRACE_HOURS', default=48, cast=int)
-# Processed+unlocated articles older than this are pruned by prune_stale_articles_task.
-ARTICLE_STALE_PROCESSED_DAYS = config('ARTICLE_STALE_PROCESSED_DAYS', default=7, cast=int)
-# Fetch-time filters applied to every RSS article (zero LLM cost).
-ARTICLE_MIN_WORD_COUNT = config('ARTICLE_MIN_WORD_COUNT', default=30, cast=int)
-# Near-duplicate title dedup using Jaccard token overlap (Redis cache, TTL=ARTICLE_DEDUP_HOURS).
-ARTICLE_DEDUP_TITLE_ENABLED = config('ARTICLE_DEDUP_TITLE_ENABLED', default=True, cast=bool)
-ARTICLE_DEDUP_JACCARD_THRESHOLD = config('ARTICLE_DEDUP_JACCARD_THRESHOLD', default=0.75, cast=float)
-ARTICLE_DEDUP_HOURS = config('ARTICLE_DEDUP_HOURS', default=24, cast=int)
+ARTICLE_MIN_IMPORTANCE_TO_PROCESS = 4.0   # below this → skip process_articles_task
+ARTICLE_MIN_IMPORTANCE = 4.0              # below this → eligible for deletion
+ARTICLE_CLEANUP_GRACE_HOURS = 48
+ARTICLE_STALE_PROCESSED_DAYS = 7
+ARTICLE_MIN_WORD_COUNT = 30               # fetch-time filter, zero LLM cost
+ARTICLE_DEDUP_TITLE_ENABLED = True        # Jaccard dedup on titles (Redis-backed)
+ARTICLE_DEDUP_JACCARD_THRESHOLD = 0.75
+ARTICLE_DEDUP_HOURS = 24
 
 # Ollama (self-hosted, no key) — three model tiers for different task complexities.
 OLLAMA_BASE_URL = config('OLLAMA_BASE_URL', default='http://localhost:11434')
-OLLAMA_MODEL_SMALL  = config('OLLAMA_MODEL_SMALL',  default='qwen3:4b')
-OLLAMA_MODEL_MEDIUM = config('OLLAMA_MODEL_MEDIUM', default='qwen3:8b')
-OLLAMA_MODEL_LARGE  = config('OLLAMA_MODEL_LARGE',  default='qwen3:14b')
-OLLAMA_MODEL = config('OLLAMA_MODEL', default=OLLAMA_MODEL_LARGE)  # backward-compat alias
+OLLAMA_MODEL_SMALL  = 'qwen3:4b'
+OLLAMA_MODEL_MEDIUM = 'qwen3:8b'
+OLLAMA_MODEL_LARGE  = 'qwen3:14b'
 
 # Groq — free tier, OpenAI-compatible (https://console.groq.com).
 GROQ_API_KEYS = config('GROQ_API_KEYS', default='')
-GROQ_MODEL = config('GROQ_MODEL', default='llama-3.1-8b-instant')
+GROQ_MODEL = 'llama-3.1-8b-instant'
 
 # Cerebras — free tier, OpenAI-compatible (https://cloud.cerebras.ai).
 CEREBRAS_API_KEYS = config('CEREBRAS_API_KEYS', default='')
-CEREBRAS_MODEL = config('CEREBRAS_MODEL', default='llama3.1-8b')
+CEREBRAS_MODEL = 'llama3.1-8b'
 
-# Per-request LLM timeout (seconds) — applies to both OpenRouter and Ollama clients.
-# Generous so slow local models / busy free-tier providers aren't cut off mid-generation.
-LLM_TIMEOUT_SECONDS = config('LLM_TIMEOUT_SECONDS', default=300, cast=int)
+LLM_TIMEOUT_SECONDS = 300
 
 # Routing: role -> provider name OR ordered fallback list (tried in order on failure).
 # Unconfigured providers are silently skipped; unknown roles fall back to 'default'.
@@ -327,18 +297,14 @@ LLM_ROUTES = {
 
 # ── Forecasting (event-fused symbol prediction) ───────────────────────────────
 FORECAST_ENABLED = config('FORECAST_ENABLED', default=True, cast=bool)
-FORECAST_MODEL_DIR = config('FORECAST_MODEL_DIR', default=str(BASE_DIR / 'forecast_models'))
-# Horizons (trading days) trained + served. Comma-separated.
-FORECAST_HORIZONS_DAYS = [
-    int(h) for h in config('FORECAST_HORIZONS_DAYS', default='1,5').split(',') if h.strip()
-]
-FORECAST_TRAIN_WINDOW_DAYS = config('FORECAST_TRAIN_WINDOW_DAYS', default=540, cast=int)
-# Live router source: 'llm' (LLMEventRouter, rules fallback) or 'rules' (deterministic only).
-FORECAST_ROUTER = config('FORECAST_ROUTER', default='llm')
+FORECAST_MODEL_DIR = str(BASE_DIR / 'forecast_models')
+FORECAST_HORIZONS_DAYS = [1, 5]    # trading-day horizons trained + served
+FORECAST_TRAIN_WINDOW_DAYS = 540
+FORECAST_ROUTER = 'llm'            # 'llm' = LLMEventRouter w/ rules fallback; 'rules' = deterministic
 
 # ── RQ / django-rq ────────────────────────────────────────────────────────────
 _REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')
-_JOB_TIMEOUT = int(config('JOB_TIMEOUT_SECONDS', default=1800))
+_JOB_TIMEOUT = 1800
 
 RQ_QUEUES = {
     # Light queue — fast I/O tasks (fetchers, stream collectors)

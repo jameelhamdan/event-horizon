@@ -7,7 +7,6 @@ is the supervised truth, computed from future data on purpose (not leakage).
 
 Pure helpers; pandas/numpy are imported lazily so importing this module never hard-fails.
 """
-from __future__ import annotations
 
 import bisect
 import logging

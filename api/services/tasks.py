@@ -4,28 +4,34 @@ These are plain Python functions enqueued via django-rq (services.queue.enqueue)
 """
 
 import logging
-import os
 from datetime import datetime, timedelta, timezone as dt_timezone
 
-from services.workflow import Workflow
+from services.workflow import (
+    fetch_articles,
+    process_articles,
+    aggregate_events,
+    tag_events_by_ids,
+    refresh_topics,
+    retroactive_tag_topic,
+    discover_topics_from_events,
+    _needs_tagging,
+)
 
 logger = logging.getLogger(__name__)
 
-JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "1800"))
-DEFAULT_FETCH_MINUTES = int(os.getenv("FETCH_INTERVAL_MINUTES", "10")) * 2
-DEFAULT_PROCESS_LIMIT = int(os.getenv("PROCESS_LIMIT", "1000"))
-DEFAULT_AGGREGATE_HOURS = int(os.getenv("AGGREGATE_HOURS", "24"))
-DEFAULT_AGGREGATE_MIN_ARTICLES = int(os.getenv("AGGREGATE_MIN_ARTICLES", "1"))
+DEFAULT_FETCH_MINUTES = 20          # look-back window for fetch tasks (2× interval)
+DEFAULT_PROCESS_LIMIT = 1000
+DEFAULT_AGGREGATE_HOURS = 24
+DEFAULT_AGGREGATE_MIN_ARTICLES = 1
 
-# Fan-out tuning (WA3) — dispatchers cap how many records they enqueue per tick so a
-# cold start doesn't flood the queue; chunk size amortizes enqueue overhead.
-PROCESS_CHUNK_SIZE = int(os.getenv("PROCESS_CHUNK_SIZE", "1"))
-PROCESS_DISPATCH_LIMIT = int(os.getenv("PROCESS_DISPATCH_LIMIT", "500"))
-TAG_DISPATCH_LIMIT = int(os.getenv("TAG_DISPATCH_LIMIT", "500"))
-ROUTE_DISPATCH_LIMIT = int(os.getenv("ROUTE_DISPATCH_LIMIT", "500"))
-TAG_CHUNK_SIZE = 10  # one LLM call per chunk (LLMTopicMatcher.BATCH_SIZE)
+# Fan-out tuning — dispatchers cap records enqueued per tick; chunk size amortises overhead.
+PROCESS_CHUNK_SIZE = 1
+PROCESS_DISPATCH_LIMIT = 500
+TAG_DISPATCH_LIMIT = 500
+ROUTE_DISPATCH_LIMIT = 500
+TAG_CHUNK_SIZE = 10     # one LLM call per chunk (LLMTopicMatcher.BATCH_SIZE)
 ROUTE_CHUNK_SIZE = 10
-BOOTSTRAP_ARTICLE_YEARS = int(os.getenv("BOOTSTRAP_ARTICLE_YEARS", "1"))
+BOOTSTRAP_ARTICLE_YEARS = 1
 
 
 # ── Text pipeline ─────────────────────────────────────────────────────────────
@@ -34,7 +40,7 @@ def aggregate_events_task(
     hours: int = DEFAULT_AGGREGATE_HOURS,
     min_articles: int = DEFAULT_AGGREGATE_MIN_ARTICLES,
 ) -> tuple[int, int]:
-    result = Workflow.aggregate_events(hours=hours, min_articles=min_articles)
+    result = aggregate_events(hours=hours, min_articles=min_articles)
     from services.queue import enqueue
     enqueue(dispatch_tag_topics_task, hours, queue='default')
     return result
@@ -50,7 +56,7 @@ def fetch_source_task(source_code: str, start_date: datetime | None = None) -> i
     now = datetime.now(dt_timezone.utc)
     if start_date is None:
         start_date = now - timedelta(minutes=DEFAULT_FETCH_MINUTES)
-    return Workflow.fetch_articles(source_code, start_date)
+    return fetch_articles(source_code, start_date)
 
 
 def dispatch_fetch_task(start_date: datetime | None = None) -> int:
@@ -70,12 +76,12 @@ def dispatch_fetch_task(start_date: datetime | None = None) -> int:
 
 def process_articles_chunk_task(ids: list, only_failed: bool = False) -> int:
     """Process a chunk of articles by id (idempotent)."""
-    return Workflow.process_articles(ids=ids, only_failed=only_failed)
+    return process_articles(ids=ids, only_failed=only_failed)
 
 
 def process_article_task(article_id, only_failed: bool = False) -> int:
     """Process a single article by id (idempotent)."""
-    return Workflow.process_articles(ids=[article_id], only_failed=only_failed)
+    return process_articles(ids=[article_id], only_failed=only_failed)
 
 
 def dispatch_process_articles_task(limit: int | None = None, only_failed: bool = False, chunk_size: int | None = None) -> int:
@@ -90,13 +96,9 @@ def dispatch_process_articles_task(limit: int | None = None, only_failed: bool =
         ids = [a.id for a in qs.only('id', 'extra_data') if not (a.extra_data or {}).get('geo_failed')][:limit]
     else:
         from django.conf import settings as _s
+        from services.workflow.articles import _apply_min_score_filter
         qs = core_models.Article.objects.filter(processed_on__isnull=True)
-        min_score = getattr(_s, 'ARTICLE_MIN_IMPORTANCE_TO_PROCESS', 0.0)
-        if min_score > 0:
-            qs = qs.exclude(
-                importance_score__isnull=False,
-                importance_score__lt=min_score,
-            )
+        qs = _apply_min_score_filter(qs, _s.ARTICLE_MIN_IMPORTANCE_TO_PROCESS)
         ids = list(qs.order_by('-importance_score').values_list('id', flat=True)[:limit])
     if not ids:
         return 0
@@ -114,7 +116,7 @@ def dispatch_process_articles_task(limit: int | None = None, only_failed: bool =
 
 def tag_events_chunk_task(event_ids: list) -> int:
     """Tag a chunk of events by id (one LLM call). Idempotent."""
-    return Workflow.tag_events_by_ids(event_ids)
+    return tag_events_by_ids(event_ids)
 
 
 def dispatch_tag_topics_task(hours: int = DEFAULT_AGGREGATE_HOURS, force_retag: bool = False,
@@ -122,14 +124,14 @@ def dispatch_tag_topics_task(hours: int = DEFAULT_AGGREGATE_HOURS, force_retag: 
     """Select events needing tags and fan them out in chunks of 10. Returns jobs enqueued."""
     from core import models as core_models
     from services.queue import enqueue, make_retry
-    from services.workflow import _needs_tagging
-
     limit = limit or TAG_DISPATCH_LIMIT
     lookback = datetime.now(dt_timezone.utc) - timedelta(hours=hours)
-    events = list(core_models.Event.objects.filter(started_at__gte=lookback))
+    qs = core_models.Event.objects.filter(started_at__gte=lookback).only('pk', 'topics', 'topics_source')
     if not force_retag:
-        events = [e for e in events if _needs_tagging(e.topics) or e.topics_source == 'keyword']
-    ids = [e.pk for e in events][:limit]
+        events = [e for e in qs if _needs_tagging(e.topics) or e.topics_source == 'keyword']
+        ids = [e.pk for e in events[:limit]]
+    else:
+        ids = list(qs.values_list('pk', flat=True)[:limit])
     if not ids:
         return 0
     retry = make_retry()
@@ -215,15 +217,15 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
 # ── Topic tasks ────────────────────────────────────────────────────────────────
 
 def refresh_topics_task() -> int:
-    return Workflow.refresh_topics()
+    return refresh_topics()
 
 
 def retroactive_tag_topic_task(slug: str, lookback_hours: int = 72) -> int:
-    return Workflow.retroactive_tag_topic(slug=slug, lookback_hours=lookback_hours)
+    return retroactive_tag_topic(slug=slug, lookback_hours=lookback_hours)
 
 
 def discover_topics_task(hours: int = 6) -> int:
-    return Workflow.discover_topics_from_events(hours=hours)
+    return discover_topics_from_events(hours=hours)
 
 
 # ── Stream tasks ───────────────────────────────────────────────────────────────
@@ -287,14 +289,11 @@ def pipeline_health_task() -> dict:
         if not ok:
             log.warning('[health] %s stale — latest=%s (threshold=%dm)', label, latest, minutes)
 
-    _check_stale(core_models.Article, 'created_on',
-                 int(os.getenv('HEALTH_ARTICLE_STALE_MIN', '180')), 'articles')
+    _check_stale(core_models.Article, 'created_on', 180, 'articles')
     if settings.STREAM_PRICES_ENABLED:
-        _check_stale(core_models.PriceTick, 'occurred_at',
-                     int(os.getenv('HEALTH_PRICE_STALE_MIN', '60')), 'prices')
+        _check_stale(core_models.PriceTick, 'occurred_at', 60, 'prices')
     if settings.STREAM_EARTHQUAKE_ENABLED:
-        _check_stale(core_models.EarthquakeRecord, 'occurred_at',
-                     int(os.getenv('HEALTH_QUAKE_STALE_MIN', '360')), 'earthquakes')
+        _check_stale(core_models.EarthquakeRecord, 'occurred_at', 360, 'earthquakes')
 
     # A5: Wikipedia is the only topic source — zero current topics ⇒ likely broken.
     current_topics = core_models.Topic.objects.filter(is_current=True).count()
@@ -579,7 +578,7 @@ def score_articles_task(hours: int = 2, article_ids: list | None = None) -> int:
     hours: when article_ids is None, score rows created in this window.
     """
     from django.conf import settings
-    if not getattr(settings, 'ARTICLE_IMPORTANCE_SCORING_ENABLED', True):
+    if not settings.ARTICLE_IMPORTANCE_SCORING_ENABLED:
         return 0
     from services.scoring import score_unscored_articles
     return score_unscored_articles(hours=hours, article_ids=article_ids)
@@ -593,8 +592,8 @@ def cleanup_low_importance_articles_task() -> int:
     from django.conf import settings
     from core import models as core_models
 
-    min_score   = getattr(settings, 'ARTICLE_MIN_IMPORTANCE', 4.0)
-    grace_hours = getattr(settings, 'ARTICLE_CLEANUP_GRACE_HOURS', 48)
+    min_score   = settings.ARTICLE_MIN_IMPORTANCE
+    grace_hours = settings.ARTICLE_CLEANUP_GRACE_HOURS
     cutoff      = datetime.now(dt_timezone.utc) - timedelta(hours=grace_hours)
 
     deleted, _ = core_models.Article.objects.filter(
@@ -615,7 +614,7 @@ def prune_stale_articles_task() -> int:
     from django.conf import settings
     from core import models as core_models
 
-    stale_days = getattr(settings, 'ARTICLE_STALE_PROCESSED_DAYS', 7)
+    stale_days = settings.ARTICLE_STALE_PROCESSED_DAYS
     cutoff     = datetime.now(dt_timezone.utc) - timedelta(days=stale_days)
 
     candidates = list(
@@ -698,17 +697,36 @@ def score_forecasts_task() -> int:
     """Fill realized outcomes for forecasts whose horizon has elapsed."""
     from core import models as core_models
 
-    pending = core_models.Forecast.objects.filter(realized_direction__isnull=True)
+    pending = list(core_models.Forecast.objects.filter(realized_direction__isnull=True))
+    if not pending:
+        return 0
+
     now = datetime.now(dt_timezone.utc)
-    scored = 0
+
+    # Batch PriceBar lookups by symbol to avoid one query per forecast.
+    earliest_by_symbol: dict[str, datetime] = {}
     for f in pending:
         if f.current_value is None or f.current_value == 0:
             continue
-        future = list(
+        prev = earliest_by_symbol.get(f.symbol)
+        if prev is None or f.as_of_date < prev:
+            earliest_by_symbol[f.symbol] = f.as_of_date
+
+    # {symbol: [(date, close), ...]} sorted ascending — one query per symbol.
+    bars_by_symbol: dict[str, list[tuple]] = {}
+    for symbol, earliest in earliest_by_symbol.items():
+        bars_by_symbol[symbol] = list(
             core_models.PriceBar.objects.filter(
-                symbol=f.symbol, interval='1d', date__gt=f.as_of_date,
-            ).order_by('date').values_list('close', flat=True)[:f.horizon_days]
+                symbol=symbol, interval='1d', date__gt=earliest,
+            ).order_by('date').values_list('date', 'close')
         )
+
+    to_save = []
+    for f in pending:
+        if f.current_value is None or f.current_value == 0:
+            continue
+        bars = bars_by_symbol.get(f.symbol, [])
+        future = [close for date, close in bars if date > f.as_of_date][:f.horizon_days]
         if len(future) < f.horizon_days:
             continue  # horizon not elapsed yet
         ret = future[-1] / f.current_value - 1
@@ -717,8 +735,10 @@ def score_forecasts_task() -> int:
         pred_up = f.proba_up > 0.5
         f.is_correct = (pred_up and ret > 0) or (not pred_up and ret <= 0)
         f.scored_at = now
-        f.save(update_fields=[
-            'realized_change_pct', 'realized_direction', 'is_correct', 'scored_at',
-        ])
-        scored += 1
-    return scored
+        to_save.append(f)
+
+    if to_save:
+        core_models.Forecast.objects.bulk_update(
+            to_save, ['realized_change_pct', 'realized_direction', 'is_correct', 'scored_at'],
+        )
+    return len(to_save)

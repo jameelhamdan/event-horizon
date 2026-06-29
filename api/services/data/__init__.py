@@ -7,7 +7,7 @@ from django.core.cache import cache
 from django.utils import timezone
 
 import core.models
-from services.text_utils import tokenize as _tokenize_title, jaccard as _jaccard
+from services.utils import tokenize as _tokenize_title, jaccard as _jaccard
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,3 @@ class DataService:
                 created += 1
                 logger.info('[fetch] %s: %s', self.source.code, datum['title'][:80])
         return created
-
-    def refresh_latest_data(self):
-        start_date = timezone.now() - datetime.timedelta(hours=1)
-        self.refresh_until(start_date)

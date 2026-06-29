@@ -1,5 +1,4 @@
 """Parse ``api/crontab`` for the admin operations dashboard."""
-from __future__ import annotations
 
 import os
 import re

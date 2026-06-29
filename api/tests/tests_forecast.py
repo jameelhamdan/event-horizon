@@ -10,7 +10,6 @@ Run standalone (no Mongo needed):
 
 Returns a non-zero exit code if any check fails.
 """
-from __future__ import annotations
 
 import sys
 from datetime import datetime, timedelta, timezone

@@ -28,6 +28,6 @@ class Command(BaseTaskCommand):
             self.stdout.write(self.style.SUCCESS('Enqueued dispatch_tag_topics_task'))
             return
 
-        from services.workflow import Workflow
-        tagged = Workflow.tag_events_with_topics(**task_kwargs)
+        from services.workflow import tag_events_with_topics
+        tagged = tag_events_with_topics(**task_kwargs)
         self.stdout.write(self.style.SUCCESS(f'Tagging complete: {tagged} event(s) processed'))

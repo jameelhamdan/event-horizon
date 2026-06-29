@@ -12,7 +12,6 @@ per horizon. Writes a JSON report. Self-checks the train/predict split for leaka
 NOTE: the backtest trains raw (uncalibrated) LightGBM per origin for speed; the *served* model
 (model.py) is isotonic-calibrated. The reliability curve here therefore reflects the raw model.
 """
-from __future__ import annotations
 
 import json
 import logging

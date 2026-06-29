@@ -36,6 +36,6 @@ class Command(BaseTaskCommand):
             self.stdout.write(self.style.SUCCESS('Enqueued dispatch_process_articles_task'))
             return
 
-        from services.workflow import Workflow
-        count = Workflow.process_articles(**task_kwargs)
+        from services.workflow import process_articles
+        count = process_articles(**task_kwargs)
         self.stdout.write(self.style.SUCCESS(f'Processed {count} articles'))

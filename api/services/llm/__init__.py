@@ -154,13 +154,6 @@ class OpenAICompatLLMService(BaseLLMService):
                 raise LLMError('No content returned in completion response.')
             return content
 
-        except requests.HTTPError as e:
-            logger.error(
-                'LLM HTTP error (status %s) for model %s: %s',
-                e.response.status_code, self._model, e.response.text,
-            )
-            raise LLMError(f'LLM request failed with status {e.response.status_code}') from e
-
         except (KeyError, IndexError, AttributeError, TypeError) as e:
             logger.error('Malformed response from LLM model %s: %s', self._model, str(e))
             raise LLMError('Malformed response from LLM provider') from e
@@ -271,22 +264,22 @@ def _provider_specs() -> dict[str, dict]:
 
     specs: dict[str, dict] = {
         'openrouter': openrouter_spec,
-        'ollama':        {'base_url': settings.OLLAMA_BASE_URL, 'model': settings.OLLAMA_MODEL},
-        'ollama_small':  {'base_url': settings.OLLAMA_BASE_URL, 'model': getattr(settings, 'OLLAMA_MODEL_SMALL', 'qwen3:4b')},
-        'ollama_medium': {'base_url': settings.OLLAMA_BASE_URL, 'model': getattr(settings, 'OLLAMA_MODEL_MEDIUM', 'qwen3:8b')},
-        'ollama_large':  {'base_url': settings.OLLAMA_BASE_URL, 'model': getattr(settings, 'OLLAMA_MODEL_LARGE', 'qwen3:14b')},
+        'ollama':        {'base_url': settings.OLLAMA_BASE_URL, 'model': settings.OLLAMA_MODEL_LARGE},
+        'ollama_small':  {'base_url': settings.OLLAMA_BASE_URL, 'model': settings.OLLAMA_MODEL_SMALL},
+        'ollama_medium': {'base_url': settings.OLLAMA_BASE_URL, 'model': settings.OLLAMA_MODEL_MEDIUM},
+        'ollama_large':  {'base_url': settings.OLLAMA_BASE_URL, 'model': settings.OLLAMA_MODEL_LARGE},
     }
     if groq_keys:
         specs['groq'] = {
             'base_urls': ['https://api.groq.com/openai/v1'],
             'api_keys': groq_keys,
-            'model': getattr(settings, 'GROQ_MODEL', 'llama-3.1-8b-instant'),
+            'model': settings.GROQ_MODEL,
         }
     if cerebras_keys:
         specs['cerebras'] = {
             'base_urls': ['https://api.cerebras.ai/v1'],
             'api_keys': cerebras_keys,
-            'model': getattr(settings, 'CEREBRAS_MODEL', 'llama3.1-8b'),
+            'model': settings.CEREBRAS_MODEL,
         }
     return specs
 

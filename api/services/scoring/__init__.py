@@ -42,7 +42,6 @@ _CORROBORATION_BONUS     = 0.5  # per corroborating source
 _CORROBORATION_MAX       = 2.0  # cap
 
 
-
 class ArticleImportanceScorer:
     BATCH_SIZE    = 30
     DEFAULT_SCORE = 5.0

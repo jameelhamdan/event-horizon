@@ -2,11 +2,10 @@
 
 A single page under ``/admin/dashboard/`` summarizing pipeline operations and
 offering POST actions. Data sources: ``api/crontab`` (upcoming runs), RQ
-StartedJobRegistry (in-flight), ``Workflow.pipeline_coverage()`` (per-stage
+StartedJobRegistry (in-flight), ``pipeline_coverage()`` (per-stage
 gaps), and forecast artifacts/rows. Registered via a ``get_urls`` shim in
 ``core/admin.py``.
 """
-from __future__ import annotations
 
 import logging
 import os
@@ -195,9 +194,9 @@ def dashboard_view(request):
     if request.method == 'POST':
         return _handle_action(request)
 
-    from services.workflow import Workflow
+    from services.workflow import pipeline_coverage
     try:
-        coverage = Workflow.pipeline_coverage()
+        coverage = pipeline_coverage()
     except Exception as exc:  # noqa: BLE001
         logger.exception('[dashboard] coverage failed')
         coverage = []
