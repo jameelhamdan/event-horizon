@@ -33,8 +33,7 @@ ENV PYTHONUNBUFFERED=1
 ENV CUDA_VISIBLE_DEVICES=""
 ENV PYTHONPATH="/app"
 
-RUN mkdir -p /app/.static && chown -R djangouser . \
-    && chmod +x ./release.sh ./manage.py
+RUN mkdir -p /app/.static && chown -R djangouser . && chmod +x ./release.sh ./manage.py
 
 EXPOSE 8000
 
