@@ -8,7 +8,7 @@ import math
 from datetime import datetime, timezone
 
 import requests
-from django.conf import settings
+
 from django.utils import timezone as dj_timezone
 
 from .base import BaseStream, redis_publish
@@ -21,7 +21,7 @@ NOTAM_PARAMS = {
     'bbox': '-180,-90,180,90',  # global
     'featureType': 'notam',
 }
-HEADERS = {'User-Agent': f'Mozilla/5.0 (compatible; {settings.APP_NAME}/1.0)'}
+from services.streams.base import HEADERS_UA as HEADERS
 
 
 def _circle_to_polygon(lat: float, lon: float, radius_nm: float, points: int = 32) -> dict:

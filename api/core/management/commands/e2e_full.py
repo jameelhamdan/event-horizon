@@ -487,7 +487,7 @@ class Command(BaseCommand):
             c.hard('dashboard.forecast_status', isinstance(fs, dict) and 'artifacts' in fs)
             inflight = dash._in_flight()
             c.hard('dashboard.in_flight', isinstance(inflight, list))
-            # _upcoming touches rq-scheduler/Redis — soft (may be unavailable in some envs).
+            # _upcoming reads api/crontab — soft (file may be missing in some envs).
             up = dash._upcoming()
             c.soft('dashboard.upcoming', isinstance(up, list))
         except Exception as exc:  # noqa: BLE001

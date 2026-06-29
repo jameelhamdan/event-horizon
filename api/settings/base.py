@@ -223,7 +223,7 @@ CACHES = {
 TASK_QUEUE_ENABLED = config('TASK_QUEUE_ENABLED', default=False, cast=bool)
 
 # ── Feature flags (A4) — let a deployment run a lean core without code changes. ──
-# Each gates both scheduling (setup_schedule) and the task function itself.
+# Each gates both scheduling (api/crontab) and the task function itself.
 NEWSLETTER_ENABLED = config('NEWSLETTER_ENABLED', default=True, cast=bool)
 STREAM_PRICES_ENABLED = config('STREAM_PRICES_ENABLED', default=True, cast=bool)
 STREAM_NOTAM_ENABLED = config('STREAM_NOTAM_ENABLED', default=True, cast=bool)
@@ -270,9 +270,9 @@ OPENROUTER_PROXY_VALIDATE_TIMEOUT = config('OPENROUTER_PROXY_VALIDATE_TIMEOUT', 
 OPENROUTER_PROXY_MAX_POOL = config('OPENROUTER_PROXY_MAX_POOL', default=100, cast=int)
 
 # ── Article importance scoring ────────────────────────────────────────────────
-# LLM-based 1.0–10.0 significance rating applied to live articles every
-# SCORE_INTERVAL_MINUTES. Low-scoring articles are excluded from the NLP
-# pipeline (ARTICLE_MIN_IMPORTANCE_TO_PROCESS) and deleted after a grace period
+# LLM-based 1.0–10.0 significance rating applied hourly (see api/crontab).
+# Low-scoring articles are excluded from the NLP pipeline
+# (ARTICLE_MIN_IMPORTANCE_TO_PROCESS) and deleted after a grace period
 # (ARTICLE_MIN_IMPORTANCE + ARTICLE_CLEANUP_GRACE_HOURS).
 ARTICLE_IMPORTANCE_SCORING_ENABLED = config('ARTICLE_IMPORTANCE_SCORING_ENABLED', default=True, cast=bool)
 # Articles below this score are skipped by process_articles_task.
@@ -283,8 +283,6 @@ ARTICLE_MIN_IMPORTANCE = config('ARTICLE_MIN_IMPORTANCE', default=4.0, cast=floa
 ARTICLE_CLEANUP_GRACE_HOURS = config('ARTICLE_CLEANUP_GRACE_HOURS', default=48, cast=int)
 # Processed+unlocated articles older than this are pruned by prune_stale_articles_task.
 ARTICLE_STALE_PROCESSED_DAYS = config('ARTICLE_STALE_PROCESSED_DAYS', default=7, cast=int)
-# score_articles_task runs every N minutes (registered in setup_schedule).
-SCORE_INTERVAL_MINUTES = config('SCORE_INTERVAL_MINUTES', default=15, cast=int)
 # Fetch-time filters applied to every RSS article (zero LLM cost).
 ARTICLE_MIN_WORD_COUNT = config('ARTICLE_MIN_WORD_COUNT', default=30, cast=int)
 # Near-duplicate title dedup using Jaccard token overlap (Redis cache, TTL=ARTICLE_DEDUP_HOURS).
@@ -292,32 +290,39 @@ ARTICLE_DEDUP_TITLE_ENABLED = config('ARTICLE_DEDUP_TITLE_ENABLED', default=True
 ARTICLE_DEDUP_JACCARD_THRESHOLD = config('ARTICLE_DEDUP_JACCARD_THRESHOLD', default=0.75, cast=float)
 ARTICLE_DEDUP_HOURS = config('ARTICLE_DEDUP_HOURS', default=24, cast=int)
 
-# Ollama (self-hosted, no key) — local 14B model serving every role.
+# Ollama (self-hosted, no key) — three model tiers for different task complexities.
 OLLAMA_BASE_URL = config('OLLAMA_BASE_URL', default='http://localhost:11434')
-OLLAMA_MODEL = config('OLLAMA_MODEL', default='qwen3:14b')
+OLLAMA_MODEL_SMALL  = config('OLLAMA_MODEL_SMALL',  default='qwen3:4b')
+OLLAMA_MODEL_MEDIUM = config('OLLAMA_MODEL_MEDIUM', default='qwen3:8b')
+OLLAMA_MODEL_LARGE  = config('OLLAMA_MODEL_LARGE',  default='qwen3:14b')
+OLLAMA_MODEL = config('OLLAMA_MODEL', default=OLLAMA_MODEL_LARGE)  # backward-compat alias
+
+# Groq — free tier, OpenAI-compatible (https://console.groq.com).
+GROQ_API_KEYS = config('GROQ_API_KEYS', default='')
+GROQ_MODEL = config('GROQ_MODEL', default='llama-3.1-8b-instant')
+
+# Cerebras — free tier, OpenAI-compatible (https://cloud.cerebras.ai).
+CEREBRAS_API_KEYS = config('CEREBRAS_API_KEYS', default='')
+CEREBRAS_MODEL = config('CEREBRAS_MODEL', default='llama3.1-8b')
 
 # Per-request LLM timeout (seconds) — applies to both OpenRouter and Ollama clients.
 # Generous so slow local models / busy free-tier providers aren't cut off mid-generation.
 LLM_TIMEOUT_SECONDS = config('LLM_TIMEOUT_SECONDS', default=300, cast=int)
 
 # Routing: role -> provider name OR ordered fallback list (tried in order on failure).
-# Unconfigured providers are skipped; unknown roles fall back to 'default'.
+# Unconfigured providers are silently skipped; unknown roles fall back to 'default'.
 #
-# All roles run on the local Ollama 14B model, with OpenRouter as the fallback if
-# Ollama is unreachable or errors. qwen3:14b is strong enough for the quality-
-# sensitive roles (EN+AR translations, newsletter prose) as well as the high-volume
-# structured roles (scoring, topic/event routing).
-_OLLAMA = ['ollama', 'openrouter']
-_OPENROUTER = ['openrouter', 'ollama']
+# Ollama tiers map task complexity to model size (4b/8b/14b).
+# Groq and Cerebras provide free-tier cloud fallback when Ollama is unavailable.
 LLM_ROUTES = {
-    'default': _OLLAMA,
-    'analyzer': _OLLAMA,       # full analysis incl. EN+AR translations (live feed)
-    'analyzer_lite': _OLLAMA,  # English-only analysis (backfill, no AR)
-    'newsletter': _OPENROUTER,     # long-form prose generation
-    'scoring': _OLLAMA,        # 1–10 headline importance rating
-    'historical': _OLLAMA,     # backfill significance scoring
-    'topics': _OLLAMA,         # event → topic matching (batch)
-    'routing': _OLLAMA,        # event → symbol routing (batch)
+    'default':       ['ollama_medium', 'groq', 'openrouter'],
+    'analyzer':      ['ollama_large',  'openrouter'],           # EN+AR translations
+    'analyzer_lite': ['ollama_medium', 'groq', 'openrouter'],   # EN-only backfill
+    'newsletter':    ['ollama_large',  'openrouter'],            # long-form prose
+    'scoring':       ['ollama_small',  'groq', 'cerebras', 'openrouter'],
+    'historical':    ['ollama_small',  'groq', 'cerebras', 'openrouter'],
+    'topics':        ['ollama_medium', 'groq', 'openrouter'],
+    'routing':       ['ollama_small',  'groq', 'cerebras', 'openrouter'],
 }
 
 # ── Forecasting (event-fused symbol prediction) ───────────────────────────────

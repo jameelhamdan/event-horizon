@@ -4,12 +4,18 @@ import logging
 import os
 
 import redis as redis_lib
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 # Read from env directly — settings.REDIS_URL doesn't exist; the URL is only
 # stored inside CACHES['redis-cache']['LOCATION'] after Django setup.
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+
+# Shared HTTP headers for all stream fetch calls.
+_APP_UA = f'Mozilla/5.0 (compatible; {getattr(settings, "APP_NAME", "happinga-meter")}/1.0)'
+HEADERS = {'User-Agent': _APP_UA, 'Accept': 'application/json'}
+HEADERS_UA = {'User-Agent': _APP_UA}
 
 _redis: redis_lib.Redis | None = None
 

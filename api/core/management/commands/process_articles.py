@@ -23,8 +23,6 @@ class Command(BaseTaskCommand):
         )
 
     def handle(self, *args, **kwargs):
-        from services.tasks import process_articles_task
-
         task_kwargs = dict(
             limit=kwargs['limit'],
             source_code=kwargs.get('source_code'),
@@ -33,9 +31,11 @@ class Command(BaseTaskCommand):
 
         if kwargs['background']:
             from services.queue import enqueue
-            enqueue(process_articles_task, **task_kwargs)
-            self.stdout.write(self.style.SUCCESS('Enqueued process_articles_task'))
+            from services.tasks import dispatch_process_articles_task
+            enqueue(dispatch_process_articles_task, limit=task_kwargs['limit'], queue='default')
+            self.stdout.write(self.style.SUCCESS('Enqueued dispatch_process_articles_task'))
             return
 
-        count = process_articles_task(**task_kwargs)
+        from services.workflow import Workflow
+        count = Workflow.process_articles(**task_kwargs)
         self.stdout.write(self.style.SUCCESS(f'Processed {count} articles'))

@@ -526,7 +526,7 @@ class Workflow:
                 if row:
                     return ((row.stage_status or {}).get(stage) or {}).get('error')
             except Exception:  # noqa: BLE001 — nested JSON lookup may be unsupported
-                return None
+                pass
             return None
 
         out: list[dict] = []
@@ -648,12 +648,15 @@ class Workflow:
             logger.info('[topics] No events to tag in the last %d hour(s)', hours)
             return 0
 
-        tagged = cls._apply_topic_tags(events, all_active_topics)
+        tagged = cls._tag_and_recount(events, all_active_topics)
         logger.info('[topics] tag_events_with_topics done — %d event(s) processed', tagged)
+        return tagged
 
-        # Recount event_count for all active topics over a 7-day window
+    @classmethod
+    def _tag_and_recount(cls, events: list, all_active_topics: list) -> int:
+        """Run LLM tagging over events then refresh topic event counts. Returns tagged count."""
+        tagged = cls._apply_topic_tags(events, all_active_topics)
         cls._update_topic_event_counts(all_active_topics)
-
         return tagged
 
     @classmethod
@@ -666,9 +669,7 @@ class Workflow:
         events = list(Event.objects.filter(pk__in=list(event_ids)))
         if not all_active_topics or not events:
             return 0
-        tagged = cls._apply_topic_tags(events, all_active_topics)
-        cls._update_topic_event_counts(all_active_topics)
-        return tagged
+        return cls._tag_and_recount(events, all_active_topics)
 
     @classmethod
     def _apply_topic_tags(cls, events: list, all_active_topics: list) -> int:

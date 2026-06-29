@@ -12,7 +12,7 @@ from api.views.newsletter import (
     SubscribeView, ConfirmView, UnsubscribeView,
     NewsletterListView, NewsletterLatestView, NewsletterDetailView,
 )
-from api.views.forecasts import ForecastListView, ForecastLatestView, ForecastAccuracyView
+from api.views.forecasts import ForecastLatestView, ForecastAccuracyView
 
 urlpatterns = [
     # ── Events & sources ──────────────────────────────────────────────────────
@@ -44,7 +44,7 @@ urlpatterns = [
     path('topics/<str:slug>/events/', TopicEventsView.as_view(), name='topic-events'),
 
     # ── Forecasts (event-fused symbol prediction) ─────────────────────────────
-    path('forecasts/', ForecastListView.as_view(), name='forecast-list'),
+    path('forecasts/', ForecastLatestView.as_view(), name='forecast-list'),
     path('forecasts/latest/', ForecastLatestView.as_view(), name='forecast-latest'),
     path('forecasts/accuracy/', ForecastAccuracyView.as_view(), name='forecast-accuracy'),
 

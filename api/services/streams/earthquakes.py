@@ -7,14 +7,14 @@ import logging
 from datetime import datetime, timezone
 
 import requests
-from django.conf import settings
+
 
 from .base import BaseStream, redis_publish
 
 logger = logging.getLogger(__name__)
 
 USGS_URL = 'https://earthquake.usgs.gov/fdsnws/event/1/query'
-HEADERS = {'User-Agent': f'Mozilla/5.0 (compatible; {settings.APP_NAME}/1.0)'}
+from services.streams.base import HEADERS_UA as HEADERS
 
 
 class EarthquakeStream(BaseStream):

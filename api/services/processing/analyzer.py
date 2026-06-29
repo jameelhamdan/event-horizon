@@ -80,18 +80,9 @@ def _single_prompt(schema: str) -> str:
     )
 
 
-def _batch_prompt(schema: str) -> str:
-    return (
-        'News article analyzer. Numbered articles → JSON array, same order, JSON only.\n\nEach object:\n'
-        + schema + '\n\n' + _CATEGORY_GUIDE
-    )
-
-
 # Full prompts carry EN+AR translations; lite prompts are EN-only (backfill).
 _SYSTEM_PROMPT = _single_prompt(_OBJECT_SCHEMA)
 _SYSTEM_PROMPT_LITE = _single_prompt(_OBJECT_SCHEMA_LITE)
-_BATCH_SYSTEM_PROMPT = _batch_prompt(_OBJECT_SCHEMA)
-_BATCH_SYSTEM_PROMPT_LITE = _batch_prompt(_OBJECT_SCHEMA_LITE)
 
 
 @dataclass
@@ -194,22 +185,7 @@ class ArticleAnalyzer:
         # ArticleAnalysis(category='conflict', country='Ukraine', city='Kyiv', latitude=50.45, longitude=30.52)
     """
 
-    # Title + lead paragraph is enough for category/geo/summary; trimming the
-    # tail keeps input tokens down without hurting classification quality.
     _MAX_CHARS = 1200
-    # Articles per LLM call in analyze_batch — amortizes the static system prompt
-    # across many articles (the dominant pipeline cost). Kept modest so the JSON
-    # array output stays well within the model's response window. The lite path
-    # (EN-only) emits far less per article, so it batches more aggressively.
-    _BATCH_SIZE = 6
-    _BATCH_SIZE_LITE = 12
-    # Per-article output ceiling. Generous on purpose: a truncated JSON array
-    # fails the whole batch, and the Arabic summary is token-heavy. max_tokens is
-    # only a cap, so short responses cost nothing — we size to avoid truncation.
-    # Lite (no Arabic) needs roughly half the budget.
-    _OUTPUT_PER_ARTICLE = 560
-    _OUTPUT_PER_ARTICLE_LITE = 320
-    _MAX_OUTPUT = 4000
 
     def __init__(self) -> None:
         from services.llm import get_llm_service
@@ -294,7 +270,6 @@ class ArticleAnalyzer:
         historical articles where the Arabic localization isn't worth the tokens.
         """
         system = _SYSTEM_PROMPT if translate else _SYSTEM_PROMPT_LITE
-        per = self._OUTPUT_PER_ARTICLE if translate else self._OUTPUT_PER_ARTICLE_LITE
         try:
             raw = self._service(translate).chat(
                 messages=[
@@ -302,7 +277,6 @@ class ArticleAnalyzer:
                     {'role': 'user', 'content': text[: self._MAX_CHARS]},
                 ],
                 temperature=0,
-                max_tokens=per + 220,
             )
             return self._parse_obj(self._loads(raw))
         except Exception:
@@ -310,59 +284,13 @@ class ArticleAnalyzer:
             return self._empty()
 
     def analyze_batch(self, texts: list[str], translate: bool = True) -> list[ArticleAnalysis]:
-        """
-        Analyze many articles, chunked into single multi-article LLM calls.
-        Always returns one ArticleAnalysis per input text, in order; missing or
-        malformed entries degrade to a 'general' ArticleAnalysis.
-
-        translate=False uses the lite (English-only) schema and a larger batch
-        size, since each article emits far fewer output tokens.
-        """
-        size = self._BATCH_SIZE if translate else self._BATCH_SIZE_LITE
-        results: list[ArticleAnalysis] = []
-        for start in range(0, len(texts), size):
-            results.extend(self._analyze_chunk(texts[start: start + size], translate))
-        return results
-
-    def _analyze_chunk(self, chunk: list[str], translate: bool = True) -> list[ArticleAnalysis]:
-        system = _BATCH_SYSTEM_PROMPT if translate else _BATCH_SYSTEM_PROMPT_LITE
-        per = self._OUTPUT_PER_ARTICLE if translate else self._OUTPUT_PER_ARTICLE_LITE
-        user = '\n\n'.join(
-            f'[{i + 1}]\n{t[: self._MAX_CHARS]}' for i, t in enumerate(chunk)
-        )
-        try:
-            raw = self._service(translate).chat(
-                messages=[
-                    {'role': 'system', 'content': system},
-                    {'role': 'user', 'content': user},
-                ],
-                temperature=0,
-                max_tokens=min(self._MAX_OUTPUT, per * len(chunk) + 200),
-            )
-            objs = self._parse_array(raw)
-        except Exception:
-            logger.exception('ArticleAnalyzer.analyze_batch chunk failed')
-            objs = []
-        if len(objs) != len(chunk):
-            logger.warning(
-                'analyze_batch: expected %d objects, got %d', len(chunk), len(objs),
-            )
-        # Align strictly to input order; pad short responses with empties.
-        return [objs[i] if i < len(objs) else self._empty() for i in range(len(chunk))]
+        """Analyze each article individually. Returns one ArticleAnalysis per input text."""
+        return [self.analyze(t, translate) for t in texts]
 
     @staticmethod
     def _loads(raw: str):
         # Free/no-key models often wrap JSON in ```json fences — strip them first.
         return json.loads(strip_code_fences(raw))
-
-    def _parse_array(self, raw: str) -> list[ArticleAnalysis]:
-        data = self._loads(raw)
-        if isinstance(data, dict):
-            # Tolerate {"results": [...]} / {"articles": [...]} envelopes.
-            data = data.get('results') if 'results' in data else data.get('articles', [])
-        if not isinstance(data, list):
-            return []
-        return [self._parse_obj(o) if isinstance(o, dict) else self._empty() for o in data]
 
     def _parse_obj(self, data: dict) -> ArticleAnalysis:
         category = data.get('category', 'general')

@@ -2,35 +2,36 @@
 
 The system is a chain of stages. Each stage has a task function in
 `services/tasks.py` (plain Python, no decorator), a management command for manual
-runs, and a scheduled cadence registered by `setup_schedule`. Stages communicate
+runs, and a scheduled cadence in `api/crontab`. Stages communicate
 only through MongoDB documents — there is no in-memory hand-off — so any stage can be
 re-run independently.
 
-> Scheduling note: heavy-queue NLP/LLM stages run at a multiple of their base
-> interval (≈5–6×). Change an interval by setting its env var and restarting the
-> `scheduler` service; `setup_schedule` clears and re-registers every job on start.
+> Scheduling note: periodic jobs run via supercronic in the `api` container. Edit
+> `api/crontab` to change cadence. Heavy NLP/LLM work is fanned out to the `heavy`
+> queue by dispatcher tasks that run on the `default` queue.
 
 ## Stage chain & cadences
 
 ```mermaid
 flowchart TD
-    F["fetch_articles_task<br/><i>default · ~10m</i>"] --> A1[(Article)]
-    A1 --> P["process_articles_task<br/><i>heavy · ~60m</i>"]
+    F["dispatch_fetch_task<br/><i>default · every 10m</i>"] --> A1[(Article)]
+    A1 --> P["dispatch_process_articles_task<br/><i>default · every 4h</i>"]
     P --> A2[(Article · enriched)]
-    A2 --> AG["aggregate_events_task<br/><i>heavy · ~60m</i>"]
+    A2 --> AG["aggregate_events_task<br/><i>heavy · every 4h+30m</i>"]
     AG --> E[(Event)]
-    E --> TT["tag_topics_task<br/><i>heavy · ~75m</i>"]
-    E --> DT["discover_topics_task<br/><i>heavy · ~150m</i>"]
-    TT --> T[(Topic links)]
+    E --> RE["dispatch_route_events_task<br/><i>default · every 6h</i>"]
+    RE --> EI[(Event · affected_indicators)]
+    EI --> DT["discover_topics_task<br/><i>heavy · daily 05:00</i>"]
+    DT --> T[(Topic links)]
     RT["refresh_topics_task<br/><i>heavy · daily 04:00</i>"] --> T
-    E --> RF["run_forecast_task<br/><i>heavy · ~300m</i>"]
+    EI --> RF["run_forecast_task<br/><i>heavy · daily 05:30</i>"]
     PT[(PriceTick)] --> RF
     RF --> FC[(Forecast)]
-    FC --> SF["score_forecasts_task<br/><i>heavy · ~300m</i>"]
-    E --> GN["generate_newsletter_task<br/><i>heavy · daily 06:00</i>"]
+    FC --> SF["score_forecasts_task<br/><i>heavy · daily 07:00</i>"]
+    EI --> GN["generate_newsletter_task<br/><i>heavy · daily 06:00</i>"]
 
     classDef q fill:#1a1a22,stroke:#7c9ef8,color:#e8e8f0;
-    class F,P,AG,TT,DT,RT,RF,SF,GN q;
+    class F,P,AG,RE,DT,RT,RF,SF,GN q;
 ```
 
 Streams run independently on the `default` queue and feed `PriceTick` (and the SSE
@@ -53,9 +54,11 @@ flowchart LR
 
 Two modes:
 
-### 1a. Live (`fetch_articles_task`, default queue, ~10m)
-- Per enabled `Source`: pull latest items, dedupe on
-  `(source_code, source_type, source_url)`, store `Article` with raw fields only
+### 1a. Live (`dispatch_fetch_task`, default queue, every 10m)
+- `dispatch_fetch_task` enqueues one `fetch_source_task(source_code, start_date)` per
+  enabled `Source` on the default queue.
+- Each `fetch_source_task` pulls latest items for its source, dedupes on
+  `(source_code, source_type, source_url)`, and stores `Article` with raw fields only
   (`title, content, url, author, source, published_on, banner_image_url`).
 - RSS via feedparser today; website/API adapters are the growth path.
 
@@ -77,9 +80,13 @@ python manage.py backfill_history <source> --start-date 2022-01-01 --end-date 20
 
 ## Stage 2 — Process articles
 
-**Task:** `process_articles_task` (heavy queue, ~60m). **Code:**
+**Task:** `dispatch_process_articles_task` (default queue, every 4h). **Code:**
 `services/processing/` (`cleaner.py` drives it; `analyzer.py`, `finbert.py` are
 called within).
+
+`dispatch_process_articles_task` fans out to one `process_article_task(id)` per
+unprocessed article on the heavy queue. A recovery pass with `only_failed=true` runs
+every 12h to retry articles that previously errored.
 
 Per article, enrich in place:
 
@@ -104,7 +111,7 @@ always a **feature**, never the predictor.
 
 ## Stage 2b — Aggregate into events
 
-**Task:** `aggregate_events_task` (heavy queue, ~60m). **Code:** `services/workflow.py`.
+**Task:** `aggregate_events_task` (heavy queue, every 4h+30m). **Code:** `services/workflow.py`.
 
 1. Bucket processed articles by `(city, country, category, day)`.
 2. Semantically sub-cluster within a bucket (`SemanticClusterer`,
@@ -113,8 +120,6 @@ always a **feature**, never the predictor.
    - `avg_sentiment` (mean article sentiment), `avg_finbert_sentiment` (FinBERT mean), `avg_intensity`
    - **`latest_article_at` = max(published_on)** over constituent articles — this is
      the **event-time** used for all as-of forecasting cuts (not the day bucket).
-   - **`affected_indicators`** = `route_event_to_weighted_symbols(...)` — a
-     deterministic list of `{symbol, weight}` (see [forecasting.md](forecasting.md)).
 
 One event = many source articles. This is the "relationship between articles of the
 same time/type" the system is built around.
@@ -125,8 +130,8 @@ same time/type" the system is built around.
 
 | Task | Cadence | Role |
 |------|---------|------|
-| `tag_topics_task` | ~75m | `LLMTopicMatcher` (batch 10 events/call) → `Event.topic_slugs` + `Event.topics`. Re-routes `affected_indicators` once topics are known (topic routing is higher-signal). Falls back to keyword `TopicMatcher` on LLM error. |
-| `discover_topics_task` | ~150m | LLM discovers new `Topic`s from recent events. |
+| `dispatch_tag_topics_task` | on demand (admin) | `LLMTopicMatcher` (batch 10 events/call) → `Event.topic_slugs` + `Event.topics`. Re-routes `affected_indicators` once topics are known (topic routing is higher-signal). Falls back to keyword `TopicMatcher` on LLM error. |
+| `discover_topics_task` | daily 05:00 | LLM discovers new `Topic`s from recent events. |
 | `refresh_topics_task` | daily 04:00 | Scrape Wikipedia `Portal:Current_events` (last `TOPIC_SOURCES_DAYS`) → dedupe → semantic merge (≥0.85) → LLM enrich descriptions/keywords → upsert; age-off stale topics. |
 
 A **Topic** is an ongoing storyline grouping many events (e.g. "2023 Turkey–Syria
@@ -135,20 +140,33 @@ earthquakes"). `is_current` = in today's cycle; `is_active` = shown in UI;
 
 ---
 
+## Stage 2d — Route events to indicators
+
+**Task:** `dispatch_route_events_task` (default queue, every 6h).
+
+`dispatch_route_events_task` fans out to `route_events_chunk_task(event_ids)` on the
+heavy queue. Each chunk calls `route_event_to_weighted_symbols()` per event, producing
+`affected_indicators = [{symbol, weight}]` stored on the `Event`. This deterministic
+routing is the bridge between news events and the forecasting subsystem (see
+[forecasting.md](forecasting.md)).
+
+---
+
 ## Stage 3 — Prediction (AI)
 
-**Tasks:** `run_forecast_task` + `score_forecasts_task` (~300m), `train_forecaster_task`
-(daily). Fully documented in **[forecasting.md](forecasting.md)**. In brief:
+**Tasks:** `train_forecast_model_task` (daily 05:00), `run_forecast_task` (daily 05:30),
+`score_forecasts_task` (daily 07:00). Fully documented in
+**[forecasting.md](forecasting.md)**. In brief:
 
 - For each `(indicator symbol, time t)` build an **as-of, volume-normalized** feature
   vector from `PriceTick`s ≤ t and `Event`s with event-time ≤ t.
-- Predict **two heads per horizon** (1h crypto-only, 1d, 1w):
-  `magnitude_bucket` (5-class direction) and `volatility_bucket` (3-class vol regime).
-- **v1** = LLM decision-support (emits reliability, may **abstain**, calibrated).
-  **v2** = LightGBM, the primary predictor, trained walk-forward.
-- **Scoring** snaps the target to the next trading-session close, computes the
-  realized return/vol, classifies it against the *same* as-of thresholds stored on the
-  forecast, and reports metrics vs naive baselines.
+- Forecast output per horizon (1 day, 5 days):
+  - `direction` — up / down / neutral
+  - `proba_up` — calibrated probability of an upward move
+  - `predicted_change_pct` — point estimate of percentage change
+  - `band_low` / `band_high` — prediction interval
+- **Scoring** (`score_forecasts_task`) fills `realized_direction`,
+  `realized_change_pct`, and `is_correct` once the horizon closes.
 
 ---
 
@@ -172,4 +190,17 @@ per-category LLM sections into `DailyNewsletter.body` (**Markdown**), and snapsh
 articles + cover image (idempotent). `send_newsletter` converts Markdown→HTML at send
 time and delivers to confirmed subscribers via AWS SES (double opt-in; token
 unsubscribe). See [`../CLAUDE.md` → Newsletter](../CLAUDE.md).
+
+---
+
+## Maintenance tasks
+
+| Task | Cadence | Purpose |
+|------|---------|---------|
+| `score_articles_task` | hourly | LLM-rate article significance (1–10); requires `ARTICLE_IMPORTANCE_SCORING_ENABLED` |
+| `cleanup_low_importance_articles_task` | daily 03:00 | Delete articles below `ARTICLE_MIN_IMPORTANCE` after grace period |
+| `prune_stale_articles_task` | daily 03:30 | Remove old unprocessed articles |
+| `adjust_source_weights_task` | weekly (Sun 02:00) | Adjust source reliability weights based on signal quality |
+| `pipeline_health_task` | every 30m | Emit pipeline health metrics |
+| `backfill_prices_task` | weekly (Sun 00:00) | Backfill daily OHLC for active symbols (bulk queue) |
 </content>

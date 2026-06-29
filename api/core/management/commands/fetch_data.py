@@ -25,8 +25,6 @@ class Command(BaseTaskCommand):
         )
 
     def handle(self, *args, **kwargs):
-        from services.tasks import fetch_articles_task
-
         source_code = kwargs['source_code']
         if kwargs['hours'] is not None:
             start_date = now() - timedelta(hours=kwargs['hours'])
@@ -39,9 +37,15 @@ class Command(BaseTaskCommand):
 
         if kwargs['background']:
             from services.queue import enqueue
-            enqueue(fetch_articles_task, source_code, start_date)
-            self.stdout.write(self.style.SUCCESS('Enqueued fetch_articles_task'))
+            from services.tasks import dispatch_fetch_task, fetch_source_task
+            if source_code:
+                enqueue(fetch_source_task, source_code, start_date, queue='default')
+                self.stdout.write(self.style.SUCCESS(f'Enqueued fetch_source_task for {source_code}'))
+            else:
+                enqueue(dispatch_fetch_task, queue='default')
+                self.stdout.write(self.style.SUCCESS('Enqueued dispatch_fetch_task'))
             return
 
-        count = fetch_articles_task(source_code, start_date)
+        from services.workflow import Workflow
+        count = Workflow.fetch_articles(source_code, start_date)
         self.stdout.write(self.style.SUCCESS(f'Fetched {count} new article(s) from {label}'))

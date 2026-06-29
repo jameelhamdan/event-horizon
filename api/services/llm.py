@@ -305,13 +305,29 @@ def _provider_specs() -> dict[str, dict]:
             'proxy_pool': proxy_pool,
         }
 
-    return {
+    groq_keys = _parse_csv(getattr(settings, 'GROQ_API_KEYS', ''))
+    cerebras_keys = _parse_csv(getattr(settings, 'CEREBRAS_API_KEYS', ''))
+
+    specs: dict[str, dict] = {
         'openrouter': openrouter_spec,
-        'ollama': {
-            'base_url': settings.OLLAMA_BASE_URL,
-            'model': settings.OLLAMA_MODEL,
-        },
+        'ollama':        {'base_url': settings.OLLAMA_BASE_URL, 'model': settings.OLLAMA_MODEL},
+        'ollama_small':  {'base_url': settings.OLLAMA_BASE_URL, 'model': getattr(settings, 'OLLAMA_MODEL_SMALL', 'qwen3:4b')},
+        'ollama_medium': {'base_url': settings.OLLAMA_BASE_URL, 'model': getattr(settings, 'OLLAMA_MODEL_MEDIUM', 'qwen3:8b')},
+        'ollama_large':  {'base_url': settings.OLLAMA_BASE_URL, 'model': getattr(settings, 'OLLAMA_MODEL_LARGE', 'qwen3:14b')},
     }
+    if groq_keys:
+        specs['groq'] = {
+            'base_urls': ['https://api.groq.com/openai/v1'],
+            'api_keys': groq_keys,
+            'model': getattr(settings, 'GROQ_MODEL', 'llama-3.1-8b-instant'),
+        }
+    if cerebras_keys:
+        specs['cerebras'] = {
+            'base_urls': ['https://api.cerebras.ai/v1'],
+            'api_keys': cerebras_keys,
+            'model': getattr(settings, 'CEREBRAS_MODEL', 'llama3.1-8b'),
+        }
+    return specs
 
 
 _backend_cache: dict[str, BaseLLMService] = {}

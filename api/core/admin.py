@@ -1,5 +1,4 @@
 import datetime
-from datetime import timedelta
 
 from django.contrib import admin, messages
 from django.shortcuts import redirect
@@ -244,56 +243,40 @@ class ArticleAdmin(ImportExportModelAdmin):
         return super().changelist_view(request, extra_context=extra_context)
 
     def _handle_pipeline_action(self, request):
-        from django.utils.timezone import now
         from services.queue import enqueue
         from services.tasks import (
-            aggregate_events_task, fetch_articles_task, process_articles_task, run_pipeline_task,
+            aggregate_events_task,
+            dispatch_fetch_task,
+            dispatch_process_articles_task,
         )
 
         action = request.POST["pipeline_action"]
 
-        # One ordered job: fetch -> process -> aggregate -> tag. Enqueuing the steps
-        # separately races them (aggregate runs before process finishes -> no new events).
         if action == "run_all":
-            fetch_hours = max(1, int(request.POST.get("fetch_hours") or 2))
-            process_limit = max(1, int(request.POST.get("process_limit") or 500))
-            aggregate_hours = max(1, int(request.POST.get("aggregate_hours") or 24))
-            source_code = request.POST.get("fetch_source") or None
-            enqueue(
-                run_pipeline_task,
-                fetch_hours=fetch_hours,
-                process_limit=process_limit,
-                aggregate_hours=aggregate_hours,
-                source_code=source_code,
-                tag=True,
-                queue="heavy",
-                job_timeout=-1,
-            )
+            enqueue(dispatch_fetch_task, queue='default')
+            enqueue(dispatch_process_articles_task, queue='default')
+            enqueue(aggregate_events_task, queue="heavy", job_timeout=-1)
             self.message_user(
                 request,
-                f"Full pipeline enqueued as one ordered job "
-                f"(fetch {fetch_hours}h → process {process_limit} → aggregate "
-                f"{aggregate_hours}h → tag). Watch /admin/django-rq/; events appear when it finishes.",
+                "Pipeline dispatchers enqueued (fetch → process → aggregate).",
                 messages.SUCCESS,
             )
             return redirect(request.path)
 
         if action == "fetch":
-            hours = max(1, int(request.POST.get("fetch_hours") or 2))
             source_code = request.POST.get("fetch_source") or None
-            enqueue(fetch_articles_task, source_code, now() - timedelta(hours=hours))
-            self.message_user(request, f"Fetch job enqueued - {source_code or 'all'}, last {hours}h.", messages.SUCCESS)
+            enqueue(dispatch_fetch_task, queue='default')
+            self.message_user(request, f"Fetch dispatched ({source_code or 'all sources'}).", messages.SUCCESS)
         elif action == "process":
             limit = max(1, int(request.POST.get("process_limit") or 500))
-            enqueue(process_articles_task, limit=limit, queue="heavy")
-            self.message_user(request, f"Process job enqueued - limit {limit}.", messages.SUCCESS)
+            enqueue(dispatch_process_articles_task, limit=limit, queue='default')
+            self.message_user(request, f"Process dispatched (limit {limit}).", messages.SUCCESS)
         elif action == "reprocess_failed":
             limit = max(1, int(request.POST.get("process_limit") or 500))
-            enqueue(process_articles_task, limit=limit, only_failed=True, queue="heavy")
+            enqueue(dispatch_process_articles_task, limit=limit, only_failed=True, queue='default')
             self.message_user(
                 request,
-                f"Re-processing up to {limit} article(s) that were processed but have no "
-                f"location (so they can aggregate into Events).",
+                f"Re-dispatched up to {limit} processed-but-unlocated articles.",
                 messages.SUCCESS,
             )
         elif action == "aggregate":
@@ -448,15 +431,15 @@ class TopicAdmin(admin.ModelAdmin):
 
     def _handle_topic_action(self, request):
         from services.queue import enqueue
-        from services.tasks import refresh_topics_task, tag_topics_task
+        from services.tasks import refresh_topics_task, dispatch_tag_topics_task
         action = request.POST["topic_action"]
         if action == "refresh":
             enqueue(refresh_topics_task)
             self.message_user(request, "Refresh topics job enqueued.", messages.SUCCESS)
         elif action == "tag":
             hours = max(1, int(request.POST.get("tag_hours") or 24))
-            enqueue(tag_topics_task, hours=hours)
-            self.message_user(request, f"Tag topics job enqueued (last {hours}h).", messages.SUCCESS)
+            enqueue(dispatch_tag_topics_task, hours=hours, queue='default')
+            self.message_user(request, f"Tag topics dispatched (last {hours}h).", messages.SUCCESS)
         return redirect(request.path)
 
 

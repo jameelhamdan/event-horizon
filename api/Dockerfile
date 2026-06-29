@@ -2,8 +2,13 @@ FROM python:3.13-slim
 
 COPY ./requirements.txt /requirements.txt
 
+ARG TARGETARCH=amd64
 RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends build-essential pkg-config curl \
+    && case "${TARGETARCH}" in amd64|arm64) ARCH="${TARGETARCH}" ;; *) ARCH=amd64 ;; esac \
+    && curl -fsSL "https://github.com/aptible/supercronic/releases/download/v0.2.33/supercronic-linux-${ARCH}" \
+         -o /usr/local/bin/supercronic \
+    && chmod +x /usr/local/bin/supercronic \
     && rm -rf /var/lib/apt/lists/*
 
 # Store HF model cache inside /py so it's readable by all users
@@ -28,7 +33,8 @@ ENV PYTHONUNBUFFERED=1
 ENV CUDA_VISIBLE_DEVICES=""
 ENV PYTHONPATH="/app"
 
-RUN mkdir -p /app/.static && chown -R djangouser . && chmod +x ./release.sh ./manage.py
+RUN mkdir -p /app/.static && chown -R djangouser . \
+    && chmod +x ./release.sh ./manage.py
 
 EXPOSE 8000
 

@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 
+from services.llm import strip_code_fences
 from services.forecasting.routing import (
     get_panel_symbols,
     route_event_to_weighted_symbols,
@@ -95,9 +95,7 @@ class LLMEventRouter:
                     temperature=0,
                     max_tokens=min(800, 60 * len(batch) + 100),
                 ).strip()
-                response = re.sub(r'^```(?:json)?\s*', '', response)
-                response = re.sub(r'\s*```$', '', response)
-                parsed = json.loads(response)
+                parsed = json.loads(strip_code_fences(response))
                 if not isinstance(parsed, dict):
                     raise ValueError('LLM returned non-dict')
 

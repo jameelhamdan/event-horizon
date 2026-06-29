@@ -1,7 +1,7 @@
 """Server-rendered admin operations dashboard.
 
 A single page under ``/admin/dashboard/`` summarizing pipeline operations and
-offering POST actions. Data sources: rq-scheduler (upcoming runs), RQ
+offering POST actions. Data sources: ``api/crontab`` (upcoming runs), RQ
 StartedJobRegistry (in-flight), ``Workflow.pipeline_coverage()`` (per-stage
 gaps), and forecast artifacts/rows. Registered via a ``get_urls`` shim in
 ``core/admin.py``.
@@ -27,19 +27,23 @@ def _handle_action(request):
     action = request.POST.get('dashboard_action', '')
     try:
         if action == 'run_pipeline':
-            enqueue(T.run_pipeline_task, fetch_hours=6, process_limit=1000,
-                    aggregate_hours=24, tag=True, queue='heavy', job_timeout=-1)
-            _ok(request, 'Full pipeline enqueued (fetch → process → aggregate → tag).')
+            enqueue(T.dispatch_fetch_task, queue='default')
+            enqueue(T.dispatch_process_articles_task, queue='default')
+            enqueue(T.aggregate_events_task, queue='heavy', job_timeout=-1)
+            _ok(request, 'Pipeline dispatchers enqueued (fetch → process → aggregate).')
         elif action == 'backfill_prices':
             enqueue(T.backfill_prices_task, years=10, queue='bulk', job_timeout=-1)
             _ok(request, 'Price backfill enqueued (10y, all active symbols).')
         elif action == 'backfill_articles':
-            enqueue(T.backfill_articles_task, queue='bulk', job_timeout=-1)
+            from datetime import datetime, timedelta, timezone as dt_timezone
+            now = datetime.now(dt_timezone.utc)
+            enqueue(T.backfill_all_sources_task, now - timedelta(days=14), now, None,
+                    queue='bulk', job_timeout=-1)
             _ok(request, 'Article backfill enqueued (weighted per-source, all sources).')
         elif action == 'retrain_forecast':
-            # Single chained task so run_forecast always uses the freshly trained model.
-            enqueue(T.retrain_and_run_forecast_task, queue='bulk', job_timeout=-1)
-            _ok(request, 'Forecast retrain + run enqueued (sequential, bulk queue).')
+            enqueue(T.train_forecast_model_task, queue='bulk', job_timeout=-1)
+            enqueue(T.run_forecast_task, queue='bulk', job_timeout=-1)
+            _ok(request, 'Forecast retrain + run enqueued (bulk queue).')
         elif action == 'rerun_bootstrap':
             enqueue(T.bootstrap_initial_data_task, True, queue='default', job_timeout=-1)
             _ok(request, 'First-load bootstrap re-triggered (force).')
@@ -129,17 +133,10 @@ def _throughput():
 
 
 def _upcoming():
-    """Next scheduled time per task from rq-scheduler."""
+    """Next scheduled time per task from api/crontab."""
     try:
-        import django_rq
-        from rq_scheduler import Scheduler
-        conn = django_rq.get_connection('default')
-        sched = Scheduler(connection=conn)
-        out = []
-        for job, when in sched.get_jobs(with_times=True):
-            out.append({'task': job.func_name.split('.')[-1], 'when': when})
-        out.sort(key=lambda x: x['when'] or datetime.max.replace(tzinfo=timezone.utc))
-        return out[:40]
+        from core.utils.crontab_schedule import upcoming_runs
+        return upcoming_runs()
     except Exception as exc:  # noqa: BLE001
         logger.debug('[dashboard] upcoming unavailable: %s', exc)
         return []

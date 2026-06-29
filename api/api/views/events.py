@@ -14,20 +14,35 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-_CACHE_TTL = 30  # seconds
-
-
-def _redis_cache():
-    return caches['redis-cache']
-
 from core import models as core_models
-from rest_framework import generics, status as drf_status
 from api.serializers import (
     ArticleSerializer, EventSerializer, SourceSerializer,
     PriceTickSerializer, PriceBarSerializer, NotamZoneSerializer, NotamRecordSerializer,
     EarthquakeRecordSerializer, StaticPointSerializer,
     TopicSerializer, MarketSymbolSerializer,
 )
+
+_CACHE_TTL = 30  # seconds
+
+
+def _redis_cache():
+    return caches['redis-cache']
+
+
+def _build_source_map() -> dict[str, str]:
+    return {s.code: s.name for s in core_models.Source.objects.only('code', 'name')}
+
+
+def _parse_bool_param(value: str | None, default: bool = True) -> bool | None:
+    """Parse a query param string to True/False/None (None = 'all', no filter)."""
+    if value is None:
+        return default
+    low = value.lower()
+    if low == 'true':
+        return True
+    if low == 'false':
+        return False
+    return None  # 'all' or unrecognised → no filter
 
 
 def _parse_dt(value: str) -> datetime:
@@ -92,7 +107,7 @@ class EventListView(APIView):
                 )
 
         limit = _parse_int(request.query_params.get('limit'), 100, 500)
-        source_map = {s.code: s.name for s in core_models.Source.objects.only('code', 'name')}
+        source_map = _build_source_map()
         data = {'results': EventSerializer(qs[:limit], many=True, context={'source_map': source_map}).data}
         data['count'] = len(data['results'])
         cache.set(cache_key, data, _CACHE_TTL)
@@ -121,7 +136,7 @@ class EventDetailView(APIView):
                 pass
 
         articles = core_models.Article.objects.filter(id__in=article_uuids)
-        source_map = {s.code: s.name for s in core_models.Source.objects.only('code', 'name')}
+        source_map = _build_source_map()
         data = EventSerializer(event, context={'source_map': source_map}).data
         data['articles'] = ArticleSerializer(articles, many=True).data
         cache.set(cache_key, data, _CACHE_TTL)
@@ -204,11 +219,8 @@ class NotamZoneListView(APIView):
 
     def get(self, request):
         qs = core_models.NotamZone.objects.all()
-        active_param = request.query_params.get('active', 'true').lower()
-        if active_param == 'true':
-            qs = qs.filter(is_active=True)
-        elif active_param == 'false':
-            qs = qs.filter(is_active=False)
+        if (active := _parse_bool_param(request.query_params.get('active'))) is not None:
+            qs = qs.filter(is_active=active)
 
         if country_code := request.query_params.get('country_code'):
             qs = qs.filter(country_code__iexact=country_code)
@@ -292,19 +304,16 @@ class SymbolListView(APIView):
 
     def get(self, request):
         qs = core_models.MarketSymbol.objects.all()
-        active = (request.query_params.get('active') or 'true').lower()
-        if active == 'true':
-            qs = qs.filter(is_active=True)
-        elif active == 'false':
-            qs = qs.filter(is_active=False)
+        if (active := _parse_bool_param(request.query_params.get('active'))) is not None:
+            qs = qs.filter(is_active=active)
         if group := request.query_params.get('group'):
             qs = qs.filter(group=group)
         if stream_key := request.query_params.get('stream_key'):
             qs = qs.filter(stream_key=stream_key)
-        if (forecast := request.query_params.get('forecast')) is not None:
-            qs = qs.filter(is_forecast=(forecast.lower() == 'true'))
-        if (popular := request.query_params.get('popular')) is not None:
-            qs = qs.filter(is_popular=(popular.lower() == 'true'))
+        if (forecast := _parse_bool_param(request.query_params.get('forecast'), default=None)) is not None:
+            qs = qs.filter(is_forecast=forecast)
+        if (popular := _parse_bool_param(request.query_params.get('popular'), default=None)) is not None:
+            qs = qs.filter(is_popular=popular)
         serializer = MarketSymbolSerializer(qs, many=True)
         return Response({'results': serializer.data, 'count': len(serializer.data)})
 
@@ -328,26 +337,12 @@ class TopicListView(APIView):
         from django.db.models import Q
         qs = core_models.Topic.objects.all()
 
-        # active filter (default: only active)
-        active_param = request.query_params.get('active', 'true').lower()
-        if active_param == 'true':
-            qs = qs.filter(is_active=True)
-        elif active_param == 'false':
-            qs = qs.filter(is_active=False)
-
-        # is_current filter
-        current_param = request.query_params.get('current', '').lower()
-        if current_param == 'true':
-            qs = qs.filter(is_current=True)
-        elif current_param == 'false':
-            qs = qs.filter(is_current=False)
-
-        # is_top_level filter
-        top_level_param = request.query_params.get('top_level', '').lower()
-        if top_level_param == 'true':
-            qs = qs.filter(is_top_level=True)
-        elif top_level_param == 'false':
-            qs = qs.filter(is_top_level=False)
+        if (active := _parse_bool_param(request.query_params.get('active'))) is not None:
+            qs = qs.filter(is_active=active)
+        if (current := _parse_bool_param(request.query_params.get('current'), default=None)) is not None:
+            qs = qs.filter(is_current=current)
+        if (top_level := _parse_bool_param(request.query_params.get('top_level'), default=None)) is not None:
+            qs = qs.filter(is_top_level=top_level)
 
         if category := request.query_params.get('category'):
             qs = qs.filter(category=category)
@@ -432,7 +427,7 @@ class TopicEventsView(APIView):
                 return Response({'error': 'Invalid end date'}, status=status.HTTP_400_BAD_REQUEST)
 
         limit = _parse_int(request.query_params.get('limit'), 50, 200)
-        source_map = {s.code: s.name for s in core_models.Source.objects.only('code', 'name')}
+        source_map = _build_source_map()
         data = {
             'topic': slug,
             'results': EventSerializer(qs[:limit], many=True, context={'source_map': source_map}).data,
