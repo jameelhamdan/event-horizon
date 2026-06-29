@@ -66,7 +66,7 @@ flowchart TD
 cp api/.env.example .env.app      # fill in SECRET_KEY etc.; LLM works out of the box
 docker compose up                 # everything (incl. the g4f LLM proxy)
 cd api && python manage.py migrate
-python manage.py setup_schedule   # register periodic jobs
+python manage.py run_task dispatch_fetch_task   # enqueue one scheduled job manually
 ```
 
 > **LLM**: no API key required by default — the `g4f` service provides a

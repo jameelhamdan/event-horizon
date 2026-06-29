@@ -1,0 +1,41 @@
+# Happinga-Meter periodic schedule — run by supercronic inside the `api` container.
+#
+# Format:  m h dom mon dow   command
+# Every line dispatches a background task via `manage.py run_task <name> [key=value ...]`.
+# The task's queue is auto-selected (see run_task.py); feature-gated tasks carry
+# --require-flag so they stay listed here unconditionally and no-op when disabled.
+#
+# To change a cadence, edit this file and restart the `api` service.
+
+# ── Light queue — fast I/O ───────────────────────────────────────────────
+*/10 * * * *   python /app/manage.py run_task dispatch_fetch_task
+*/5  * * * *   python /app/manage.py run_task fetch_prices_task      --require-flag STREAM_PRICES_ENABLED
+*/15 * * * *   python /app/manage.py run_task fetch_notams_task      --require-flag STREAM_NOTAM_ENABLED
+*/5  * * * *   python /app/manage.py run_task fetch_earthquakes_task --require-flag STREAM_EARTHQUAKE_ENABLED
+*/15 * * * *   python /app/manage.py run_task fetch_forex_task       --require-flag STREAM_FOREX_ENABLED
+*/30 * * * *   python /app/manage.py run_task pipeline_health_task
+
+# Process dispatcher (every 4h) + un-located recovery (every 12h)
+0  */4  * * *  python /app/manage.py run_task dispatch_process_articles_task
+0  */12 * * *  python /app/manage.py run_task dispatch_process_articles_task only_failed=true
+
+# ── Heavy queue — NLP / LLM ──────────────────────────────────────────────
+# Aggregate runs 30m after process so the fan-out has time to land located articles.
+30 */4 * * *   python /app/manage.py run_task aggregate_events_task
+0  *   * * *   python /app/manage.py run_task score_articles_task --require-flag ARTICLE_IMPORTANCE_SCORING_ENABLED
+
+# Daily LLM cron jobs
+0 4 * * *      python /app/manage.py run_task refresh_topics_task
+0 5 * * *      python /app/manage.py run_task discover_topics_task
+0 6 * * *      python /app/manage.py run_task generate_newsletter_task --require-flag NEWSLETTER_ENABLED
+
+# ── Maintenance (light) ──────────────────────────────────────────────────
+0  3 * * *     python /app/manage.py run_task cleanup_low_importance_articles_task --require-flag ARTICLE_IMPORTANCE_SCORING_ENABLED
+30 3 * * *     python /app/manage.py run_task prune_stale_articles_task            --require-flag ARTICLE_IMPORTANCE_SCORING_ENABLED
+0  2 * * 0     python /app/manage.py run_task adjust_source_weights_task           --require-flag ARTICLE_IMPORTANCE_SCORING_ENABLED
+
+# ── Forecasting ──────────────────────────────────────────────────────────
+0 */6 * * *    python /app/manage.py run_task dispatch_route_events_task      --require-flag FORECAST_ENABLED
+0 5   * * *    python /app/manage.py run_task retrain_and_run_forecast_task   --require-flag FORECAST_ENABLED
+0 7   * * *    python /app/manage.py run_task score_forecasts_task            --require-flag FORECAST_ENABLED
+0 0   * * 0    python /app/manage.py run_task backfill_prices_task            --require-flag FORECAST_ENABLED

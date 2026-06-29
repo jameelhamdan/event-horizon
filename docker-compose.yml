@@ -39,7 +39,7 @@ services:
   api:
     build: ./api
     restart: always
-    command: uvicorn app.asgi:application --host 0.0.0.0 --port 8000 --workers 4
+    command: ./release.sh && uvicorn app.asgi:application --host 0.0.0.0 --port 8000 --workers 4
     expose:
       - "8000"
     depends_on:
@@ -84,17 +84,6 @@ services:
     build: ./api
     restart: always
     command: sh -c "python manage.py rqworker-pool bulk --num-workers 1"
-    depends_on:
-      - mongo
-      - redis
-    env_file: .env.app
-    volumes:
-      - ./media_data:/app/media
-
-  scheduler:
-    build: ./api
-    restart: always
-    command: sh -c "python manage.py setup_schedule && rqscheduler --url $${REDIS_URL:-redis://redis:6379/0}"
     depends_on:
       - mongo
       - redis

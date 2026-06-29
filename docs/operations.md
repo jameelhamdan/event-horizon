@@ -6,8 +6,9 @@
 post-deploy step** (the old `bootstrap_static_points` command is no longer required;
 static points are seeded by migration `0001`, symbols by `0006`).
 
-On every `scheduler` container start, `setup_schedule` enqueues
-`bootstrap_initial_data_task`, which is **idempotent** (guarded by a cache flag and a
+On `api` container start, `start_api.sh` launches **supercronic** with `api/crontab`,
+which dispatches jobs via `manage.py run_task`. `bootstrap_initial_data_task` is
+**idempotent** (guarded by a cache flag and a
 `PriceBar`-presence heuristic) and, on a fresh deployment, enqueues:
 
 - `backfill_prices_task(years=5)` — daily OHLC for every active symbol
@@ -66,7 +67,7 @@ plus a sample error — the data behind the dashboard's coverage panel.
   by the `_execute_tracked` wrapper in `services/queue.py`.
 - **Pipeline coverage** — per-stage "N need reprocessing" + last error, each with a
   **Reprocess** button that re-dispatches only the stuck records.
-- **Upcoming runs** — next scheduled time per task (from rq-scheduler).
+- **Upcoming runs** — next scheduled time per task (from `api/crontab`).
 - **In-flight** — currently `running` `TaskRun`s.
 - **Forecast model** — artifact mtimes, last forecast, live directional accuracy.
 - **Actions** — run full sync, backfill prices/articles, retrain forecast, re-run

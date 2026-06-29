@@ -1,7 +1,7 @@
 """Server-rendered admin operations dashboard.
 
 A single page under ``/admin/dashboard/`` summarizing pipeline operations and
-offering POST actions. Data sources: rq-scheduler (upcoming runs), RQ
+offering POST actions. Data sources: ``api/crontab`` (upcoming runs), RQ
 StartedJobRegistry (in-flight), ``Workflow.pipeline_coverage()`` (per-stage
 gaps), and forecast artifacts/rows. Registered via a ``get_urls`` shim in
 ``core/admin.py``.
@@ -129,17 +129,10 @@ def _throughput():
 
 
 def _upcoming():
-    """Next scheduled time per task from rq-scheduler."""
+    """Next scheduled time per task from api/crontab."""
     try:
-        import django_rq
-        from rq_scheduler import Scheduler
-        conn = django_rq.get_connection('default')
-        sched = Scheduler(connection=conn)
-        out = []
-        for job, when in sched.get_jobs(with_times=True):
-            out.append({'task': job.func_name.split('.')[-1], 'when': when})
-        out.sort(key=lambda x: x['when'] or datetime.max.replace(tzinfo=timezone.utc))
-        return out[:40]
+        from core.utils.crontab_schedule import upcoming_runs
+        return upcoming_runs()
     except Exception as exc:  # noqa: BLE001
         logger.debug('[dashboard] upcoming unavailable: %s', exc)
         return []

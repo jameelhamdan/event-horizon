@@ -126,8 +126,7 @@ def process_article_task(article_id, only_failed: bool = False) -> int:
     return Workflow.process_articles(ids=[article_id], only_failed=only_failed)
 
 
-def dispatch_process_articles_task(limit: int | None = None, only_failed: bool = False,
-                                   chunk_size: int | None = None) -> int:
+def dispatch_process_articles_task(limit: int | None = None, only_failed: bool = False, chunk_size: int | None = None) -> int:
     """Select unprocessed (or un-located) articles and fan them out. Returns jobs enqueued."""
     from core import models as core_models
     from services.queue import enqueue, make_retry
@@ -227,7 +226,7 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
 
     Enqueues full price history + top-10/week article backfill for every enabled RSS
     source, then trains/runs the forecast. Guarded by a persisted cache flag and a
-    PriceBar-presence heuristic so it runs exactly once. Triggered from setup_schedule.
+    PriceBar-presence heuristic so it runs exactly once. Trigger manually or via admin dashboard.
     """
     import logging
     from django.core.cache import cache

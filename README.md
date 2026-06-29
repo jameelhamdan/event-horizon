@@ -41,8 +41,8 @@ docker compose exec backend python manage.py createsuperuser
 ```
 
 Deployment is **configurationless**: migrations seed config/reference data
-(`MarketSymbol`, `StaticPoint`) and the scheduler triggers a one-time, idempotent
-background backfill (prices + articles) plus the first forecast train/run — no manual
+(`MarketSymbol`, `StaticPoint`). Bootstrap backfill (prices + articles) plus the first
+forecast train/run is triggered from the admin dashboard — no manual
 `bootstrap_static_points` or backfill commands. See [docs/operations.md](docs/operations.md).
 Operate it from the admin dashboard at `/admin/dashboard/`.
 

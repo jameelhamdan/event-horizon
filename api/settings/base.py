@@ -223,7 +223,7 @@ CACHES = {
 TASK_QUEUE_ENABLED = config('TASK_QUEUE_ENABLED', default=False, cast=bool)
 
 # ── Feature flags (A4) — let a deployment run a lean core without code changes. ──
-# Each gates both scheduling (setup_schedule) and the task function itself.
+# Each gates both scheduling (api/crontab) and the task function itself.
 NEWSLETTER_ENABLED = config('NEWSLETTER_ENABLED', default=True, cast=bool)
 STREAM_PRICES_ENABLED = config('STREAM_PRICES_ENABLED', default=True, cast=bool)
 STREAM_NOTAM_ENABLED = config('STREAM_NOTAM_ENABLED', default=True, cast=bool)
@@ -283,7 +283,7 @@ ARTICLE_MIN_IMPORTANCE = config('ARTICLE_MIN_IMPORTANCE', default=4.0, cast=floa
 ARTICLE_CLEANUP_GRACE_HOURS = config('ARTICLE_CLEANUP_GRACE_HOURS', default=48, cast=int)
 # Processed+unlocated articles older than this are pruned by prune_stale_articles_task.
 ARTICLE_STALE_PROCESSED_DAYS = config('ARTICLE_STALE_PROCESSED_DAYS', default=7, cast=int)
-# score_articles_task runs every N minutes (registered in setup_schedule).
+# score_articles_task runs hourly (see api/crontab).
 SCORE_INTERVAL_MINUTES = config('SCORE_INTERVAL_MINUTES', default=15, cast=int)
 # Fetch-time filters applied to every RSS article (zero LLM cost).
 ARTICLE_MIN_WORD_COUNT = config('ARTICLE_MIN_WORD_COUNT', default=30, cast=int)

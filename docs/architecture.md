@@ -7,7 +7,7 @@
 | Backend | Django 6 + django-mongodb-backend |
 | Storage | MongoDB 8 |
 | Task queue | django-rq + Redis — two queues: `default` (light I/O) and `heavy` (NLP/LLM) |
-| Scheduling | rq-scheduler, registered by the `setup_schedule` management command |
+| Scheduling | supercronic + `api/crontab` → `manage.py run_task` (runs in `api` container) |
 | Ingestion | feedparser (RSS) + requests |
 | NLP | LLM (entities · sentiment · category/sub-category · geocode) · sentence-transformers (clustering) · **FinBERT** (financial sentiment) · geonamescache |
 | LLM | Multi-provider via `services/llm.py` — `g4f` (default), `openrouter`, `ollama`; per-use-case routing + fallback chains (`settings.LLM_ROUTES`) |
@@ -22,10 +22,10 @@
 
 | Service | Role |
 |---------|------|
-| `api` | uvicorn ASGI app (`app.asgi`), port 8000 internal |
-| `worker-light` | `rqworker default` — fast I/O tasks |
-| `worker-heavy` | `rqworker heavy` — NLP / LLM / forecasting tasks |
-| `scheduler` | runs `setup_schedule` then `rqscheduler` |
+| `api` | uvicorn ASGI + supercronic (`api/crontab`) |
+| `worker-light` | `rqworker-pool default` — fast I/O tasks |
+| `worker-heavy` | `rqworker-pool heavy` — NLP / LLM tasks |
+| `worker-bulk` | `rqworker-pool bulk` — long one-shot jobs |
 | `frontend` | builds the Vite SPA, copies `dist/` |
 | `nginx` | reverse proxy (80/443) |
 | `redis` | RQ broker + cache + SSE pub/sub |
@@ -45,11 +45,14 @@ flowchart LR
     API --> MONGO[(MongoDB)]
     API <-->|SSE pub/sub + cache| REDIS[(Redis)]
 
-    SCHED[scheduler · rqscheduler] -->|enqueue jobs| REDIS
+    API -->|supercronic · api/crontab| REDIS
+    API -->|enqueue via run_task| REDIS
     REDIS -->|default queue| WL[worker-light]
     REDIS -->|heavy queue| WH[worker-heavy]
+    REDIS -->|bulk queue| WB[worker-bulk]
     WL --> MONGO
     WH --> MONGO
+    WB --> MONGO
     WH -->|LLM calls| G4F[g4f proxy]
     G4F -.->|fallback| EXT([OpenRouter])
     WH -->|SES| SES([AWS SES email])

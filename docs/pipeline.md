@@ -2,13 +2,13 @@
 
 The system is a chain of stages. Each stage has a task function in
 `services/tasks.py` (plain Python, no decorator), a management command for manual
-runs, and a scheduled cadence registered by `setup_schedule`. Stages communicate
+runs, and a scheduled cadence in `api/crontab`. Stages communicate
 only through MongoDB documents — there is no in-memory hand-off — so any stage can be
 re-run independently.
 
 > Scheduling note: heavy-queue NLP/LLM stages run at a multiple of their base
 > interval (≈5–6×). Change an interval by setting its env var and restarting the
-> `scheduler` service; `setup_schedule` clears and re-registers every job on start.
+> Periodic jobs run via supercronic in the `api` container; edit `api/crontab` to change cadence.
 
 ## Stage chain & cadences
 
