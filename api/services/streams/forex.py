@@ -7,7 +7,7 @@ import logging
 from datetime import date
 
 import requests
-from django.conf import settings
+
 from django.utils import timezone as dj_timezone
 
 from .base import BaseStream
@@ -27,10 +27,7 @@ ECB_SERIES = {
 
 # ECB replaced sdw-wsrest.ecb.europa.eu with data-api.ecb.europa.eu
 ECB_BASE_URL = 'https://data-api.ecb.europa.eu/service/data/EXR'
-HEADERS = {
-    'Accept': 'application/json',
-    'User-Agent': f'Mozilla/5.0 (compatible; {settings.APP_NAME}/1.0)',
-}
+from services.streams.base import HEADERS
 
 
 def _fetch_series(currency: str) -> float | None:

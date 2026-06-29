@@ -36,6 +36,7 @@
 
 # ── Forecasting ──────────────────────────────────────────────────────────
 0 */6 * * *    python /app/manage.py run_task dispatch_route_events_task      --require-flag FORECAST_ENABLED
-0 5   * * *    python /app/manage.py run_task retrain_and_run_forecast_task   --require-flag FORECAST_ENABLED
+0  5  * * *    python /app/manage.py run_task train_forecast_model_task  --require-flag FORECAST_ENABLED
+30 5  * * *    python /app/manage.py run_task run_forecast_task           --require-flag FORECAST_ENABLED
 0 7   * * *    python /app/manage.py run_task score_forecasts_task            --require-flag FORECAST_ENABLED
 0 0   * * 0    python /app/manage.py run_task backfill_prices_task            --require-flag FORECAST_ENABLED

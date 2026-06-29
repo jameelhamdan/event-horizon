@@ -19,15 +19,15 @@ class Command(BaseTaskCommand):
         )
 
     def handle(self, *args, **kwargs):
-        from services.tasks import tag_topics_task
-
         task_kwargs = dict(hours=kwargs['hours'], force_retag=kwargs['force'])
 
         if kwargs['background']:
             from services.queue import enqueue
-            enqueue(tag_topics_task, **task_kwargs)
-            self.stdout.write(self.style.SUCCESS('Enqueued tag_topics_task'))
+            from services.tasks import dispatch_tag_topics_task
+            enqueue(dispatch_tag_topics_task, **task_kwargs, queue='default')
+            self.stdout.write(self.style.SUCCESS('Enqueued dispatch_tag_topics_task'))
             return
 
-        tagged = tag_topics_task(**task_kwargs)
+        from services.workflow import Workflow
+        tagged = Workflow.tag_events_with_topics(**task_kwargs)
         self.stdout.write(self.style.SUCCESS(f'Tagging complete: {tagged} event(s) processed'))

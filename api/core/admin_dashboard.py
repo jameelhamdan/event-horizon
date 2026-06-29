@@ -27,19 +27,23 @@ def _handle_action(request):
     action = request.POST.get('dashboard_action', '')
     try:
         if action == 'run_pipeline':
-            enqueue(T.run_pipeline_task, fetch_hours=6, process_limit=1000,
-                    aggregate_hours=24, tag=True, queue='heavy', job_timeout=-1)
-            _ok(request, 'Full pipeline enqueued (fetch → process → aggregate → tag).')
+            enqueue(T.dispatch_fetch_task, queue='default')
+            enqueue(T.dispatch_process_articles_task, queue='default')
+            enqueue(T.aggregate_events_task, queue='heavy', job_timeout=-1)
+            _ok(request, 'Pipeline dispatchers enqueued (fetch → process → aggregate).')
         elif action == 'backfill_prices':
             enqueue(T.backfill_prices_task, years=10, queue='bulk', job_timeout=-1)
             _ok(request, 'Price backfill enqueued (10y, all active symbols).')
         elif action == 'backfill_articles':
-            enqueue(T.backfill_articles_task, queue='bulk', job_timeout=-1)
+            from datetime import datetime, timedelta, timezone as dt_timezone
+            now = datetime.now(dt_timezone.utc)
+            enqueue(T.backfill_all_sources_task, now - timedelta(days=14), now, None,
+                    queue='bulk', job_timeout=-1)
             _ok(request, 'Article backfill enqueued (weighted per-source, all sources).')
         elif action == 'retrain_forecast':
-            # Single chained task so run_forecast always uses the freshly trained model.
-            enqueue(T.retrain_and_run_forecast_task, queue='bulk', job_timeout=-1)
-            _ok(request, 'Forecast retrain + run enqueued (sequential, bulk queue).')
+            enqueue(T.train_forecast_model_task, queue='bulk', job_timeout=-1)
+            enqueue(T.run_forecast_task, queue='bulk', job_timeout=-1)
+            _ok(request, 'Forecast retrain + run enqueued (bulk queue).')
         elif action == 'rerun_bootstrap':
             enqueue(T.bootstrap_initial_data_task, True, queue='default', job_timeout=-1)
             _ok(request, 'First-load bootstrap re-triggered (force).')

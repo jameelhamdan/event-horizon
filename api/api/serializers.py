@@ -7,12 +7,16 @@ from core.models import (
 from newsletter.models import DailyNewsletter
 
 
+def _get_translation(obj, lang: str, field: str) -> str:
+    return (getattr(obj, 'translations', None) or {}).get(lang, {}).get(field) or getattr(obj, field, '')
+
+
 class ArticleSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
     title_ar = serializers.SerializerMethodField()
 
     def get_title_ar(self, obj):
-        return (getattr(obj, 'translations', None) or {}).get('ar', {}).get('title') or obj.title
+        return _get_translation(obj, 'ar', 'title')
 
     class Meta:
         model = Article
@@ -36,10 +40,10 @@ class EventSerializer(serializers.ModelSerializer):
     source_names = serializers.SerializerMethodField()
 
     def get_title_ar(self, obj):
-        return (getattr(obj, 'translations', None) or {}).get('ar', {}).get('title') or obj.title
+        return _get_translation(obj, 'ar', 'title')
 
     def get_location_name_ar(self, obj):
-        return (getattr(obj, 'translations', None) or {}).get('ar', {}).get('location_name') or obj.location_name
+        return _get_translation(obj, 'ar', 'location_name')
 
     def get_source_names(self, obj):
         source_map = self.context.get('source_map', {})

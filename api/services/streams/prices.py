@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 
 import requests
-from django.conf import settings
+
 from django.utils import timezone as dj_timezone
 
 from .base import BaseStream, redis_publish
@@ -48,10 +48,7 @@ YAHOO_STREAM_KEY = {
     '^VIX': 'index', 'DX-Y.NYB': 'index',
 }
 
-HEADERS = {
-    'User-Agent': f'Mozilla/5.0 (compatible; {settings.APP_NAME}/1.0)',
-    'Accept': 'application/json',
-}
+from services.streams.base import HEADERS
 
 
 def _yahoo_quote(symbol: str) -> dict | None:

@@ -11,7 +11,7 @@ which dispatches jobs via `manage.py run_task`. `bootstrap_initial_data_task` is
 **idempotent** (guarded by a cache flag and a
 `PriceBar`-presence heuristic) and, on a fresh deployment, enqueues:
 
-- `backfill_prices_task(years=5)` — daily OHLC for every active symbol
+- `backfill_prices_task` — daily OHLC for every active symbol
 - `backfill_all_sources_task` — top-10/week articles for every enabled RSS source over
   `BOOTSTRAP_ARTICLE_YEARS` (default 1y)
 - `train_forecast_model_task` + `run_forecast_task`
@@ -38,9 +38,9 @@ change). Tuning env vars: `PROCESS_CHUNK_SIZE`, `PROCESS_DISPATCH_LIMIT`,
 `TAG_DISPATCH_LIMIT`, `ROUTE_DISPATCH_LIMIT`, `STUCK_RECOVERY_INTERVAL_MINUTES`.
 
 **Coordination.** Downstream steps stay on their own schedule and operate on whatever
-is ready (eventually-consistent; idempotent upserts mean nothing is lost). The admin
-**"Run full pipeline"** button still runs `run_pipeline_task` (fetch → process →
-aggregate → tag in one ordered job) so events reliably appear when it finishes.
+is ready (eventually-consistent; idempotent upserts mean nothing is lost). The admin **"Run full pipeline"** button enqueues `dispatch_fetch_task`,
+`dispatch_process_articles_task`, and `aggregate_events_task` independently — eventual
+consistency; results appear as each stage completes.
 
 **Robustness.** Network/LLM workers are enqueued with RQ retries
 (`make_retry()` → backoff `[60, 300, 900]`). Saves are idempotent (`get_or_create`

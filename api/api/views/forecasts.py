@@ -48,10 +48,6 @@ class ForecastLatestView(APIView):
         return Response({'results': data, 'count': len(data)})
 
 
-class ForecastListView(ForecastLatestView):
-    """GET /api/forecasts/ — same as /latest/ (newest forecast per symbol+horizon)."""
-
-
 class ForecastAccuracyView(APIView):
     """
     GET /api/forecasts/accuracy/

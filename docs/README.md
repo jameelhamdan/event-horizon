@@ -64,16 +64,12 @@ flowchart TD
 
 ```bash
 cp api/.env.example .env.app      # fill in SECRET_KEY etc.; LLM works out of the box
-docker compose up                 # everything (incl. the g4f LLM proxy)
+docker compose up                 # everything
 cd api && python manage.py migrate
 python manage.py run_task dispatch_fetch_task   # enqueue one scheduled job manually
 ```
 
-> **LLM**: no API key required by default — the `g4f` service provides a
-> registration-free, OpenAI-compatible endpoint (OpenRouter is the optional
-> fallback). In `.env.app` set `G4F_BASE_URL=http://g4f:1337/v1` (the `localhost`
-> default is for running `manage.py` outside Docker). See
-> [architecture.md → LLM providers & routing](architecture.md#llm-providers--routing).
+> **LLM**: Ollama is the default backend (self-hosted, no API key). Set `OLLAMA_BASE_URL` in `.env` if Ollama runs elsewhere (default: `http://localhost:11434`). For free cloud fallback, add `GROQ_API_KEYS` or `CEREBRAS_API_KEYS`. OpenRouter is the final fallback if keys are set. See [architecture.md → LLM providers & routing](architecture.md#llm-providers--routing).
 
 See [`../CLAUDE.md` → Dev Commands](../CLAUDE.md) for the full command list.
 </content>

@@ -30,28 +30,6 @@ BOOTSTRAP_ARTICLE_YEARS = int(os.getenv("BOOTSTRAP_ARTICLE_YEARS", "1"))
 
 # ── Text pipeline ─────────────────────────────────────────────────────────────
 
-def fetch_articles_task(source_code: str | None = None, start_date: datetime | None = None) -> int:
-    now = datetime.now(dt_timezone.utc)
-    if start_date is None:
-        start_date = now - timedelta(minutes=DEFAULT_FETCH_MINUTES)
-    # Soft deadline 30 s before the hard RQ timeout fires (interval - 60 s).
-    # Checked between sources so we stop gracefully rather than being force-killed mid-fetch.
-    interval_seconds = int(os.getenv('FETCH_INTERVAL_MINUTES', '10')) * 60
-    deadline = now + timedelta(seconds=interval_seconds - 30)
-    return Workflow.fetch_articles(source_code, start_date, deadline=deadline)
-
-
-def process_articles_task(
-    limit: int = DEFAULT_PROCESS_LIMIT,
-    source_code: str | None = None,
-    reprocess: bool = False,
-    only_failed: bool = False,
-) -> int:
-    return Workflow.process_articles(
-        limit=limit, source_code=source_code, reprocess=reprocess, only_failed=only_failed,
-    )
-
-
 def aggregate_events_task(
     hours: int = DEFAULT_AGGREGATE_HOURS,
     min_articles: int = DEFAULT_AGGREGATE_MIN_ARTICLES,
@@ -62,36 +40,10 @@ def aggregate_events_task(
     return result
 
 
-def run_pipeline_task(
-    fetch_hours: int = 2,
-    process_limit: int = 500,
-    aggregate_hours: int = 24,
-    source_code: str | None = None,
-    tag: bool = False,
-) -> dict:
-    """Run fetch -> process -> aggregate (-> tag) sequentially in ONE job.
-
-    Enqueueing the three steps as separate jobs races them: aggregate can run before
-    process/fetch finish, so no new events appear. This chains them in order so the admin
-    'Run full pipeline' button reliably produces Events.
-    """
-    now = datetime.now(dt_timezone.utc)
-    summary: dict = {}
-    summary['fetched'] = fetch_articles_task(source_code, now - timedelta(hours=fetch_hours))
-    summary['processed'] = process_articles_task(limit=process_limit)
-    created, updated = aggregate_events_task(hours=aggregate_hours)
-    summary['events_created'] = created
-    summary['events_updated'] = updated
-    if tag:
-        summary['tagged'] = tag_topics_task(hours=aggregate_hours)
-    return summary
-
-
 # ── Fan-out: dispatcher → per-record worker (WA3) ────────────────────────────────
 # A light dispatcher (default queue) selects pending records and enqueues one worker
 # job per record/chunk so the queue spreads work across all workers. Workers are
-# idempotent. Downstream steps run on their own schedule (eventually-consistent) —
-# the deterministic admin "Run full pipeline" path stays in run_pipeline_task.
+# idempotent. Downstream steps run on their own schedule (eventually-consistent).
 
 def fetch_source_task(source_code: str, start_date: datetime | None = None) -> int:
     """Fetch one source. Idempotent per source (RSS de-dupes on save)."""
@@ -252,31 +204,18 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
     # top_n=None → each source's per-week cap derives from its weight (10–25 by priority).
     enqueue(backfill_all_sources_task, start, now, None, queue='bulk', job_timeout=-1, retry=retry)
     if settings.FORECAST_ENABLED:
-        # Sequential: train then run in one bulk job so forecasts always use fresh artifacts.
-        enqueue(retrain_and_run_forecast_task, queue='bulk', job_timeout=-1)
+        enqueue(train_forecast_model_task, queue='bulk', job_timeout=-1, retry=retry)
+        enqueue(run_forecast_task, queue='bulk', job_timeout=-1)
 
     cache.set(FLAG, True, timeout=None)
     log.info('[bootstrap] initial data backfill enqueued (article window %dy)', BOOTSTRAP_ARTICLE_YEARS)
     return 1
 
 
-def backfill_articles_task(top_n: int | None = None, days: int = 14) -> dict:
-    """Rolling recent-window article backfill across all enabled RSS sources.
-    top_n=None → each source's per-week cap derives from its weight (10–25 by priority).
-    Scheduled weekly so article history stays filled without manual action (WA4)."""
-    now = datetime.now(dt_timezone.utc)
-    start = now - timedelta(days=days)
-    return backfill_all_sources_task(start, now, top_n=top_n)
-
-
 # ── Topic tasks ────────────────────────────────────────────────────────────────
 
 def refresh_topics_task() -> int:
     return Workflow.refresh_topics()
-
-
-def tag_topics_task(hours: int = DEFAULT_AGGREGATE_HOURS, force_retag: bool = False) -> int:
-    return Workflow.tag_events_with_topics(hours=hours, force_retag=force_retag)
 
 
 def retroactive_tag_topic_task(slug: str, lookback_hours: int = 72) -> int:
@@ -574,18 +513,6 @@ def backfill_prices_task(
     return sum(results.values())
 
 
-def route_events_task(hours: int = 168, source: str | None = None) -> int:
-    """(Re)route recent events to market symbols, populating Event.affected_indicators."""
-    from django.conf import settings
-    from core import models as core_models
-    from services.routing import route_events
-
-    src = source or settings.FORECAST_ROUTER
-    start = datetime.now(dt_timezone.utc) - timedelta(hours=hours)
-    events = list(core_models.Event.objects.filter(started_at__gte=start))
-    return route_events(events, source=src)
-
-
 def train_forecast_model_task() -> int:
     """Train the LightGBM classifier + regressor for every configured horizon."""
     from django.conf import settings
@@ -609,15 +536,6 @@ def train_forecast_model_task() -> int:
             import logging
             logging.getLogger(__name__).warning('[forecast] train h%d skipped: %s', h, exc)
     return trained
-
-
-def retrain_and_run_forecast_task() -> dict:
-    """Train models then immediately write forecasts — sequential so run always uses the
-    freshly trained artifacts. Enqueue on the bulk queue so the paired heavy-queue
-    run_forecast_task can never race ahead of training."""
-    trained = train_forecast_model_task()
-    ran = run_forecast_task()
-    return {'trained_horizons': trained, 'forecasts_written': ran}
 
 
 def run_forecast_task() -> int:

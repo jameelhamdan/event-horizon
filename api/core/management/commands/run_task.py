@@ -37,7 +37,8 @@ HEAVY_TASKS = frozenset({
 })
 BULK_TASKS = frozenset({
     'backfill_prices_task',
-    'retrain_and_run_forecast_task',
+    'train_forecast_model_task',
+    'run_forecast_task',
 })
 
 

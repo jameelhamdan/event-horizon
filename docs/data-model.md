@@ -44,10 +44,10 @@ erDiagram
     }
     FORECAST {
         string symbol
-        int horizon_hours
-        string magnitude_bucket
-        string volatility_bucket
-        bool abstained
+        int horizon_days
+        float proba_up
+        string direction
+        bool is_correct
     }
     TOPIC {
         string slug PK
@@ -161,47 +161,44 @@ Helper: `is_live_at(dt)` → bool.
 
 ## Forecast
 
-One prediction for one `(symbol, horizon_hours, generated_at)`. The LLM's single
-multi-horizon JSON is **split into one row per horizon**. See
+One prediction for one `(symbol, horizon_days, generated_at)`. See
 [forecasting.md](forecasting.md).
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `symbol` | str(32) | Indicator symbol (e.g. `GC=F`, `^VIX`) |
 | `stream_key` | str(32) | crypto / stock / commodity / forex / bond / index |
-| `generated_at` | datetime | Run time `t` |
-| `horizon_hours` | int | 1 (crypto-only) / 24 / 168 ★new |
-| `direction` | str → `ForecastDirection` | up / down / neutral (legacy quick-display head) |
-| `confidence` | float | **Calibrated** confidence [0, 1] |
-| `magnitude_bucket` | str → `MagnitudeBucket` | Predicted 5-class direction ★new |
-| `actual_bucket` | str → `MagnitudeBucket` | Realized direction (scoring) ★new |
-| `volatility_bucket` | str → `VolatilityBucket` | Predicted 3-class vol regime ★new |
-| `actual_volatility_bucket` | str → `VolatilityBucket` | Realized vol regime (scoring) ★new |
-| `reliability` | str → `Reliability` | high / med / low ★new |
-| `abstained` | bool | True when v1 declined to predict ★new |
-| `predicted_value` | float \| null | Price at forecast time |
-| `actual_value` | float \| null | Price at horizon (set by scoring) |
-| `model_name` | str(128) | Model identifier |
-| `reasoning` | text | LLM explanation |
-| `event_ids` | `[]` | Routed events that fed the vector |
-| `feature_vector` | `{}` | As-of features + **stored bucket thresholds** used at scoring |
+| `generated_at` | datetime | Wall-clock time the forecast was produced |
+| `as_of_date` | datetime | Feature cut time `t` |
+| `horizon_days` | int | 1 (short-term) or 5 (weekly) |
+| `direction` | str → `ForecastDirection` | up / down / neutral |
+| `proba_up` | float | Calibrated P(up) [0, 1] |
+| `predicted_change_pct` | float | Regressor output (%) |
+| `predicted_price` | float \| null | Predicted price at horizon |
+| `band_low` | float \| null | Lower bound of prediction band |
+| `band_high` | float \| null | Upper bound of prediction band |
+| `confidence` | float | `\|proba_up − 0.5\| × 2` — scalar [0, 1] |
+| `current_value` | float \| null | Last close at feature cut time `t` |
+| `router_source` | str(8) | Provenance: `llm` or `rules` |
+| `model_version` | str(64) | Model identifier / version string |
+| `realized_direction` | str(8) \| null | Actual direction after horizon (scoring) |
+| `realized_change_pct` | float \| null | Actual % change after horizon (scoring) |
+| `is_correct` | bool \| null | Whether direction prediction was correct (scoring) |
+| `scored_at` | datetime \| null | When scoring was applied |
+| `created_on` | datetime | Row creation timestamp |
 
-**Indexes:** `(symbol, horizon_hours, generated_at)`, `(symbol, generated_at)`,
-`stream_key`, `generated_at`.
+**Indexes:** `(symbol, horizon_days, generated_at)`, `as_of_date`, `generated_at`.
 
 ### Enums
 
 | Enum | Values |
 |------|--------|
 | `EventCategory` | conflict, disaster, economic, political, health, general *(+ legacy protest, crime)* |
-| `MagnitudeBucket` | strong_down, down, flat, up, strong_up |
-| `VolatilityBucket` | calm, normal, elevated |
-| `Reliability` | high, med, low |
 | `ForecastDirection` | up, down, neutral |
 | `SourceType` | website, api, rss, social, email, newsletter, database |
 | `StaticPointType` | exchange, commodity_exchange, port, central_bank |
 
-`HORIZON_HOURS = (1, 24, 168)`.
+Horizons: 1 day (short-term), 5 days (weekly). Set via `FORECAST_HORIZON_DAYS` in settings.
 
 ---
 

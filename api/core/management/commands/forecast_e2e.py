@@ -28,11 +28,20 @@ class Command(BaseCommand):
         parser.add_argument('--output', type=str, default=None)
 
     def handle(self, *args, **opts):
+        from datetime import datetime, timedelta, timezone as dt_timezone
+        from django.conf import settings as _settings
         from core import models as core_models
         from services.tasks import (
-            backfill_prices_task, route_events_task,
+            backfill_prices_task,
             train_forecast_model_task, run_forecast_task, score_forecasts_task,
         )
+        from services.routing import route_events as _route_events
+
+        def _route_events_direct(hours):
+            src = _settings.FORECAST_ROUTER
+            start = datetime.now(dt_timezone.utc) - timedelta(hours=hours)
+            events = list(core_models.Event.objects.filter(started_at__gte=start))
+            return _route_events(events, source=src)
 
         symbols = [s.strip() for s in opts['symbols'].split(',') if s.strip()] or None
         report = {'started_at': datetime.now(timezone.utc).isoformat(), 'steps': {}}
@@ -50,7 +59,7 @@ class Command(BaseCommand):
         if not opts['skip_backfill']:
             step('backfill', lambda: backfill_prices_task(symbols=symbols, years=opts['years']))
         if not opts['skip_route']:
-            step('route_events', lambda: route_events_task(hours=opts['route_hours']))
+            step('route_events', lambda: _route_events_direct(hours=opts['route_hours']))
         if not opts['skip_train']:
             step('train', train_forecast_model_task)
         step('run_forecast', run_forecast_task)

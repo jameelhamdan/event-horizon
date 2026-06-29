@@ -13,14 +13,21 @@ class Command(BaseTaskCommand):
                             help='Enqueue as a background RQ task instead of running directly')
 
     def handle(self, *args, **kwargs):
-        from services.tasks import route_events_task
-
         task_kwargs = dict(hours=kwargs['hours'], source=kwargs['router'])
         if kwargs['background']:
             from services.queue import enqueue
-            enqueue(route_events_task, queue='heavy', **task_kwargs)
-            self.stdout.write(self.style.SUCCESS('Enqueued route_events_task'))
+            from services.tasks import dispatch_route_events_task
+            enqueue(dispatch_route_events_task, **task_kwargs, queue='default')
+            self.stdout.write(self.style.SUCCESS('Enqueued dispatch_route_events_task'))
             return
 
-        updated = route_events_task(**task_kwargs)
+        from datetime import datetime, timedelta, timezone as dt_timezone
+        from django.conf import settings
+        from core import models as core_models
+        from services.routing import route_events
+
+        src = kwargs['router'] or settings.FORECAST_ROUTER
+        start = datetime.now(dt_timezone.utc) - timedelta(hours=kwargs['hours'])
+        events = list(core_models.Event.objects.filter(started_at__gte=start))
+        updated = route_events(events, source=src)
         self.stdout.write(self.style.SUCCESS(f'Routed {updated} event(s)'))
