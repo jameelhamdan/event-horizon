@@ -381,7 +381,7 @@ NEWSLETTER_BASE_URL = config('NEWSLETTER_BASE_URL', default='http://localhost')
 AUTH_USER_MODEL = 'accounts.User'
 SESSION_ENGINE = 'qsessions.backends.cached_db'
 DEFAULT_AUTO_FIELD = 'django_mongodb_backend.fields.ObjectIdAutoField'
-SILENCED_SYSTEM_CHECKS = ['mongodb.E001']
+SILENCED_SYSTEM_CHECKS = ['mongodb.E001', 'mongodb.fields.auto.E001']
 MIGRATION_MODULES = {
     "admin": "migrations.admin",
     "auth": "migrations.auth",
