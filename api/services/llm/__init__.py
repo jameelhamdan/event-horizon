@@ -192,7 +192,16 @@ class OllamaLLMService(BaseLLMService):
             )
             response.raise_for_status()
             content = response.json()['message']['content']
-            return _THINK_RE.sub('', content).strip()
+            result = _THINK_RE.sub('', content).strip()
+            # An empty body (e.g. a reasoning model that emits only <think>…</think>)
+            # must be treated as a failure so the fallback chain continues to the
+            # next provider instead of handing back '' that downstream JSON parsing
+            # then chokes on.
+            if not result:
+                raise LLMError(f'Ollama model {self._model} returned empty content')
+            return result
+        except LLMError:
+            raise
         except requests.HTTPError as e:
             logger.error('Ollama %s: %s', e.response.status_code, e.response.text[:200])
             raise LLMError(f'Ollama request failed ({e.response.status_code})') from e
@@ -269,18 +278,18 @@ def _provider_specs() -> dict[str, dict]:
         'ollama_medium': {'base_url': settings.OLLAMA_BASE_URL, 'model': settings.OLLAMA_MODEL_MEDIUM},
         'ollama_large':  {'base_url': settings.OLLAMA_BASE_URL, 'model': settings.OLLAMA_MODEL_LARGE},
     }
-    if groq_keys:
-        specs['groq'] = {
-            'base_urls': ['https://api.groq.com/openai/v1'],
-            'api_keys': groq_keys,
-            'model': settings.GROQ_MODEL,
-        }
-    if cerebras_keys:
-        specs['cerebras'] = {
-            'base_urls': ['https://api.cerebras.ai/v1'],
-            'api_keys': cerebras_keys,
-            'model': settings.CEREBRAS_MODEL,
-        }
+    # Always register these known providers so an absent API key is reported as
+    # "not configured" (debug) rather than "Unknown LLM provider" (warning).
+    specs['groq'] = {
+        'base_urls': ['https://api.groq.com/openai/v1'],
+        'api_keys': groq_keys,
+        'model': settings.GROQ_MODEL,
+    }
+    specs['cerebras'] = {
+        'base_urls': ['https://api.cerebras.ai/v1'],
+        'api_keys': cerebras_keys,
+        'model': settings.CEREBRAS_MODEL,
+    }
     return specs
 
 
@@ -306,7 +315,12 @@ def _get_backend(name: str, specs: dict[str, dict]) -> BaseLLMService | None:
         return None
     configured = spec.get('base_urls') or spec.get('base_url')
     if not configured:
-        logger.warning('LLM provider %r is not configured (no base_url) — skipping', name)
+        logger.debug('LLM provider %r is not configured (no base_url) — skipping', name)
+        return None
+    # OpenAI-compat providers (groq/cerebras) need a key; an empty key list means
+    # the provider just isn't enabled in this deployment — skip it quietly.
+    if 'base_urls' in spec and not spec.get('api_keys'):
+        logger.debug('LLM provider %r is not configured (no API key) — skipping', name)
         return None
     with _backend_lock:
         if name not in _backend_cache:

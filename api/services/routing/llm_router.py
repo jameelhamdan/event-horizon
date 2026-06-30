@@ -19,6 +19,23 @@ from services.forecasting.routing import (
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_json_object(response: str) -> dict:
+    """Parse a JSON object from a possibly-noisy LLM response.
+
+    Some models (esp. small/reasoning ones) wrap the JSON in prose or emit
+    nothing parseable. Strip code fences first, then fall back to isolating the
+    outermost ``{...}`` span before giving up.
+    """
+    cleaned = strip_code_fences(response)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start, end = cleaned.find('{'), cleaned.rfind('}')
+        if start != -1 and end > start:
+            return json.loads(cleaned[start:end + 1])
+        raise
+
 _PANEL_DESC = {
     'GC=F': 'Gold (safe-haven)', 'CL=F': 'Crude oil', 'NG=F': 'Natural gas',
     'ZW=F': 'Wheat', 'DX-Y.NYB': 'US Dollar index', '^TNX': 'US 10Y yield',
@@ -88,13 +105,14 @@ class LLMEventRouter:
                 'Example: {"1": {"CL=F": 0.7, "^VIX": -0.3}, "2": {}}'
             )
 
+            response = ''
             try:
                 response = llm.chat(
                     [{'role': 'user', 'content': prompt}],
                     temperature=0,
                     max_tokens=min(800, 60 * len(batch) + 100),
                 ).strip()
-                parsed = json.loads(strip_code_fences(response))
+                parsed = _parse_json_object(response)
                 if not isinstance(parsed, dict):
                     raise ValueError('LLM returned non-dict')
 
@@ -103,7 +121,10 @@ class LLMEventRouter:
                     cleaned = self._clean(parsed.get(idx), panel_set)
                     results[key] = cleaned if cleaned else _fallback(event)
             except Exception as exc:  # noqa: BLE001 — broad: any failure falls back
-                logger.warning('[router] batch %d/%d failed (%s) — deterministic fallback', num, total, exc)
+                logger.warning(
+                    '[router] batch %d/%d failed (%s) — deterministic fallback; raw response: %r',
+                    num, total, exc, response[:500],
+                )
                 for event in batch:
                     results[str(event.pk)] = _fallback(event)
 
