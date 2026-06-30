@@ -1,9 +1,8 @@
 import { useEffect, useRef } from "react"
 import type { SSEEvent } from "../types"
 type SSEHandler = (event: SSEEvent) => void
-import constants from "@/constants"
 
-const SSE_URL = `${constants.BASE_URL}/api/sse`
+const SSE_URL = `/api/sse`
 
 export function useSSE(onEvent: SSEHandler) {
   const handlerRef = useRef(onEvent)

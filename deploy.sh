@@ -17,7 +17,7 @@ git fetch origin
 git reset --hard "origin/$BRANCH"
 
 echo "==> deploy: building and restarting services"
-$COMPOSE up -d --build --remove-orphans
+$COMPOSE up -d --build --force-recreate --remove-orphans
 
 echo "==> deploy: cleaning up old images"
 docker image prune -f
