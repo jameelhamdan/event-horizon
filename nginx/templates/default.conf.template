@@ -5,7 +5,13 @@ upstream api_backend {
 
 server {
     listen 80;
-    server_name _;
+    server_name www.${DOMAIN};
+    return 301 $scheme://${DOMAIN}$request_uri;
+}
+
+server {
+    listen 80;
+    server_name ${DOMAIN} _;
 
     root /usr/share/nginx/html;
     index index.html;

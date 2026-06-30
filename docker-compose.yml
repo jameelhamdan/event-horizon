@@ -20,6 +20,8 @@ services:
     restart: always
     ports:
       - "192.168.2.17:80:80"
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
     volumes:
       - ./frontend_dist:/usr/share/nginx/html:ro
       - static_data:/django_static:ro
