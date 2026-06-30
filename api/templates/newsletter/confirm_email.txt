@@ -1,6 +1,6 @@
-conflictradar.live — Confirm your subscription
+eventhorizonai.dev — Confirm your subscription
 
-Click the link below to confirm your subscription to the conflictradar.live daily briefing:
+Click the link below to confirm your subscription to the eventhorizonai.dev daily briefing:
 
 {{ confirm_url }}
 

@@ -1,4 +1,4 @@
-# Happinga-Meter — Documentation
+# Event Horizon — Documentation
 
 A real-time global event-intelligence platform that ingests news + market/geophysical
 streams, reconstructs them into **events** and **topics**, and predicts the

@@ -1,6 +1,6 @@
 1. Who we are
 
-conflictradar.live is an independent open-source project that provides a real-time map of global events sourced from publicly available news feeds. We do not operate as a legal entity and do not sell products or services. For questions, contact [contact@conflictradar.live](mailto:contact@conflictradar.live).
+eventhorizonai.dev is an independent open-source project that provides a real-time map of global events sourced from publicly available news feeds. We do not operate as a legal entity and do not sell products or services. For questions, contact [contact@eventhorizonai.dev](mailto:contact@eventhorizonai.dev).
 
 2. What data we collect
 
@@ -40,9 +40,9 @@ Under GDPR you have the right to:
 - Data portability
 - Log a complaint with your national supervisory authority
 
-**To withdraw analytics consent**, open your browser's developer tools, go to Application → Local Storage → conflictradar.live, and delete the \`cr_cookie_consent\` key. Then reload the page and choose "Decline" in the cookie banner. You can also clear all cookies for this site in your browser settings.
+**To withdraw analytics consent**, open your browser's developer tools, go to Application → Local Storage → eventhorizonai.dev, and delete the \`eh_cookie_consent\` key. Then reload the page and choose "Decline" in the cookie banner. You can also clear all cookies for this site in your browser settings.
 
-For any data requests, contact us at [contact@conflictradar.live](mailto:contact@conflictradar.live). We aim to respond within 30 days.
+For any data requests, contact us at [contact@eventhorizonai.dev](mailto:contact@eventhorizonai.dev). We aim to respond within 30 days.
 
 7. Data retention
 

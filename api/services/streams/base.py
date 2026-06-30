@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
 
 # Shared HTTP headers for all stream fetch calls.
-_APP_UA = f'Mozilla/5.0 (compatible; {getattr(settings, "APP_NAME", "happinga-meter")}/1.0)'
+_APP_UA = f'Mozilla/5.0 (compatible; {getattr(settings, "APP_NAME", "event-horizon")}/1.0)'
 HEADERS = {'User-Agent': _APP_UA, 'Accept': 'application/json'}
 HEADERS_UA = {'User-Agent': _APP_UA}
 

@@ -1,4 +1,4 @@
-# conflictradar.live
+# Event Horizon
 
 Live geopolitical event map with a daily AI-written email briefing. Ingests news from RSS feeds and web sources, runs NLP analysis, clusters articles into geolocated events, and displays them on an interactive Leaflet map.
 

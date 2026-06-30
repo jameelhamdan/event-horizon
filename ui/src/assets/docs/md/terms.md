@@ -1,10 +1,10 @@
 1. Acceptance of terms
 
-By accessing or using conflictradar.live ("the Service"), you agree to be bound by these Terms of Service. If you do not agree, please do not use the Service.
+By accessing or using eventhorizonai.dev ("the Service"), you agree to be bound by these Terms of Service. If you do not agree, please do not use the Service.
 
 2. Description of service
 
-conflictradar.live is a real-time event intelligence platform that aggregates, processes, and displays news and information sourced from publicly available third-party outlets, RSS feeds, and Telegram channels. The Service applies automated natural language processing to classify and geolocate events. It is provided free of charge for informational purposes only.
+eventhorizonai.dev is a real-time event intelligence platform that aggregates, processes, and displays news and information sourced from publicly available third-party outlets, RSS feeds, and Telegram channels. The Service applies automated natural language processing to classify and geolocate events. It is provided free of charge for informational purposes only.
 
 3. Disclaimer — accuracy and reliability
 
@@ -19,7 +19,7 @@ conflictradar.live is a real-time event intelligence platform that aggregates, p
 
 4. Limitation of liability
 
-To the fullest extent permitted by applicable law, conflictradar.live and its operators shall not be liable for any direct, indirect, incidental, special, consequential, or punitive damages arising from your use of or inability to use the Service, including but not limited to damages resulting from:
+To the fullest extent permitted by applicable law, eventhorizonai.dev and its operators shall not be liable for any direct, indirect, incidental, special, consequential, or punitive damages arising from your use of or inability to use the Service, including but not limited to damages resulting from:
 
 - Reliance on inaccurate, incomplete, or outdated information displayed on the Service
 - Service interruptions, downtime, or data loss
@@ -29,9 +29,9 @@ The Service is provided **"as is"** and **"as available"** without warranties of
 
 5. Intellectual property
 
-Article titles, summaries, and content displayed on the Service are sourced from and remain the property of their original publishers. conflictradar.live claims no copyright over third-party content. The underlying software, maps, and original visual design of the Service are the property of conflictradar.live.
+Article titles, summaries, and content displayed on the Service are sourced from and remain the property of their original publishers. eventhorizonai.dev claims no copyright over third-party content. The underlying software, maps, and original visual design of the Service are the property of eventhorizonai.dev.
 
-If you believe your copyrighted content is being displayed in a manner that infringes your rights, please contact us at [contact@conflictradar.live](mailto:contact@conflictradar.live).
+If you believe your copyrighted content is being displayed in a manner that infringes your rights, please contact us at [contact@eventhorizonai.dev](mailto:contact@eventhorizonai.dev).
 
 6. Acceptable use
 
@@ -48,5 +48,5 @@ The Service links to and aggregates content from external websites over which we
 
 8. Changes to these terms
 
-We reserve the right to update these Terms of Service at any time. The "Last updated" date reflects the most recent revision. Continued use of the Service after changes are posted constitutes acceptance of the revised terms. For questions, contact [contact@conflictradar.live](mailto:contact@conflictradar.live).
+We reserve the right to update these Terms of Service at any time. The "Last updated" date reflects the most recent revision. Continued use of the Service after changes are posted constitutes acceptance of the revised terms. For questions, contact [contact@eventhorizonai.dev](mailto:contact@eventhorizonai.dev).
   `

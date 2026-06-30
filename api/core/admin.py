@@ -536,7 +536,7 @@ admin.site.get_urls = _admin_get_urls
 
 # ── Branding ──────────────────────────────────────────────────────────────────
 from django.conf import settings as _settings  # noqa: E402
-_app = getattr(_settings, 'APP_NAME', 'conflictradar.live')
+_app = getattr(_settings, 'APP_NAME', 'eventhorizonai.dev')
 _version = getattr(_settings, 'VERSION_NUMBER', '')
 admin.site.site_header = f'{_app} v{_version}' if _version else _app
 admin.site.site_title = _app

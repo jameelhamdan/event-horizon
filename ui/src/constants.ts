@@ -3,6 +3,6 @@ export default {
   VERSION: __APP_VERSION__,
   BASE_URL: import.meta.env.VITE_DOMAIN || "http://localhost:8000",
   GA_ID: import.meta.env.VITE_GA_ID as string | undefined,
-  APP_NAME: (import.meta.env.VITE_APP_NAME as string | undefined) ?? "conflictradar.live",
-  SITE_TITLE: (import.meta.env.VITE_SITE_TITLE as string | undefined) ?? "Conflict Radar Live",
+  APP_NAME: (import.meta.env.VITE_APP_NAME as string | undefined) ?? "eventhorizonai.dev",
+  SITE_TITLE: (import.meta.env.VITE_SITE_TITLE as string | undefined) ?? "Event Horizon",
 };

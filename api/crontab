@@ -1,4 +1,4 @@
-# Happinga-Meter periodic schedule — run by supercronic inside the `api` container.
+# Event Horizon periodic schedule — run by supercronic inside the `api` container.
 #
 # Format:  m h dom mon dow   command
 # Every line dispatches a background task via `manage.py run_task <name> [key=value ...]`.

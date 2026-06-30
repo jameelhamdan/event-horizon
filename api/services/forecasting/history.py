@@ -20,7 +20,7 @@ from services.market_symbols import (
 
 logger = logging.getLogger(__name__)
 
-_HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; happinga-meter/1.0)'}
+_HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; event-horizon/1.0)'}
 
 
 def _day_anchor(dt: datetime) -> datetime:

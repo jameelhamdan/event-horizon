@@ -4,7 +4,7 @@ import { useLanguage } from "@/contexts/LanguageContext";
 import { useState, useEffect } from "react";
 
 const GA_ID = import.meta.env.VITE_GA_ID as string | undefined;
-const CONSENT_KEY = "cr_cookie_consent";
+const CONSENT_KEY = "eh_cookie_consent";
 
 declare global {
   interface Window {

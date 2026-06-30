@@ -1,6 +1,6 @@
 x-api-build: &api-build
   build: ./api
-  image: happinga-meter-api
+  image: event-horizon-api
 
 services:
   frontend:
@@ -106,8 +106,8 @@ services:
       - "27017:27017"
     env_file: .env.db
     volumes:
-      - /tank/conflictradar-live/mongo/data:/data/db
-      - /tank/conflictradar-live/mongo/config:/data/configdb
+      - /tank/event-horizon/mongo/data:/data/db
+      - /tank/event-horizon/mongo/config:/data/configdb
     deploy:
       resources:
         limits:
