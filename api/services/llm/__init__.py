@@ -1,25 +1,120 @@
-import itertools
+import hashlib
 import logging
 import re
 import threading
-import httpx
+import time as _time
 import requests
 from openai import OpenAI
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-# Strips <think>...</think> blocks emitted by reasoning models (e.g. qwen3)
 _THINK_RE = re.compile(r'<think>.*?</think>', re.DOTALL)
-
 _NO_KEY = 'none'
-
-# Per-request LLM timeout (seconds). Generous default (5m) so slow local models
-# (Ollama) and busy free-tier providers don't get cut off mid-generation.
 _LLM_TIMEOUT = float(getattr(settings, 'LLM_TIMEOUT_SECONDS', 300))
-# Ollama is the last-resort fallback and requests aren't batched — fail fast.
 _OLLAMA_TIMEOUT = float(getattr(settings, 'OLLAMA_TIMEOUT_SECONDS', 60))
 
+
+# ── Cross-worker rotating list ────────────────────────────────────────────────
+
+class _Cycle:
+    """
+    Rotating list backed by a Redis atomic counter so rotation is coordinated
+    across all workers. Falls back to an in-process counter when Redis is
+    unavailable (local dev without a running Redis).
+    """
+
+    def __init__(self, items: list, *, redis_key: str | None = None) -> None:
+        self._items = list(items)
+        self._redis_key = redis_key
+        self._local_idx = 0
+        self._lock = threading.Lock()
+
+    def __bool__(self) -> bool:
+        return bool(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def _incr(self) -> int:
+        """
+        Atomically increment the shared counter and return the value before
+        the increment. Uses Redis INCR (O(1), creates the key at 0 on first
+        call); falls back to an in-process counter on any Redis error.
+        """
+        if self._redis_key and len(self._items) > 1:
+            try:
+                from django.core.cache import caches
+                rc = caches['redis-cache'].client.get_client(write=True)
+                return int(rc.incr(self._redis_key)) - 1
+            except Exception:
+                pass
+        with self._lock:
+            val = self._local_idx
+            self._local_idx += 1
+            return val
+
+    def next(self):
+        """Next item in global round-robin order."""
+        return self._items[self._incr() % len(self._items)]
+
+    def rotation(self) -> list:
+        """All items starting at the current global position."""
+        start = self._incr() % len(self._items)
+        return self._items[start:] + self._items[:start]
+
+
+
+# ── 429 debounce ─────────────────────────────────────────────────────────────
+
+class _Debounce:
+    """
+    Redis-backed per-credential cooldown tracker; falls back to an in-process
+    dict when Redis is unavailable (e.g. local dev without a running Redis).
+    """
+
+    TTLS: dict[str, int] = {
+        'openrouter': 86400,   # daily free-tier quota per key
+        'groq':           60,  # per-minute rate limit
+        'cerebras':       60,  # 5 req/min quota
+    }
+    DEFAULT_TTL = 60
+
+    def __init__(self) -> None:
+        self._local: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _rkey(provider: str, credential: str) -> str:
+        h = hashlib.md5(credential.encode(), usedforsecurity=False).hexdigest()[:12]
+        return f'llm:debounce:{provider}:{h}'
+
+    def is_active(self, provider: str, credential: str) -> bool:
+        k = self._rkey(provider, credential)
+        try:
+            from django.core.cache import caches
+            return bool(caches['redis-cache'].get(k))
+        except Exception:
+            with self._lock:
+                return self._local.get(k, 0.0) > _time.monotonic()
+
+    def mark(self, provider: str, credential: str, ttl: int | None = None) -> None:
+        ttl = ttl or self.TTLS.get(provider, self.DEFAULT_TTL)
+        k = self._rkey(provider, credential)
+        tail = credential[-8:] if len(credential) > 8 else '***'
+        logger.info('LLM 429 debounce: provider=%r ...%s cooling for %ds', provider, tail, ttl)
+        try:
+            from django.core.cache import caches
+            caches['redis-cache'].set(k, 1, timeout=ttl)
+        except Exception:
+            with self._lock:
+                self._local[k] = _time.monotonic() + ttl
+
+
+_debounce = _Debounce()
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _parse_csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(',') if v.strip()]
@@ -31,38 +126,20 @@ def strip_code_fences(text: str) -> str:
     return re.sub(r'\s*```$', '', text)
 
 
-def _parse_proxy_entries(
-    proxy_csv: str, fallback_keys: list[str]
-) -> list[tuple[str, str]]:
-    """
-    Parse 'url::key,url,url::key2' into resolved (proxy_url, api_key) pairs.
+def _retry_after_seconds(exc: Exception) -> int | None:
+    """Extract Retry-After seconds from a 429 response if the provider sent one."""
+    try:
+        headers = exc.response.headers  # type: ignore[attr-defined]
+        for header in ('retry-after', 'x-ratelimit-reset-requests', 'x-ratelimit-reset'):
+            val = headers.get(header)
+            if val:
+                return max(1, int(float(val)))
+    except Exception:
+        pass
+    return None
 
-    Entries without an explicit '::key' suffix draw from fallback_keys in
-    round-robin — "loosely tied" because the key pool and proxy list can have
-    different lengths and are cycled independently before being zipped here.
-    """
-    raw: list[tuple[str, str | None]] = []
-    for entry in _parse_csv(proxy_csv):
-        if '::' in entry:
-            url, key = entry.split('::', 1)
-            raw.append((url.strip(), key.strip() or None))
-        else:
-            raw.append((entry.strip(), None))
 
-    if not raw:
-        return []
-
-    fb_cycle = itertools.cycle(fallback_keys) if fallback_keys else None
-    pairs: list[tuple[str, str]] = []
-    for url, key in raw:
-        if key:
-            pairs.append((url, key))
-        elif fb_cycle:
-            pairs.append((url, next(fb_cycle)))
-        else:
-            pairs.append((url, _NO_KEY))
-    return pairs
-
+# ── LLM backends ─────────────────────────────────────────────────────────────
 
 class LLMError(Exception):
     pass
@@ -84,86 +161,82 @@ class BaseLLMService:
 
 class OpenAICompatLLMService(BaseLLMService):
     """
-    Generic OpenAI-compatible chat client.
+    Generic OpenAI-compatible chat client with cross-worker round-robin key
+    and model rotation (both via Redis) and per-(key, model) 429 debouncing.
 
-    Proxy resolution order (first configured wins):
-      1. http_proxies — static (proxy_url, api_key) pairs from OPENROUTER_HTTP_PROXIES;
-         keys are "loosely tied" (paired at init from the key pool, not 1:1 locked).
-      2. Direct — base_url + key, both rotated round-robin.
+    Debounce granularity is (provider, key, model): a 429 on one model does
+    not block other models on the same key. A key is skipped only when every
+    model on it is debounced. When all (key, model) pairs are exhausted,
+    LLMError is raised so FallbackLLMService falls through to the next provider.
+    TTLs: OpenRouter 24 h (daily quota), Groq/Cerebras 60 s (per-minute limit);
+    Retry-After header overrides when present.
     """
 
     def __init__(
         self,
-        base_urls: list[str],
+        base_url: str,
         api_keys: str | list[str],
         model: str | list[str],
-        http_proxies: list[tuple[str, str]] | None = None,
+        provider_name: str = 'unknown',
     ) -> None:
-        if not base_urls:
-            raise LLMError('OpenAICompatLLMService requires at least one base_url')
-        # A list of models (e.g. OpenRouter's dynamic free picks) is rotated per call
-        # for load spread and fallen through on failure within a single chat().
-        self._models = [model] if isinstance(model, str) else list(model)
+        if not base_url:
+            raise LLMError('OpenAICompatLLMService requires a base_url')
+
+        self._base_url = base_url
+        self._provider = provider_name
+
+        self._models = _Cycle(
+            [model] if isinstance(model, str) else list(model),
+            redis_key=f'llm:cycle:{provider_name}:models',
+        )
         if not self._models:
             raise LLMError('OpenAICompatLLMService requires at least one model')
-        self._model_cycle = itertools.cycle(range(len(self._models)))
-        self._model_lock = threading.Lock()
-
-        self._url_cycle = itertools.cycle(base_urls)
-        self._url_lock = threading.Lock()
 
         keys = _parse_csv(api_keys) if isinstance(api_keys, str) else list(api_keys)
-        if not keys or keys == [_NO_KEY]:
+        if not keys:
             keys = [_NO_KEY]
-        self._key_cycle = itertools.cycle(keys)
-        self._key_lock = threading.Lock()
-
-        # Static (proxy_url, api_key) pairs — rotated together.
-        self._proxy_cycle: itertools.cycle | None = (
-            itertools.cycle(http_proxies) if http_proxies else None
-        )
-        self._proxy_lock = threading.Lock()
-
-    def _next_url(self) -> str:
-        with self._url_lock:
-            return next(self._url_cycle)
-
-    def _next_key(self) -> str:
-        with self._key_lock:
-            return next(self._key_cycle)
-
-    def _build_client(self, base_url: str) -> OpenAI:
-        """Pick the next proxy + key and return a configured OpenAI client."""
-        # 1. Static (proxy_url, api_key) pairs from OPENROUTER_HTTP_PROXIES.
-        if self._proxy_cycle is not None:
-            with self._proxy_lock:
-                proxy_url, api_key = next(self._proxy_cycle)
-            return OpenAI(
-                base_url=base_url,
-                api_key=api_key,
-                http_client=httpx.Client(proxy=proxy_url),
-            )
-
-        # 2. Direct — no proxy.
-        return OpenAI(base_url=base_url, api_key=self._next_key())
+        self._keys = _Cycle(keys, redis_key=f'llm:cycle:{provider_name}:keys')
 
     @property
     def _model(self) -> str:
-        return ', '.join(self._models)
+        return ', '.join(self._models._items)
 
-    def _model_order(self) -> list[str]:
-        """Rotate the starting model per call, then the rest follow (round-robin start)."""
-        with self._model_lock:
-            start = next(self._model_cycle)
-        return self._models[start:] + self._models[:start]
+    def _pick_key_and_models(self) -> tuple[str, list[str]] | None:
+        """
+        Return (api_key, available_models) where available_models is the
+        rotation-ordered list of models not yet debounced for that key.
+        Keys are tried in global round-robin order; the first key with at
+        least one live model wins. Returns None when all (key, model) pairs
+        are currently debounced.
+        """
+        models = self._models.rotation()  # global round-robin order, advance once
+        n = len(self._keys._items)
+        start = self._keys._incr() % n
+        for i in range(n):
+            key = self._keys._items[(start + i) % n]
+            available = [
+                m for m in models
+                if not _debounce.is_active(self._provider, f'{key}:{m}')
+            ]
+            if available:
+                return key, available
+        return None
 
     def chat(self, messages: list[dict], **kwargs) -> str:
+        from openai import RateLimitError
+
         kwargs.pop('think', None)
+
+        result = self._pick_key_and_models()
+        if result is None:
+            raise LLMError(
+                f'All (key, model) combinations for {self._provider!r} are rate-limited (debounced)'
+            )
+        api_key, models = result
+        client = OpenAI(base_url=self._base_url, api_key=api_key)
+
         last_error: Exception | None = None
-        # Try each model in turn — flaky free models (429 / empty / malformed) fall
-        # through to the next pick before the whole provider is declared failed.
-        for model in self._model_order():
-            client = self._build_client(self._next_url())
+        for model in models:
             try:
                 completion = client.chat.completions.create(
                     model=model,
@@ -175,12 +248,17 @@ class OpenAICompatLLMService(BaseLLMService):
                 if not content:
                     raise LLMError('No content returned in completion response.')
                 return content
+            except RateLimitError as e:
+                _debounce.mark(self._provider, f'{api_key}:{model}', _retry_after_seconds(e))
+                last_error = LLMError(f'429 rate-limited ({self._provider}/{model})')
+                # continue — only this (key, model) pair is exhausted
             except (KeyError, IndexError, AttributeError, TypeError) as e:
                 logger.warning('Malformed response from LLM model %s: %s', model, str(e)[:160])
                 last_error = LLMError('Malformed response from LLM provider')
             except Exception as e:
                 logger.warning('LLM model %s failed: %s', model, str(e)[:160])
                 last_error = e
+
         raise LLMError(f'OpenAICompatLLMService error: {last_error}') from last_error
 
 
@@ -215,10 +293,6 @@ class OllamaLLMService(BaseLLMService):
             response.raise_for_status()
             content = response.json()['message']['content']
             result = _THINK_RE.sub('', content).strip()
-            # An empty body (e.g. a reasoning model that emits only <think>…</think>)
-            # must be treated as a failure so the fallback chain continues to the
-            # next provider instead of handing back '' that downstream JSON parsing
-            # then chokes on.
             if not result:
                 raise LLMError(f'Ollama model {self._model} returned empty content')
             return result
@@ -256,70 +330,37 @@ class FallbackLLMService(BaseLLMService):
         raise LLMError(f'All LLM providers failed ({", ".join(self._names)})') from last_error
 
 
+# ── Provider registry ─────────────────────────────────────────────────────────
+
 def _provider_specs() -> dict[str, dict]:
-    """
-    Provider definitions. Available providers: openrouter, ollama, groq, cerebras.
-
-    OpenRouter endpoint modes (configure one):
-      - OPENROUTER_PROXY_URLS: comma-separated pre-authenticated base URLs, rotated round-robin.
-      - OPENROUTER_API_KEYS: comma-separated keys against the direct openrouter.ai endpoint.
-
-    Optional network-level HTTP proxies (OPENROUTER_HTTP_PROXIES):
-      Static 'http://host:port::api_key,...' pairs; the '::api_key' suffix is optional —
-      proxies without a key draw from OPENROUTER_API_KEYS in round-robin.
-    """
-    proxy_urls = _parse_csv(getattr(settings, 'OPENROUTER_PROXY_URLS', ''))
-    raw_keys = _parse_csv(getattr(settings, 'OPENROUTER_API_KEYS', ''))
-    # Dynamic free-model list (refreshed daily, cached in Redis); falls back to
-    # settings.OPENROUTER_MODELS. The service rotates + falls through these per call.
+    """Provider definitions. Available providers: openrouter, ollama, groq, cerebras."""
     from services.llm import discovery
-    model = discovery.get_models()
 
-    http_proxy_csv = getattr(settings, 'OPENROUTER_HTTP_PROXIES', '')
-    http_proxies = _parse_proxy_entries(http_proxy_csv, raw_keys) if http_proxy_csv else None
-
-    if proxy_urls:
-        openrouter_spec = {
-            'base_urls': proxy_urls,
-            'api_keys': _NO_KEY,
-            'model': model,
-            'http_proxies': http_proxies,
-        }
-    else:
-        openrouter_spec = {
-            'base_urls': ['https://openrouter.ai/api/v1'],
-            'api_keys': settings.OPENROUTER_API_KEYS,
-            'model': model,
-            'http_proxies': http_proxies,
-        }
-
-    groq_keys = _parse_csv(getattr(settings, 'GROQ_API_KEYS', ''))
-    cerebras_keys = _parse_csv(getattr(settings, 'CEREBRAS_API_KEYS', ''))
-
-    # Per-tier Ollama timeouts — bigger models generate slower on CPU, so give
-    # them more headroom before failing over. Tunable via settings.OLLAMA_TIMEOUTS.
+    # Per-tier Ollama timeouts. Tunable via settings.OLLAMA_TIMEOUTS.
     ot = getattr(settings, 'OLLAMA_TIMEOUTS', {}) or {}
     ollama = settings.OLLAMA_BASE_URL
-    specs: dict[str, dict] = {
-        'openrouter': openrouter_spec,
+    return {
+        'openrouter': {
+            'base_url': 'https://openrouter.ai/api/v1',
+            'api_keys': _parse_csv(getattr(settings, 'OPENROUTER_API_KEYS', '')),
+            # Dynamic free-model list refreshed daily; falls back to OPENROUTER_MODELS.
+            'model': discovery.get_models(),
+        },
         'ollama':        {'base_url': ollama, 'model': settings.OLLAMA_MODEL_LARGE,  'timeout': ot.get('large')},
         'ollama_small':  {'base_url': ollama, 'model': settings.OLLAMA_MODEL_SMALL,  'timeout': ot.get('small')},
         'ollama_medium': {'base_url': ollama, 'model': settings.OLLAMA_MODEL_MEDIUM, 'timeout': ot.get('medium')},
         'ollama_large':  {'base_url': ollama, 'model': settings.OLLAMA_MODEL_LARGE,  'timeout': ot.get('large')},
+        'groq': {
+            'base_url': 'https://api.groq.com/openai/v1',
+            'api_keys': _parse_csv(getattr(settings, 'GROQ_API_KEYS', '')),
+            'model': settings.GROQ_MODEL,
+        },
+        'cerebras': {
+            'base_url': 'https://api.cerebras.ai/v1',
+            'api_keys': _parse_csv(getattr(settings, 'CEREBRAS_API_KEYS', '')),
+            'model': settings.CEREBRAS_MODEL,
+        },
     }
-    # Always register these known providers so an absent API key is reported as
-    # "not configured" (debug) rather than "Unknown LLM provider" (warning).
-    specs['groq'] = {
-        'base_urls': ['https://api.groq.com/openai/v1'],
-        'api_keys': groq_keys,
-        'model': settings.GROQ_MODEL,
-    }
-    specs['cerebras'] = {
-        'base_urls': ['https://api.cerebras.ai/v1'],
-        'api_keys': cerebras_keys,
-        'model': settings.CEREBRAS_MODEL,
-    }
-    return specs
 
 
 _backend_cache: dict[str, BaseLLMService] = {}
@@ -327,13 +368,13 @@ _backend_lock = threading.Lock()
 
 
 def _build_backend(name: str, spec: dict) -> BaseLLMService:
-    if 'base_url' in spec:
+    if name.startswith('ollama'):
         return OllamaLLMService(spec['base_url'], spec['model'], timeout=spec.get('timeout'))
     return OpenAICompatLLMService(
-        spec['base_urls'],
+        spec['base_url'],
         spec['api_keys'],
         spec['model'],
-        http_proxies=spec.get('http_proxies'),
+        provider_name=name,
     )
 
 
@@ -342,13 +383,10 @@ def _get_backend(name: str, specs: dict[str, dict]) -> BaseLLMService | None:
     if spec is None:
         logger.warning('Unknown LLM provider %r — skipping', name)
         return None
-    configured = spec.get('base_urls') or spec.get('base_url')
-    if not configured:
+    if not spec.get('base_url'):
         logger.debug('LLM provider %r is not configured (no base_url) — skipping', name)
         return None
-    # OpenAI-compat providers (groq/cerebras) need a key; an empty key list means
-    # the provider just isn't enabled in this deployment — skip it quietly.
-    if 'base_urls' in spec and not spec.get('api_keys'):
+    if not name.startswith('ollama') and not spec.get('api_keys'):
         logger.debug('LLM provider %r is not configured (no API key) — skipping', name)
         return None
     with _backend_lock:

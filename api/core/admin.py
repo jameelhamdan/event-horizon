@@ -199,6 +199,7 @@ class ArticleAdmin(ImportExportModelAdmin):
         "published_on",
         "processed_on",
     ]
+    date_hierarchy = "published_on"
     list_filter = ["source_type", "source_code", "category", ArticleStageFilter, ImportanceFilter]
     search_fields = ["title", "location", "category"]
     actions = ["reprocess_selected", "score_importance_selected"]
@@ -301,6 +302,7 @@ class EventAdmin(admin.ModelAdmin):
         "avg_intensity",
         "started_at",
     ]
+    date_hierarchy = "started_at"
     list_filter = ["category", EventStageFilter]
     search_fields = ["title", "location_name"]
     readonly_fields = [

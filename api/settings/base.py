@@ -241,10 +241,6 @@ REST_FRAMEWORK = {
 # ── LLM providers + routing ─────────────────────────────────────────────────────
 # Available providers: openrouter, ollama.
 
-# OpenRouter — two modes (configure one):
-#   Proxy rotation: OPENROUTER_PROXY_URLS = comma-separated pre-authenticated base URLs.
-#   Direct:         OPENROUTER_API_KEYS   = comma-separated keys, rotated round-robin.
-OPENROUTER_PROXY_URLS = config('OPENROUTER_PROXY_URLS', default='')
 OPENROUTER_API_KEYS = config('OPENROUTER_API_KEYS', default='')
 OPENROUTER_MODELS = config('OPENROUTER_MODELS', default='openrouter/free')
 # Dynamic discovery: a daily task probes OpenRouter's free models and caches the
@@ -252,8 +248,6 @@ OPENROUTER_MODELS = config('OPENROUTER_MODELS', default='openrouter/free')
 # the fallback when discovery is disabled or the cache is empty.
 OPENROUTER_DYNAMIC_MODELS = config('OPENROUTER_DYNAMIC_MODELS', default=True, cast=bool)
 OPENROUTER_MODELS_COUNT = config('OPENROUTER_MODELS_COUNT', default=5, cast=int)
-# Network-level HTTP proxies. Format: http://host:port::api_key,http://host2:port
-OPENROUTER_HTTP_PROXIES = config('OPENROUTER_HTTP_PROXIES', default='')
 
 # ── Article importance scoring ────────────────────────────────────────────────
 # LLM-based 1.0–10.0 significance rating. Low-scoring articles are skipped by the
