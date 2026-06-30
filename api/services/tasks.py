@@ -228,6 +228,23 @@ def discover_topics_task(hours: int = 6) -> int:
     return discover_topics_from_events(hours=hours)
 
 
+# ── LLM maintenance ──────────────────────────────────────────────────────────────
+
+def refresh_openrouter_models_task() -> dict:
+    """Discover currently-available free OpenRouter models and cache the top picks.
+
+    Free-model availability fluctuates (deprecations, rate limits, reasoning leaks),
+    so this probes the roster daily and caches the working models in Redis for the
+    LLM layer to use. No-ops unless OPENROUTER_DYNAMIC_MODELS is enabled.
+    """
+    from django.conf import settings
+    if not getattr(settings, 'OPENROUTER_DYNAMIC_MODELS', False):
+        return {'enabled': False, 'models': []}
+    from services.llm import discovery
+    models = discovery.refresh()
+    return {'enabled': True, 'count': len(models), 'models': models}
+
+
 # ── Stream tasks ───────────────────────────────────────────────────────────────
 
 def fetch_prices_task() -> int:

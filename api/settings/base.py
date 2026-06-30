@@ -247,6 +247,11 @@ REST_FRAMEWORK = {
 OPENROUTER_PROXY_URLS = config('OPENROUTER_PROXY_URLS', default='')
 OPENROUTER_API_KEYS = config('OPENROUTER_API_KEYS', default='')
 OPENROUTER_MODELS = config('OPENROUTER_MODELS', default='openrouter/free')
+# Dynamic discovery: a daily task probes OpenRouter's free models and caches the
+# top working picks in Redis (see services/llm/discovery.py). OPENROUTER_MODELS is
+# the fallback when discovery is disabled or the cache is empty.
+OPENROUTER_DYNAMIC_MODELS = config('OPENROUTER_DYNAMIC_MODELS', default=True, cast=bool)
+OPENROUTER_MODELS_COUNT = config('OPENROUTER_MODELS_COUNT', default=5, cast=int)
 # Network-level HTTP proxies. Format: http://host:port::api_key,http://host2:port
 OPENROUTER_HTTP_PROXIES = config('OPENROUTER_HTTP_PROXIES', default='')
 
@@ -274,25 +279,38 @@ GROQ_API_KEYS = config('GROQ_API_KEYS', default='')
 GROQ_MODEL = 'llama-3.1-8b-instant'
 
 # Cerebras — free tier, OpenAI-compatible (https://cloud.cerebras.ai).
+# NB: very low request quota (5 req/min, 150/hour, 2,400/day; 30k tokens/min) —
+# use as a fast *secondary*, or primary only for low-volume roles (newsletter).
 CEREBRAS_API_KEYS = config('CEREBRAS_API_KEYS', default='')
-CEREBRAS_MODEL = 'llama3.1-8b'
+CEREBRAS_MODEL = 'gemma-4-31b'
 
 LLM_TIMEOUT_SECONDS = 300
+# Ollama is last-resort and requests aren't batched. Timeouts scale with model
+# size since bigger models generate slower on CPU; OLLAMA_TIMEOUT_SECONDS is the
+# fallback when a tier isn't listed in OLLAMA_TIMEOUTS.
+OLLAMA_TIMEOUT_SECONDS = 60
+OLLAMA_TIMEOUTS = {'small': 30, 'medium': 60, 'large': 120}
 
 # Routing: role -> provider name OR ordered fallback list (tried in order on failure).
 # Unconfigured providers are silently skipped; unknown roles fall back to 'default'.
 #
 # Ollama tiers map task complexity to model size (4b/8b/14b).
 # Groq and Cerebras provide free-tier cloud fallback when Ollama is unavailable.
+# Lead with fast hosted providers; Ollama is the unlimited (but slow) last-resort.
+#   - Groq leads the high-volume small/medium tasks (it has the headroom).
+#   - Cerebras sits second — its tiny 5 req/min quota means it absorbs a few
+#     fast calls per minute then 429s and cascades; it only *leads* the
+#     low-volume daily newsletter, where 5 rpm + its 31B model are ideal.
+#   - OpenRouter is the mid fallback; Ollama is always last.
 LLM_ROUTES = {
-    'default':       ['ollama_medium', 'groq', 'openrouter'],
-    'analyzer':      ['ollama_large',  'openrouter'],           # EN+AR translations
-    'analyzer_lite': ['ollama_medium', 'groq', 'openrouter'],   # EN-only backfill
-    'newsletter':    ['ollama_large',  'openrouter'],            # long-form prose
-    'scoring':       ['ollama_small',  'groq', 'cerebras', 'openrouter'],
-    'historical':    ['ollama_small',  'groq', 'cerebras', 'openrouter'],
-    'topics':        ['ollama_medium', 'groq', 'openrouter'],
-    'routing':       ['ollama_small',  'groq', 'cerebras', 'openrouter'],
+    'default':       ['groq', 'cerebras', 'openrouter', 'ollama_medium'],
+    'analyzer':      ['openrouter', 'ollama_large', 'groq'],               # EN+AR translations
+    'analyzer_lite': ['groq', 'cerebras', 'openrouter', 'ollama_medium'],  # EN-only backfill
+    'newsletter':    ['cerebras', 'openrouter', 'ollama_large'],           # long-form, low volume
+    'scoring':       ['groq', 'cerebras', 'openrouter', 'ollama_small'],
+    'historical':    ['groq', 'cerebras', 'openrouter', 'ollama_small'],
+    'topics':        ['groq', 'cerebras', 'openrouter', 'ollama_medium'],
+    'routing':       ['groq', 'cerebras', 'openrouter', 'ollama_small'],
 }
 
 # ── Forecasting (event-fused symbol prediction) ───────────────────────────────

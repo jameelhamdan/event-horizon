@@ -25,6 +25,7 @@
 0  *   * * *   python /app/manage.py run_task score_articles_task --require-flag ARTICLE_IMPORTANCE_SCORING_ENABLED
 
 # Daily LLM cron jobs
+0 0 * * *      python /app/manage.py run_task refresh_openrouter_models_task --require-flag OPENROUTER_DYNAMIC_MODELS
 0 4 * * *      python /app/manage.py run_task refresh_topics_task
 0 5 * * *      python /app/manage.py run_task discover_topics_task
 0 6 * * *      python /app/manage.py run_task generate_newsletter_task --require-flag NEWSLETTER_ENABLED

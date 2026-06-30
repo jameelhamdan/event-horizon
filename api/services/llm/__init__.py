@@ -17,6 +17,8 @@ _NO_KEY = 'none'
 # Per-request LLM timeout (seconds). Generous default (5m) so slow local models
 # (Ollama) and busy free-tier providers don't get cut off mid-generation.
 _LLM_TIMEOUT = float(getattr(settings, 'LLM_TIMEOUT_SECONDS', 300))
+# Ollama is the last-resort fallback and requests aren't batched — fail fast.
+_OLLAMA_TIMEOUT = float(getattr(settings, 'OLLAMA_TIMEOUT_SECONDS', 60))
 
 
 def _parse_csv(value: str) -> list[str]:
@@ -94,12 +96,18 @@ class OpenAICompatLLMService(BaseLLMService):
         self,
         base_urls: list[str],
         api_keys: str | list[str],
-        model: str,
+        model: str | list[str],
         http_proxies: list[tuple[str, str]] | None = None,
     ) -> None:
         if not base_urls:
             raise LLMError('OpenAICompatLLMService requires at least one base_url')
-        self._model = model
+        # A list of models (e.g. OpenRouter's dynamic free picks) is rotated per call
+        # for load spread and fallen through on failure within a single chat().
+        self._models = [model] if isinstance(model, str) else list(model)
+        if not self._models:
+            raise LLMError('OpenAICompatLLMService requires at least one model')
+        self._model_cycle = itertools.cycle(range(len(self._models)))
+        self._model_lock = threading.Lock()
 
         self._url_cycle = itertools.cycle(base_urls)
         self._url_lock = threading.Lock()
@@ -139,38 +147,52 @@ class OpenAICompatLLMService(BaseLLMService):
         # 2. Direct — no proxy.
         return OpenAI(base_url=base_url, api_key=self._next_key())
 
+    @property
+    def _model(self) -> str:
+        return ', '.join(self._models)
+
+    def _model_order(self) -> list[str]:
+        """Rotate the starting model per call, then the rest follow (round-robin start)."""
+        with self._model_lock:
+            start = next(self._model_cycle)
+        return self._models[start:] + self._models[:start]
+
     def chat(self, messages: list[dict], **kwargs) -> str:
         kwargs.pop('think', None)
-        client = self._build_client(self._next_url())
-        try:
-            completion = client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                timeout=_LLM_TIMEOUT,
-                **kwargs,
-            )
-            content = completion.choices[0].message.content
-            if not content:
-                raise LLMError('No content returned in completion response.')
-            return content
-
-        except (KeyError, IndexError, AttributeError, TypeError) as e:
-            logger.error('Malformed response from LLM model %s: %s', self._model, str(e))
-            raise LLMError('Malformed response from LLM provider') from e
-
-        except Exception as e:
-            logger.error('OpenAICompatLLMService error for model %s: %s', self._model, str(e))
-            raise LLMError(f'OpenAICompatLLMService error: {e}') from e
+        last_error: Exception | None = None
+        # Try each model in turn — flaky free models (429 / empty / malformed) fall
+        # through to the next pick before the whole provider is declared failed.
+        for model in self._model_order():
+            client = self._build_client(self._next_url())
+            try:
+                completion = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    timeout=_LLM_TIMEOUT,
+                    **kwargs,
+                )
+                content = completion.choices[0].message.content
+                if not content:
+                    raise LLMError('No content returned in completion response.')
+                return content
+            except (KeyError, IndexError, AttributeError, TypeError) as e:
+                logger.warning('Malformed response from LLM model %s: %s', model, str(e)[:160])
+                last_error = LLMError('Malformed response from LLM provider')
+            except Exception as e:
+                logger.warning('LLM model %s failed: %s', model, str(e)[:160])
+                last_error = e
+        raise LLMError(f'OpenAICompatLLMService error: {last_error}') from last_error
 
 
 class OllamaLLMService(BaseLLMService):
     """Ollama-backed LLM client. Strips <think>...</think> reasoning blocks."""
 
-    def __init__(self, base_url: str, model: str) -> None:
+    def __init__(self, base_url: str, model: str, timeout: float | None = None) -> None:
         if not base_url:
             raise LLMError('OllamaLLMService requires a base_url (OLLAMA_BASE_URL)')
         self._base_url = base_url.rstrip('/')
         self._model = model
+        self._timeout = float(timeout) if timeout else _OLLAMA_TIMEOUT
 
     def chat(self, messages: list[dict], **kwargs) -> str:
         options = {}
@@ -188,7 +210,7 @@ class OllamaLLMService(BaseLLMService):
                     'think': kwargs.get('think', False),
                     **(({'options': options}) if options else {}),
                 },
-                timeout=_LLM_TIMEOUT,
+                timeout=self._timeout,
             )
             response.raise_for_status()
             content = response.json()['message']['content']
@@ -248,7 +270,10 @@ def _provider_specs() -> dict[str, dict]:
     """
     proxy_urls = _parse_csv(getattr(settings, 'OPENROUTER_PROXY_URLS', ''))
     raw_keys = _parse_csv(getattr(settings, 'OPENROUTER_API_KEYS', ''))
-    model = (_parse_csv(settings.OPENROUTER_MODELS) or ['openrouter/free'])[0]
+    # Dynamic free-model list (refreshed daily, cached in Redis); falls back to
+    # settings.OPENROUTER_MODELS. The service rotates + falls through these per call.
+    from services.llm import discovery
+    model = discovery.get_models()
 
     http_proxy_csv = getattr(settings, 'OPENROUTER_HTTP_PROXIES', '')
     http_proxies = _parse_proxy_entries(http_proxy_csv, raw_keys) if http_proxy_csv else None
@@ -271,12 +296,16 @@ def _provider_specs() -> dict[str, dict]:
     groq_keys = _parse_csv(getattr(settings, 'GROQ_API_KEYS', ''))
     cerebras_keys = _parse_csv(getattr(settings, 'CEREBRAS_API_KEYS', ''))
 
+    # Per-tier Ollama timeouts — bigger models generate slower on CPU, so give
+    # them more headroom before failing over. Tunable via settings.OLLAMA_TIMEOUTS.
+    ot = getattr(settings, 'OLLAMA_TIMEOUTS', {}) or {}
+    ollama = settings.OLLAMA_BASE_URL
     specs: dict[str, dict] = {
         'openrouter': openrouter_spec,
-        'ollama':        {'base_url': settings.OLLAMA_BASE_URL, 'model': settings.OLLAMA_MODEL_LARGE},
-        'ollama_small':  {'base_url': settings.OLLAMA_BASE_URL, 'model': settings.OLLAMA_MODEL_SMALL},
-        'ollama_medium': {'base_url': settings.OLLAMA_BASE_URL, 'model': settings.OLLAMA_MODEL_MEDIUM},
-        'ollama_large':  {'base_url': settings.OLLAMA_BASE_URL, 'model': settings.OLLAMA_MODEL_LARGE},
+        'ollama':        {'base_url': ollama, 'model': settings.OLLAMA_MODEL_LARGE,  'timeout': ot.get('large')},
+        'ollama_small':  {'base_url': ollama, 'model': settings.OLLAMA_MODEL_SMALL,  'timeout': ot.get('small')},
+        'ollama_medium': {'base_url': ollama, 'model': settings.OLLAMA_MODEL_MEDIUM, 'timeout': ot.get('medium')},
+        'ollama_large':  {'base_url': ollama, 'model': settings.OLLAMA_MODEL_LARGE,  'timeout': ot.get('large')},
     }
     # Always register these known providers so an absent API key is reported as
     # "not configured" (debug) rather than "Unknown LLM provider" (warning).
@@ -299,7 +328,7 @@ _backend_lock = threading.Lock()
 
 def _build_backend(name: str, spec: dict) -> BaseLLMService:
     if 'base_url' in spec:
-        return OllamaLLMService(spec['base_url'], spec['model'])
+        return OllamaLLMService(spec['base_url'], spec['model'], timeout=spec.get('timeout'))
     return OpenAICompatLLMService(
         spec['base_urls'],
         spec['api_keys'],
