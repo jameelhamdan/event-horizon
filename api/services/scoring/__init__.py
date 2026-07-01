@@ -12,7 +12,6 @@ score_unscored_articles() is the main entry point called by score_articles_task.
 
 import json
 import logging
-import re
 from datetime import datetime, timedelta, timezone as dt_tz
 
 from services.utils import tokenize as _tokenize, jaccard as _jaccard
@@ -101,15 +100,15 @@ class ArticleImportanceScorer:
 
         try:
             llm = get_llm_service(role)
-            raw = strip_code_fences(llm.chat([{'role': 'user', 'content': prompt}]))
-            match = re.search(r'\[.*\]', raw, re.DOTALL)
-            if not match:
+            raw   = strip_code_fences(llm.chat([{'role': 'user', 'content': prompt}]))
+            array = self._extract_json_array(raw)
+            if array is None:
                 logger.warning(
                     'LLM importance score: no JSON array in response (%r); using %.1f',
                     raw[:120], self.DEFAULT_SCORE,
                 )
                 return default
-            data = json.loads(match.group(0))
+            data = json.loads(array)
             if not isinstance(data, list):
                 return default
             return [
@@ -122,6 +121,40 @@ class ArticleImportanceScorer:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             logger.warning('LLM importance score parse error (%s); using %.1f', exc, self.DEFAULT_SCORE)
             return default
+
+    @staticmethod
+    def _extract_json_array(raw: str) -> str | None:
+        """
+        Find the first balanced top-level `[...]` block in raw text.
+        Unlike a greedy `\\[.*\\]` regex, this stops at the matching close
+        bracket instead of the LAST `]` in the whole response — so trailing
+        prose (or a second bracketed aside) from the LLM doesn't get pulled
+        into the "array" and break json.loads with "Extra data" errors.
+        """
+        start = raw.find('[')
+        if start == -1:
+            return None
+
+        depth, in_string, escape = 0, False, False
+        for i in range(start, len(raw)):
+            ch = raw[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == '\\':
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == '[':
+                depth += 1
+            elif ch == ']':
+                depth -= 1
+                if depth == 0:
+                    return raw[start:i + 1]
+        return None
 
     def _corroboration_bonuses(self, articles: list) -> dict[str, float]:
         """

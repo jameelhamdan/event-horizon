@@ -21,8 +21,8 @@ bootstrap_django()
 
 def test_key_backfill_checkpoint_shape():
     from services.cache import key_backfill_checkpoint
-    key = key_backfill_checkpoint('bbc-news', '2024-01-01', '2024-06-01')
-    assert key == 'pipeline:backfill:bbc-news:2024-01-01:2024-06-01:done'
+    key = key_backfill_checkpoint('2024-01-01', '2024-06-01')
+    assert key == 'pipeline:backfill:2024-01-01:2024-06-01:done'
 
 
 def test_key_llm_cycle_shape():
@@ -69,7 +69,7 @@ def test_all_key_builders_are_collision_free_by_prefix():
     sample_keys = [
         KEY_ARTICLE_TITLE_DEDUP,
         KEY_BOOTSTRAP_INITIAL_DATA_DONE,
-        key_backfill_checkpoint('src', 's', 'e'),
+        key_backfill_checkpoint('s', 'e'),
         key_llm_cycle('p', 'keys'),
         key_llm_debounce('p', 'h'),
         key_llm_debounce_scan_pattern('p'),

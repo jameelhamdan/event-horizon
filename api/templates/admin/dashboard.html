@@ -21,6 +21,13 @@
       <input type="text" name="job_id" placeholder="RQ job id" style="width:22em">
       <button class="button" type="submit">Cancel job</button>
     </form>
+    <form method="post" class="ops-actions" style="margin-top:8px">
+      {% csrf_token %}
+      <input type="hidden" name="dashboard_action" value="backfill_articles_until">
+      <input type="date" name="until_date" required>
+      <input type="text" name="source_code" placeholder="Source code (blank = all)" style="width:18em">
+      <button class="button" type="submit">Backfill articles until date</button>
+    </form>
   </section>
 
   {# ── Pipeline coverage ───────────────────────────────────────────── #}
@@ -72,6 +79,25 @@
         </tr>
       {% empty %}
         <tr><td colspan="6" class="ops-muted">No runs recorded yet.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  {# ── Crontab ──────────────────────────────────────────────────────── #}
+  <section class="ops-card">
+    <h2>Crontab (api/crontab)</h2>
+    <table class="ops-table">
+      <thead><tr><th>Schedule</th><th>Task</th><th>Command</th></tr></thead>
+      <tbody>
+      {% for e in crontab_entries %}
+        <tr>
+          <td class="ops-mono">{{ e.cron }}</td>
+          <td>{{ e.task }}</td>
+          <td class="ops-mono ops-muted">{{ e.command }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="3" class="ops-muted">No crontab entries found.</td></tr>
       {% endfor %}
       </tbody>
     </table>

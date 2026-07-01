@@ -101,7 +101,8 @@ def process_articles(
         if source_code:
             qs = qs.filter(source_code=source_code)
         if only_failed:
-            qs = qs.filter(processed_on__isnull=False, location__isnull=True)
+            from django.db.models import Q
+            qs = qs.filter(processed_on__isnull=False).filter(Q(location__isnull=True) | Q(location=''))
             articles = [a for a in qs if not (a.extra_data or {}).get('geo_failed')][:limit]
         else:
             if not reprocess:
@@ -129,7 +130,7 @@ def process_articles(
     ]
     # Backfilled historical articles get the lean path: English-only analysis
     # (no Arabic) and no banner scrape. They still geocode + categorize.
-    lite_flags = [bool((a.extra_data or {}).get('backfill_week')) for a in articles]
+    lite_flags = [bool((a.extra_data or {}).get('backfill_day')) for a in articles]
 
     feature_list = cleaner.clean_batch(docs, lite_flags=lite_flags)
 

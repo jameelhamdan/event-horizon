@@ -73,7 +73,7 @@ class EventStageFilter(admin.SimpleListFilter):
 class SourceResource(resources.ModelResource):
     class Meta:
         model = models.Source
-        fields = ("code", "type", "name", "description", "url", "author_slug", "is_enabled")
+        fields = ("code", "type", "name", "description", "url", "sitemap_url", "author_slug", "is_enabled")
         import_id_fields = ("code",)
 
 
@@ -131,7 +131,7 @@ class SourceAdmin(ImportExportModelAdmin):
         source_code = request.POST.get("backfill_source", "").strip()
         start_raw = request.POST.get("backfill_start", "").strip()
         end_raw = request.POST.get("backfill_end", "").strip()
-        top_n = max(1, min(100, int(request.POST.get("backfill_top_n") or 10)))
+        top_n = max(1, min(100, int(request.POST.get("backfill_top_n") or 5)))
 
         if not source_code or not start_raw or not end_raw:
             self.message_user(request, "Source, start date, and end date are all required.", messages.ERROR)
@@ -158,14 +158,14 @@ class SourceAdmin(ImportExportModelAdmin):
             self.message_user(request, f'Source "{source_code}" not found.', messages.ERROR)
             return redirect(request.path)
 
-        weeks = (end_date - start_date).days // 7 + 1
+        days = (end_date - start_date).days
 
         # Backfills can run for hours on multi-year ranges — use unlimited timeout.
         enqueue(
             backfill_history_task,
-            source_code,
             start_date,
             end_date,
+            source_code,
             top_n,
             queue="bulk",
             job_timeout=-1,
@@ -174,7 +174,7 @@ class SourceAdmin(ImportExportModelAdmin):
             request,
             (
                 f'Backfill enqueued for "{source.name}" '
-                f'({start_date.date()} → {end_date.date()}, ~{weeks} weeks, top-{top_n}/week). '
+                f'({start_date.date()} → {end_date.date()}, ~{days} days, top-{top_n}/day). '
                 f'Monitor progress at /admin/django-rq/.'
             ),
             messages.SUCCESS,

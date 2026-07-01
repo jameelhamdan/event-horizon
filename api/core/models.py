@@ -26,6 +26,15 @@ class Source(models.Model):
     name = models.CharField(max_length=128, help_text=_('Display name of the source'))
     description = models.TextField(blank=True)
     url = models.URLField(max_length=255, default='', blank=True, help_text=_('URL of the source, used in website and RSS feeds'))
+    sitemap_url = models.URLField(
+        max_length=255, default='', blank=True,
+        help_text=_(
+            'Explicit sitemap URL for historical backfill, when it lives somewhere '
+            "other than the standard paths (robots.txt directive, /sitemap.xml, "
+            '/sitemap_index.xml, /news-sitemap.xml) or on a different domain than '
+            "the feed URL above. Leave blank to use the standard discovery order."
+        ),
+    )
     author_slug = models.CharField(max_length=255, default='', blank=True, help_text=_('Author/slug of the source'))
     headers = models.JSONField(default=dict, blank=True)
     is_enabled = models.BooleanField(default=True, help_text=_('Uncheck to disable fetching from this source'))

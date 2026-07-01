@@ -36,9 +36,11 @@ def _handle_action(request):
         elif action == 'backfill_articles':
             from datetime import datetime, timedelta, timezone as dt_timezone
             now = datetime.now(dt_timezone.utc)
-            enqueue(T.backfill_all_sources_task, now - timedelta(days=14), now, None,
+            enqueue(T.backfill_history_task, now - timedelta(days=14), now, None,
                     queue='bulk', job_timeout=-1)
             _ok(request, 'Article backfill enqueued (weighted per-source, all sources).')
+        elif action == 'backfill_articles_until':
+            _handle_backfill_until(request)
         elif action == 'retrain_forecast':
             enqueue(T.train_forecast_model_task, queue='bulk', job_timeout=-1)
             enqueue(T.run_forecast_task, queue='bulk', job_timeout=-1)
@@ -77,6 +79,45 @@ def _handle_reprocess(request):
         _ok(request, 'Re-dispatched unrouted events.')
     else:
         messages.error(request, f'Unknown reprocess stage: {stage}')
+
+
+def _handle_backfill_until(request):
+    """Backfill articles from now backward to an operator-chosen date.
+
+    Mirrors ``manage.py backfill_history --until``. ``source_code`` is
+    optional — blank means all enabled RSS sources.
+    """
+    from datetime import date, datetime, timezone as dt_timezone
+
+    from services.queue import enqueue
+    from services import tasks as T
+
+    until_raw = request.POST.get('until_date', '').strip()
+    source_code = request.POST.get('source_code', '').strip()
+
+    try:
+        until = date.fromisoformat(until_raw)
+    except ValueError:
+        messages.error(request, f'Invalid date {until_raw!r} — expected YYYY-MM-DD.')
+        return
+
+    start_date = datetime(until.year, until.month, until.day, tzinfo=dt_timezone.utc)
+    end_date = datetime.now(dt_timezone.utc)
+    if start_date >= end_date:
+        messages.error(request, 'Date must be in the past.')
+        return
+
+    if source_code:
+        import core.models as m
+        if not m.Source.objects.filter(code=source_code).exists():
+            messages.error(request, f'Source "{source_code}" not found.')
+            return
+        enqueue(T.backfill_history_task, start_date, end_date, source_code, queue='bulk', job_timeout=-1)
+        _ok(request, f'Article backfill enqueued for "{source_code}" back to {until}.')
+    else:
+        enqueue(T.backfill_history_task, start_date, end_date, None,
+                queue='bulk', job_timeout=-1)
+        _ok(request, f'Article backfill enqueued (all sources) back to {until}.')
 
 
 def _handle_cancel(request):
@@ -138,6 +179,17 @@ def _upcoming():
         return upcoming_runs()
     except Exception as exc:  # noqa: BLE001
         logger.debug('[dashboard] upcoming unavailable: %s', exc)
+        return []
+
+
+def _crontab_entries():
+    """Raw api/crontab entries in file order, with full command line — distinct
+    from _upcoming() (which sorts by soonest next-fire time)."""
+    try:
+        from core.utils.crontab_schedule import parse_entries
+        return parse_entries()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug('[dashboard] crontab entries unavailable: %s', exc)
         return []
 
 
@@ -264,6 +316,7 @@ def dashboard_view(request):
         'title': 'Operations Dashboard',
         'throughput': _throughput(),
         'upcoming': _upcoming(),
+        'crontab_entries': _crontab_entries(),
         'in_flight': _in_flight(),
         'coverage': coverage,
         'forecast': _forecast_status(),

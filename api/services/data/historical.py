@@ -1,22 +1,27 @@
 """
-Historical backfill — fetch top-N articles per ISO week from a source.
+Historical backfill — fetch top-N articles per day window across sources.
 
 Strategy (per source type):
 
   RSSHistoricalService
     Discovers historical article URLs via the source domain's sitemap
-    (robots.txt → /sitemap.xml → /sitemap_index.xml → /news-sitemap.xml).
-    Handles nested sitemap indexes (one level).  Titles come from
-    <news:title> when available, otherwise inferred from the URL slug.
-    Ranks by LLM significance score (batch of 30 headlines per call).
-    Falls back to score=5.0 per article on any LLM error.
+    (robots.txt → /sitemap.xml → /sitemap_index.xml → /news-sitemap.xml,
+    merged across whichever candidates return entries). Handles nested
+    sitemap indexes (one level). Titles come from <news:title> when
+    available, otherwise inferred from the URL slug.
 
-Both return List[RankedArticle].  HistoricalBackfillService sorts, slices
-to top-N, and saves via Article.objects.get_or_create — fully idempotent.
+Candidates are capped per source by recency (no LLM scoring at discovery
+time — that's deferred to the normal live-pipeline scoring/processing
+tasks). HistoricalBackfillService iterates day windows, fetches every
+requested source within each window, de-dupes across sources using the
+same title-similarity filter as the live fetch path, and saves via
+Article.objects.get_or_create — fully idempotent. Saved articles are
+indistinguishable from live ones except for extra_data['backfill_day'];
+score_articles_task and dispatch_process_articles_task pick them up on
+their normal schedule.
 """
 import datetime
 import html as _html
-import json
 import logging
 import re
 import time
@@ -40,17 +45,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class RankedArticle:
-    datum: ArticleDatum
-    score: float
-    rank_signal: str  # 'engagement' | 'llm'
-
-
-@dataclass
-class WeekResult:
-    week_start: datetime.datetime
-    fetched: int   # total candidates collected for this week
-    saved: int     # Article records newly created
+class DayResult:
+    day: datetime.datetime
+    fetched: int   # total candidates collected across all sources for this day
+    saved: int     # backfill_save_article_task jobs enqueued (≈ new Articles)
 
 
 class HistoricalServiceError(ClientServiceException):
@@ -58,24 +56,18 @@ class HistoricalServiceError(ClientServiceException):
 
 
 # ---------------------------------------------------------------------------
-# Week helpers
+# Day helpers
 # ---------------------------------------------------------------------------
 
-def _iso_week_start(dt: datetime.datetime) -> datetime.datetime:
-    """Return Monday 00:00 UTC of the ISO week containing dt."""
-    d = dt.date() - datetime.timedelta(days=dt.weekday())
-    return datetime.datetime(d.year, d.month, d.day, tzinfo=datetime.timezone.utc)
-
-
-def iter_weeks(
+def iter_days(
     start: datetime.datetime,
     end: datetime.datetime,
 ) -> Iterator[tuple[datetime.datetime, datetime.datetime]]:
-    """Yield (week_start, week_end) pairs covering [start, end)."""
-    current = _iso_week_start(start)
+    """Yield (day_start, day_end) pairs covering [start, end), one calendar day each."""
+    current = datetime.datetime(start.year, start.month, start.day, tzinfo=datetime.timezone.utc)
     while current < end:
-        yield current, current + datetime.timedelta(weeks=1)
-        current += datetime.timedelta(weeks=1)
+        yield current, current + datetime.timedelta(days=1)
+        current += datetime.timedelta(days=1)
 
 
 # ---------------------------------------------------------------------------
@@ -88,45 +80,79 @@ _HTTP_HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; HistoricalBackfiller/1.
 _HTTP_TIMEOUT = 15
 
 
+def _strip_feed_subdomain(netloc: str) -> str:
+    """Feed content is often served from a 'feeds.' subdomain that has no
+    sitemap of its own — verified: feeds.apnews.com/sitemap.xml 404s while
+    apnews.com/sitemap.xml exists. Strip only that one specific prefix; other
+    subdomains are left alone since stripping them in general is unsafe (a
+    subdomain can host a genuinely distinct site with its own sitemap).
+    """
+    if netloc.startswith('feeds.') and netloc.count('.') >= 2:
+        return netloc[len('feeds.'):]
+    return netloc
+
+
 class RSSHistoricalService:
     """
-    Discovers historical article URLs via the source domain's XML sitemap and
-    ranks them using LLM significance scoring on headlines.
+    Discovers historical article URLs via the source domain's XML sitemap.
 
-    Sitemap discovery order:
-      1. Sitemap: directives in robots.txt
-      2. /sitemap.xml
-      3. /sitemap_index.xml
-      4. /news-sitemap.xml
+    Sitemap discovery order (results from every candidate that returns
+    entries are merged, deduped by URL — a source with both a full-history
+    sitemap index and a recency-only Google News sitemap will use both):
+      1. Source.sitemap_url, if the operator has set an explicit override —
+         either because the real sitemap lives at a non-default path
+         (dawn-pk: /feeds/sitemap, scmp-world: /sitemap/archives-0.xml,
+         africa-news: /sitemaps/en/sitemap.xml, allafrica:
+         /misc/sitemap/aans-urls-en.xml) or to lock in a standard-path
+         sitemap that's already confirmed working (aljazeera-world,
+         arab-news, brookings, techcrunch all at /sitemap.xml)
+      2. Sitemap: directives in robots.txt
+      3. /sitemap.xml
+      4. /sitemap_index.xml
+      5. /news-sitemap.xml
 
-    Nested sitemap indexes are followed one level deep.  Sub-sitemaps whose
-    lastmod is more than a week before week_start are pruned to save requests.
+    Nested sitemap indexes are followed one level deep. Sub-sitemaps are
+    fetched closest-lastmod-to-the-window first, capped at
+    ``_MAX_SUBSITEMAPS_PER_INDEX`` — see ``_parse_sitemap_index`` for why
+    (some publishers date-partition their index into thousands of entries).
 
-    LLM scoring: batches of 30 headlines → significance score 1–10.
-    On LLM failure the whole batch defaults to 5.0.
+    NOTE: ``self._base_url`` is derived from ``source.url``'s scheme+netloc.
+    A ``feeds.`` subdomain is stripped (verified: feeds.apnews.com/sitemap.xml
+    404s while apnews.com/sitemap.xml serves 228 dated sub-sitemaps) — that's
+    the only subdomain form fixed here. Other non-standard feed hosts (e.g. a
+    source whose feed lives on a bespoke CDN name with no simple relationship
+    to the main site) remain a known limitation.
     """
+
+    # Drop sub-sitemaps whose lastmod is more than this many days before the window.
+    _LASTMOD_PRUNE_DAYS = 7
+    # Hard cap on sub-sitemaps recursed into per index, after proximity sorting —
+    # bounds worst-case request volume against date-partitioned indexes with
+    # thousands of entries (verified live: Al Jazeera's sitemap index has one
+    # <sitemap> per calendar day, 700+ visible going back to at least 2024).
+    _MAX_SUBSITEMAPS_PER_INDEX = 40
 
     def __init__(
         self, source: 'core.models.Source', max_candidates: int | None = None,
     ) -> None:
         self._source = source
-        # Cap on entries LLM-scored per week. Only top-N survive ranking, so scoring
-        # every sitemap entry is wasted LLM calls; we keep the most recent
-        # ``max_candidates`` (recency as a weak relevance proxy) before scoring.
+        # Cap on entries kept per day. Sorted by recency (a weak relevance proxy)
+        # before this cap is applied, since there's no LLM score to rank by.
         self._max_candidates = max_candidates
         parsed = urlparse(source.url)
-        self._base_url = f'{parsed.scheme}://{parsed.netloc}'
+        netloc = _strip_feed_subdomain(parsed.netloc)
+        self._base_url = f'{parsed.scheme}://{netloc}'
 
-    def fetch_week(
+    def fetch_day(
         self,
-        week_start: datetime.datetime,
-        week_end: datetime.datetime,
-    ) -> list[RankedArticle]:
-        entries = self._discover_entries(week_start, week_end)
+        day_start: datetime.datetime,
+        day_end: datetime.datetime,
+    ) -> list[ArticleDatum]:
+        entries = self._discover_entries(day_start, day_end)
         if not entries:
             logger.info(
-                'RSSHistorical source=%r week=%s: no sitemap entries found',
-                self._source.code, week_start.date(),
+                'RSSHistorical source=%r day=%s: no sitemap entries found',
+                self._source.code, day_start.date(),
             )
             return []
 
@@ -137,12 +163,12 @@ class RSSHistoricalService:
             )
             entries = entries[: self._max_candidates]
 
-        scored = self._score_entries(entries)
+        datums = [self._entry_to_datum(e) for e in entries]
         logger.info(
-            'RSSHistorical source=%r week=%s: %d entries scored',
-            self._source.code, week_start.date(), len(scored),
+            'RSSHistorical source=%r day=%s: %d entries discovered',
+            self._source.code, day_start.date(), len(datums),
         )
-        return scored
+        return datums
 
     # ------------------------------------------------------------------
     # Sitemap discovery
@@ -150,19 +176,27 @@ class RSSHistoricalService:
 
     def _discover_entries(
         self,
-        week_start: datetime.datetime,
-        week_end: datetime.datetime,
+        day_start: datetime.datetime,
+        day_end: datetime.datetime,
     ) -> list[dict]:
-        """Return a list of {url, title, date} dicts whose date falls in the window."""
+        """Return {url, title, date} dicts whose date falls in the window, merged
+        (deduped by URL) across every sitemap candidate that yields entries."""
+        seen_urls: set[str] = set()
+        merged: list[dict] = []
         for sm_url in self._candidate_sitemap_urls():
-            entries = self._parse_sitemap(sm_url, week_start, week_end)
-            if entries:
-                return entries
-        return []
+            for entry in self._parse_sitemap(sm_url, day_start, day_end):
+                if entry['url'] not in seen_urls:
+                    seen_urls.add(entry['url'])
+                    merged.append(entry)
+        return merged
 
     def _candidate_sitemap_urls(self) -> list[str]:
-        """Return sitemap URL candidates, checking robots.txt first."""
+        """Return sitemap URL candidates: explicit Source.sitemap_url override
+        first (if set), then robots.txt directives, then standard paths."""
         candidates: list[str] = []
+
+        if self._source.sitemap_url:
+            candidates.append(self._source.sitemap_url)
 
         try:
             resp = requests.get(
@@ -189,8 +223,8 @@ class RSSHistoricalService:
     def _parse_sitemap(
         self,
         url: str,
-        week_start: datetime.datetime,
-        week_end: datetime.datetime,
+        day_start: datetime.datetime,
+        day_end: datetime.datetime,
     ) -> list[dict]:
         """Parse a sitemap URL; recurses into sitemap indexes (one level)."""
         try:
@@ -209,39 +243,67 @@ class RSSHistoricalService:
         local_tag = root.tag.split('}')[-1] if '}' in root.tag else root.tag
 
         if local_tag == 'sitemapindex':
-            return self._parse_sitemap_index(root, week_start, week_end)
+            return self._parse_sitemap_index(root, day_start, day_end)
 
-        return self._extract_urlset_entries(root, week_start, week_end)
+        return self._extract_urlset_entries(root, day_start, day_end)
 
     def _parse_sitemap_index(
         self,
         root: ET.Element,
-        week_start: datetime.datetime,
-        week_end: datetime.datetime,
+        day_start: datetime.datetime,
+        day_end: datetime.datetime,
     ) -> list[dict]:
-        entries: list[dict] = []
+        """Recurse into sub-sitemaps, closest-to-the-window first, capped at
+        ``_MAX_SUBSITEMAPS_PER_INDEX``.
+
+        Some publishers use date-partitioned indexes where each sub-sitemap
+        covers exactly one day/month and ``lastmod`` IS that date (e.g. Al
+        Jazeera: one <sitemap> per calendar day going back to 2003 — 8000+
+        entries). Others use ``lastmod`` as a "when this listing was last
+        touched" signal on a much smaller, topic-based set of sub-sitemaps
+        (e.g. Brookings' ~90 category/type sitemaps). Rather than guess which
+        kind a source is, sort by proximity of ``lastmod`` to the requested
+        window and cap how many get fetched — cheap for the small-index case,
+        and for the huge date-partitioned case it finds the 1-2 genuinely
+        relevant sub-sitemaps first instead of crawling all of them.
+        """
+        candidates: list[tuple[datetime.datetime | None, str]] = []
         for sm_el in root.findall(f'{{{_SITEMAP_NS}}}sitemap'):
             loc_el = sm_el.find(f'{{{_SITEMAP_NS}}}loc')
             if loc_el is None or not loc_el.text:
                 continue
-
-            # Prune sub-sitemaps whose lastmod is clearly before our window
+            sm_date = None
             lastmod_el = sm_el.find(f'{{{_SITEMAP_NS}}}lastmod')
             if lastmod_el is not None and lastmod_el.text:
                 sm_date = _parse_sitemap_date(lastmod_el.text.strip())
-                if sm_date and sm_date < week_start - datetime.timedelta(days=7):
+                # Clearly-stale sub-sitemaps (lastmod well before our window) are
+                # dropped outright regardless of the proximity cap below.
+                if sm_date and sm_date < day_start - datetime.timedelta(days=self._LASTMOD_PRUNE_DAYS):
                     continue
+            candidates.append((sm_date, loc_el.text.strip()))
 
-            sub_url = loc_el.text.strip()
-            entries.extend(self._parse_sitemap(sub_url, week_start, week_end))
+        def proximity(item: tuple[datetime.datetime | None, str]) -> datetime.timedelta:
+            sm_date, _ = item
+            if sm_date is None:
+                return datetime.timedelta.max  # undated — try last
+            if sm_date < day_start:
+                return day_start - sm_date
+            if sm_date >= day_end:
+                return sm_date - day_end
+            return datetime.timedelta(0)  # lastmod falls inside the window
 
+        candidates.sort(key=proximity)
+
+        entries: list[dict] = []
+        for _, sub_url in candidates[: self._MAX_SUBSITEMAPS_PER_INDEX]:
+            entries.extend(self._parse_sitemap(sub_url, day_start, day_end))
         return entries
 
     def _extract_urlset_entries(
         self,
         root: ET.Element,
-        week_start: datetime.datetime,
-        week_end: datetime.datetime,
+        day_start: datetime.datetime,
+        day_end: datetime.datetime,
     ) -> list[dict]:
         entries: list[dict] = []
         for url_el in root.findall(f'{{{_SITEMAP_NS}}}url'):
@@ -251,38 +313,25 @@ class RSSHistoricalService:
             entry_date: datetime.datetime = entry['date']
             if entry_date.tzinfo is None:
                 entry_date = entry_date.replace(tzinfo=datetime.timezone.utc)
-            if week_start <= entry_date < week_end:
+            if day_start <= entry_date < day_end:
                 entries.append(entry)
         return entries
 
     # ------------------------------------------------------------------
-    # LLM significance scoring
+    # Entry → ArticleDatum
     # ------------------------------------------------------------------
 
-    def _score_entries(self, entries: list[dict]) -> list[RankedArticle]:
-        """Batch-score entries by LLM significance; return RankedArticle list."""
-        from services.scoring import ArticleImportanceScorer
-        scorer = ArticleImportanceScorer()
-        ranked: list[RankedArticle] = []
-        for i in range(0, len(entries), scorer.BATCH_SIZE):
-            batch = entries[i: i + scorer.BATCH_SIZE]
-            titles = [entry['title'] or _slug_from_url(entry['url']) for entry in batch]
-            # Use the 'historical' LLM route so operators can assign a separate model/provider
-            # for backfill scoring without touching the live-feed scoring route.
-            scores = scorer.score_batch_llm(titles, role='historical')
-            for entry, score in zip(batch, scores):
-                title = entry['title'] or _slug_from_url(entry['url'])
-                datum = ArticleDatum(
-                    source_url=entry['url'],
-                    author=self._source.name,
-                    author_slug=self._source.author_slug or self._source.code,
-                    title=title[:200],
-                    content=title,
-                    published_on=entry['date'],
-                    extra_data={'sitemap_title': entry['title']},
-                )
-                ranked.append(RankedArticle(datum=datum, score=score, rank_signal='llm'))
-        return ranked
+    def _entry_to_datum(self, entry: dict) -> ArticleDatum:
+        title = entry['title'] or _slug_from_url(entry['url'])
+        return ArticleDatum(
+            source_url=entry['url'],
+            author=self._source.name,
+            author_slug=self._source.author_slug or self._source.code,
+            title=title[:200],
+            content=title,
+            published_on=entry['date'],
+            extra_data={'sitemap_title': entry['title']},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -291,144 +340,171 @@ class RSSHistoricalService:
 
 class HistoricalBackfillService:
     """
-    Orchestrates week-by-week historical backfill for a single source.
+    Orchestrates day-by-day historical backfill across one or more sources.
 
     Usage:
-        service = HistoricalBackfillService(source, start_date, end_date, top_n=10)
+        service = HistoricalBackfillService(sources, start_date, end_date, top_n=5)
         for result in service.run():
-            print(result.week_start.date(), result.fetched, result.saved)
+            print(result.day.date(), result.fetched, result.saved)
 
-    run() is fully idempotent: Article.objects.get_or_create() keyed on
-    (source_code, source_type, source_url) skips already-imported articles.
+    Each day, every source is fetched (capped to top_n candidates by recency),
+    candidates are merged and passed through the same title-dedup filter the
+    live fetch path uses, then saved via Article.objects.get_or_create() keyed
+    on (source_code, source_type, source_url) — fully idempotent. Scoring and
+    NLP processing are NOT done here; saved articles have importance_score
+    left NULL, exactly like live-fetched ones, so score_articles_task and
+    dispatch_process_articles_task pick them up on their normal schedule.
 
-    Backfill metadata is stored in Article.extra_data under keys:
-      backfill_week  — ISO week start string
-      backfill_score — float ranking score
-      rank_signal    — 'engagement' | 'llm'
+    Backfill metadata is stored in Article.extra_data under key:
+      backfill_day — ISO date string of the day window the article was found in
     """
 
     def __init__(
         self,
-        source: 'core.models.Source',
+        sources: list,
         start_date: datetime.datetime,
         end_date: datetime.datetime,
-        top_n: int = 10,
-        delay_seconds: float = 1.0,
+        top_n: int | None = None,
+        delay_seconds: float = 0.5,
         fetch_body: bool = True,
         candidate_factor: int = 4,
     ) -> None:
-        self.source = source
+        self.sources = sources
         self.start_date = start_date
         self.end_date = end_date
         self.top_n = top_n
         self.delay_seconds = delay_seconds
         self.fetch_body = fetch_body
-        # Score at most top_n * candidate_factor entries per week (0 = unlimited).
+        # Discover at most top_n * candidate_factor entries per source per day
+        # (0/None = unlimited) before the recency cap to top_n is applied.
         self.candidate_factor = candidate_factor
-        self._strategy = self._build_strategy()
+        self._strategies = {s.code: self._build_strategy(s) for s in sources}
 
-    def _build_strategy(self):
+    def _resolve_top_n(self, source: 'core.models.Source') -> int:
+        if self.top_n is not None:
+            return self.top_n
+        from services.tasks import _weighted_top_n
+        return _weighted_top_n(source.weight)
+
+    def _build_strategy(self, source: 'core.models.Source'):
         import core.models as m
-        if self.source.type == m.SourceType.RSS:
-            if self.top_n is None:
-                raise TypeError(
-                    'HistoricalBackfillService.top_n must be a resolved int; '
-                    'use _weighted_top_n(source.weight) before constructing the service.'
-                )
-            max_candidates = self.top_n * self.candidate_factor if self.candidate_factor else None
-            return RSSHistoricalService(self.source, max_candidates=max_candidates)
-        raise HistoricalServiceError(
-            f'No historical strategy for source type "{self.source.type}". '
-            'Supported: rss.'
-        )
+        if source.type != m.SourceType.RSS:
+            raise HistoricalServiceError(
+                f'No historical strategy for source type "{source.type}". Supported: rss.'
+            )
+        top_n = self._resolve_top_n(source)
+        max_candidates = top_n * self.candidate_factor if self.candidate_factor else None
+        return RSSHistoricalService(source, max_candidates=max_candidates)
 
     def run(
         self,
-        resume_weeks: set[str] | None = None,
+        resume_days: set[str] | None = None,
         dry_run: bool = False,
-    ) -> Iterator[WeekResult]:
+    ) -> Iterator[DayResult]:
         """
-        Yield a WeekResult for each ISO week in [start_date, end_date).
+        Yield a DayResult for each calendar day in [start_date, end_date).
 
-        resume_weeks  — set of week_start.isoformat() strings to skip.
-        dry_run       — rank but do not write to the database.
+        resume_days — set of day.date().isoformat() strings to skip.
+        dry_run     — discover but do not write to the database.
         """
-        for week_start, week_end in iter_weeks(self.start_date, self.end_date):
-            if resume_weeks and week_start.isoformat() in resume_weeks:
-                logger.debug('Skipping week %s (checkpoint)', week_start.date())
+        for day_start, day_end in iter_days(self.start_date, self.end_date):
+            day_key = day_start.date().isoformat()
+            if resume_days and day_key in resume_days:
+                logger.debug('Skipping day %s (checkpoint)', day_start.date())
                 continue
 
-            try:
-                candidates = self._strategy.fetch_week(week_start, week_end)
-            except HistoricalServiceError as exc:
-                logger.error('fetch_week failed week=%s: %s', week_start.date(), exc)
-                yield WeekResult(week_start=week_start, fetched=0, saved=0)
-                continue
+            source_datums: list[tuple['core.models.Source', ArticleDatum]] = []
+            fetched_total = 0
+            for source in self.sources:
+                top_n = self._resolve_top_n(source)
+                if top_n == 0:
+                    continue  # weight=0 — suppressed
+                try:
+                    candidates = self._strategies[source.code].fetch_day(day_start, day_end)
+                except HistoricalServiceError as exc:
+                    logger.error('fetch_day failed source=%s day=%s: %s', source.code, day_start.date(), exc)
+                    candidates = []
+                fetched_total += len(candidates)
+                candidates.sort(
+                    key=lambda d: d.get('published_on') or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+                    reverse=True,
+                )
+                for datum in candidates[:top_n]:
+                    source_datums.append((source, datum))
+                if self.delay_seconds > 0:
+                    time.sleep(self.delay_seconds)
 
-            top = sorted(candidates, key=lambda r: r.score, reverse=True)[: self.top_n]
-            saved = 0 if dry_run else self._save_articles(top, week_start)
+            saved = 0 if dry_run else self._save_day_batch(source_datums, day_start)
 
-            yield WeekResult(week_start=week_start, fetched=len(candidates), saved=saved)
+            yield DayResult(day=day_start, fetched=fetched_total, saved=saved)
 
-            if self.delay_seconds > 0:
-                time.sleep(self.delay_seconds)
+            if resume_days is not None and not dry_run:
+                resume_days.add(day_key)
 
-    def _save_articles(
+    def _save_day_batch(
         self,
-        ranked: list[RankedArticle],
-        week_start: datetime.datetime,
+        source_datums: list[tuple['core.models.Source', ArticleDatum]],
+        day_start: datetime.datetime,
     ) -> int:
-        """Fan out one body-fetch+save job per new article onto the worker pool.
+        """Cross-source title-dedup, then fan out one body-fetch+save job per new
+        article onto the worker pool — same enqueue pattern as before, just fed by
+        a merged/deduped cross-source batch instead of a single source's ranking.
 
         Parallelism for the (network-bound) body fetch comes from the worker pool —
-        not in-process threads — so it scales with ``worker-light`` replicas and stays
-        consistent with the rest of the fan-out pipeline. Returns the number of jobs
-        dispatched (= new articles). When ``TASK_QUEUE_ENABLED`` is off (dev), each
+        not in-process threads — so it scales with ``worker-light`` replicas. Returns
+        the number of jobs dispatched (≈ new articles; a job can still no-op if the
+        URL was saved concurrently). When ``TASK_QUEUE_ENABLED`` is off (dev), each
         ``enqueue`` runs synchronously, so the save still happens inline.
         """
+        from django.conf import settings
         import core.models as m
+        from services.data import _filter_title_dupes
         from services.queue import enqueue, make_retry
         from services.tasks import backfill_save_article_task
-        if not ranked:
+
+        if not source_datums:
             return 0
 
-        # One existence query for the whole week instead of a query per article.
-        urls = [item.datum['source_url'] for item in ranked]
-        existing = set(
-            m.Article.objects.filter(
-                source_code=self.source.code,
-                source_type=self.source.type,
-                source_url__in=urls,
-            ).values_list('source_url', flat=True)
-        )
-        # Skip already-stored URLs, and de-dupe within the week (sitemaps can list a
-        # URL twice). ranked is score-sorted, so the first occurrence kept is highest.
-        new_items, seen = [], set(existing)
-        for it in ranked:
-            url = it.datum['source_url']
-            if url in seen:
-                continue
-            seen.add(url)
-            new_items.append(it)
-        if not new_items:
-            return 0
+        datums = []
+        for source, datum in source_datums:
+            d = dict(datum)
+            d['_source_code'] = source.code
+            d['_source_type'] = source.type
+            datums.append(d)
+
+        if getattr(settings, 'ARTICLE_DEDUP_TITLE_ENABLED', True):
+            datums = _filter_title_dupes(
+                datums,
+                threshold=getattr(settings, 'ARTICLE_DEDUP_JACCARD_THRESHOLD', 0.75),
+                hours=getattr(settings, 'ARTICLE_DEDUP_HOURS', 24),
+            )
+
+        by_source: dict[tuple[str, str], list[dict]] = {}
+        for datum in datums:
+            key = (datum.pop('_source_code'), datum.pop('_source_type'))
+            by_source.setdefault(key, []).append(datum)
 
         retry = make_retry()
-        for item in new_items:
-            datum = item.datum
-            extra = {
-                **datum.get('extra_data', {}),
-                'backfill_week': week_start.isoformat(),
-                'backfill_score': round(item.score, 2),
-                'rank_signal': item.rank_signal,
-            }
-            enqueue(
-                backfill_save_article_task,
-                self.source.code, self.source.type, dict(datum),
-                extra, round(item.score, 2), self.fetch_body,
-                queue='default', retry=retry,
+        saved = 0
+        for (source_code, source_type), source_batch in by_source.items():
+            urls = [d['source_url'] for d in source_batch]
+            existing = set(
+                m.Article.objects.filter(
+                    source_code=source_code, source_type=source_type, source_url__in=urls,
+                ).values_list('source_url', flat=True)
             )
-        return len(new_items)
+            for datum in source_batch:
+                if datum['source_url'] in existing:
+                    continue
+                extra = {**datum.get('extra_data', {}), 'backfill_day': day_start.date().isoformat()}
+                enqueue(
+                    backfill_save_article_task,
+                    source_code, source_type, dict(datum), extra, self.fetch_body,
+                    queue='default', retry=retry,
+                )
+                saved += 1
+
+        return saved
 
 
 # ---------------------------------------------------------------------------

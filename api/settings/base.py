@@ -253,7 +253,7 @@ OPENROUTER_MODELS_COUNT = config('OPENROUTER_MODELS_COUNT', default=5, cast=int)
 # LLM-based 1.0–10.0 significance rating. Low-scoring articles are skipped by the
 # NLP pipeline and deleted after a grace period.
 ARTICLE_IMPORTANCE_SCORING_ENABLED = config('ARTICLE_IMPORTANCE_SCORING_ENABLED', default=True, cast=bool)
-ARTICLE_MIN_IMPORTANCE_TO_PROCESS = config('ARTICLE_MIN_IMPORTANCE_TO_PROCESS', default=4.0, cast=float)  # below this → skip process_articles_task
+ARTICLE_MIN_IMPORTANCE_TO_PROCESS = config('ARTICLE_MIN_IMPORTANCE_TO_PROCESS', default=2.0, cast=float)  # below this → skip process_articles_task
 ARTICLE_MIN_IMPORTANCE = config('ARTICLE_MIN_IMPORTANCE', default=4.0, cast=float)                        # below this → eligible for deletion
 ARTICLE_CLEANUP_GRACE_HOURS = 48
 ARTICLE_STALE_PROCESSED_DAYS = 7

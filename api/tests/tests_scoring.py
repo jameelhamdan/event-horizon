@@ -206,6 +206,27 @@ def test_importance_scorer_weight_zero_honoured():
     assert final == 1.0, f'Expected 1.0 (minimum), got {final}'
 
 
+def test_extract_json_array_trailing_prose():
+    """C1 fix: trailing prose with its own brackets must not corrupt the extracted array."""
+    from services.scoring import ArticleImportanceScorer
+
+    raw = '[7.5, 4.0, 8.0]\n\nNote: headline [2] is speculative.'
+    assert ArticleImportanceScorer._extract_json_array(raw) == '[7.5, 4.0, 8.0]'
+
+
+def test_extract_json_array_leading_prose():
+    from services.scoring import ArticleImportanceScorer
+
+    raw = 'Here are the scores:\n[7.5, 4.0, 8.0]'
+    assert ArticleImportanceScorer._extract_json_array(raw) == '[7.5, 4.0, 8.0]'
+
+
+def test_extract_json_array_none_found():
+    from services.scoring import ArticleImportanceScorer
+
+    assert ArticleImportanceScorer._extract_json_array('no array here') is None
+
+
 def test_importance_scorer_structural():
     from services.scoring import ArticleImportanceScorer, score_unscored_articles
     scorer = ArticleImportanceScorer()
@@ -234,6 +255,9 @@ _TESTS = [
     test_jaccard_consistency,
     test_importance_scorer_default_score,
     test_importance_scorer_weight_zero_honoured,
+    test_extract_json_array_trailing_prose,
+    test_extract_json_array_leading_prose,
+    test_extract_json_array_none_found,
     test_importance_scorer_structural,
 ]
 

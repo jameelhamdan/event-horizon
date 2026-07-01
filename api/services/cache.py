@@ -32,8 +32,8 @@ KEY_ARTICLE_TITLE_DEDUP = 'pipeline:dedup:article_title'
 KEY_BOOTSTRAP_INITIAL_DATA_DONE = 'pipeline:bootstrap:initial_data:done'
 
 
-def key_backfill_checkpoint(source_code: str, start: str, end: str) -> str:
-    return f'pipeline:backfill:{source_code}:{start}:{end}:done'
+def key_backfill_checkpoint(start: str, end: str) -> str:
+    return f'pipeline:backfill:{start}:{end}:done'
 
 
 def key_llm_cycle(provider: str, kind: str) -> str:
