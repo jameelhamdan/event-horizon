@@ -1,5 +1,7 @@
 # Event Horizon
 
+![Event Horizon](ui/public/banner.png)
+
 Live geopolitical event map with a daily AI-written email briefing. Ingests news from RSS feeds and web sources, runs NLP analysis, clusters articles into geolocated events, and displays them on an interactive Leaflet map.
 
 See [project.md](project.md) for full requirements and architecture. See [CLAUDE.md](CLAUDE.md) for developer conventions and recipes.
