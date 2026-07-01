@@ -30,7 +30,11 @@ def download_models() -> None:
     pipeline("text-classification", model="ProsusAI/finbert", top_k=None, truncation=True, max_length=512)
 
     print("Downloading Helsinki-NLP/opus-mt-en-ar...")
-    pipeline("translation", model="Helsinki-NLP/opus-mt-en-ar", truncation=True, max_length=512)
+    # No generic "translation"/"text2text-generation" pipeline task in transformers
+    # 5.x — fetch the tokenizer/model pair directly (matches services.translation).
+    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+    AutoTokenizer.from_pretrained("Helsinki-NLP/opus-mt-en-ar")
+    AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-en-ar")
 
     print("Downloading dslim/bert-base-NER...")
     pipeline("ner", model="dslim/bert-base-NER", aggregation_strategy="simple", truncation=True, max_length=512)
@@ -66,8 +70,8 @@ def preload_into_memory() -> None:
         logger.exception("[preload] clusterer preload failed — will load lazily per job")
 
     try:
-        from services.translation import _pipeline as _translation_pipeline
-        if _translation_pipeline() is not None:
+        from services.translation import _get_model as _get_translation_model
+        if _get_translation_model() is not None:
             logger.info("[preload] translation (MarianMT) warmed into worker memory")
     except Exception:
         logger.exception("[preload] translation preload failed — will load lazily per job")
