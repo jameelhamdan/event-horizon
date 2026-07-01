@@ -312,7 +312,7 @@ class Command(BaseCommand):
             c.soft('route.events_present', False, 'no events to route')
             return
         try:
-            jobs = dispatch_route_events_task(hours=max(opts['hours'], 24 * 14), source='rules')
+            jobs = dispatch_route_events_task(hours=max(opts['hours'], 24 * 14))
             c.hard('route.dispatch_returns_int', isinstance(jobs, int), f'{jobs} chunk(s)')
         except Exception as exc:  # noqa: BLE001
             c.hard('route.ran', False, str(exc))

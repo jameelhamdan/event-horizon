@@ -1,10 +1,23 @@
 import logging
+import time
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+# Articles are pre-bucketed into windows this wide (days) before semantic
+# sub-clustering, so a multi-day event (published_on spread across a few
+# days) can still land in one cluster instead of being split by calendar day.
+CLUSTER_DATE_WINDOW_DAYS = 3
+
+
+def _date_window_key(dt: datetime) -> str:
+    """Start-of-window date string for *dt*, chunked in CLUSTER_DATE_WINDOW_DAYS blocks."""
+    ordinal = dt.toordinal()
+    window_start_ordinal = ordinal - (ordinal % CLUSTER_DATE_WINDOW_DAYS)
+    return date.fromordinal(window_start_ordinal).isoformat()
 
 
 def _aggregate_llm_usage(articles: list) -> dict:
@@ -37,7 +50,10 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
     """
     from core.models import Article, Event
 
+    run_started = time.monotonic()
     lookback = timezone.now() - timedelta(hours=hours)
+    logger.info('[aggregate] starting run: hours=%d min_articles=%d lookback=%s', hours, min_articles, lookback)
+
     articles = list(
         Article.objects.filter(
             processed_on__isnull=False,
@@ -45,6 +61,7 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
             published_on__gte=lookback,
         ).exclude(location='')
     )
+    logger.info('[aggregate] fetched %d located article(s) in window', len(articles))
 
     skipped_no_location = Article.objects.filter(
         processed_on__isnull=False, location__isnull=True, published_on__gte=lookback,
@@ -56,29 +73,53 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
         )
 
     if not articles:
+        logger.info('[aggregate] no located articles — nothing to do')
         return 0, 0
 
     from services.processing.clustering import get_clusterer
 
-    # Group by (city, country, category, calendar day) then semantic sub-cluster.
+    # Group by (city, country, category, N-day window) then semantic sub-cluster —
+    # windowing (not exact calendar day) lets a story that runs a few days
+    # land in one bucket instead of being split at the day boundary.
     buckets: dict[tuple[str, str, str, str], list] = defaultdict(list)
     for article in articles:
         llm = (article.extra_data or {}).get('llm', {})
         city = llm.get('city') or ''
         country = llm.get('country') or ''
         category_key = article.category or 'general'
-        date_key = article.published_on.date().isoformat()
-        buckets[(city, country, category_key, date_key)].append(article)
+        window_key = _date_window_key(article.published_on)
+        buckets[(city, country, category_key, window_key)].append(article)
+    logger.info('[aggregate] grouped into %d bucket(s) (window=%dd)', len(buckets), CLUSTER_DATE_WINDOW_DAYS)
 
     clusterer = get_clusterer()
+    cluster_started = time.monotonic()
+    bucket_items = list(buckets.items())
+    # One batched embedding pass across every bucket (far cheaper on CPU than one
+    # encode() call per bucket) — see SemanticClusterer.cluster_many.
+    clustered_per_bucket = clusterer.cluster_many([group for _, group in bucket_items])
+
     sub_groups: list[list] = []
-    for group in buckets.values():
-        sub_groups.extend(clusterer.cluster(group))
+    for i, ((city, country, category_key, window_key), group) in enumerate(bucket_items, start=1):
+        clustered = clustered_per_bucket[i - 1]
+        logger.info(
+            '[aggregate] cluster bucket %d/%d (%s, %s, %s, %s): %d article(s) -> %d sub-cluster(s)',
+            i, len(bucket_items), city or '-', country or '-', category_key, window_key,
+            len(group), len(clustered),
+        )
+        sub_groups.extend(clustered)
+    logger.info(
+        '[aggregate] clustering done: %d bucket(s) -> %d sub-cluster(s) in %.2fs total',
+        len(bucket_items), len(sub_groups), time.monotonic() - cluster_started,
+    )
 
     created_count = updated_count = 0
 
-    for group in sub_groups:
+    for gi, group in enumerate(sub_groups, start=1):
+        if gi == 1 or gi % 25 == 0:
+            logger.info('[aggregate] processing sub-cluster %d/%d', gi, len(sub_groups))
+
         if len(group) < min_articles:
+            logger.debug('[aggregate] skip sub-cluster %d/%d: below min_articles (%d)', gi, len(sub_groups), len(group))
             continue
 
         llm = (group[0].extra_data or {}).get('llm', {})
@@ -87,6 +128,7 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
 
         location = ', '.join(filter(None, [city, country])) or (group[0].location or '')
         if not location:
+            logger.debug('[aggregate] skip sub-cluster %d/%d: no resolvable location', gi, len(sub_groups))
             continue
 
         representative = max(group, key=lambda a: a.event_intensity or 0)
@@ -113,9 +155,16 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
 
         from services.forecasting.routing import route_event_to_weighted_symbols
         route_sentiment = avg_finbert_sentiment if avg_finbert_sentiment is not None else avg_sentiment
+        route_started = time.monotonic()
         affected_indicators = route_event_to_weighted_symbols(
             category, location, [], sub_categories, route_sentiment,
         )
+        route_elapsed = time.monotonic() - route_started
+        if route_elapsed > 0.5:
+            logger.warning(
+                '[aggregate] sub-cluster %d/%d: routing took %.2fs (location=%s, category=%s)',
+                gi, len(sub_groups), route_elapsed, location, category,
+            )
         llm_usage = _aggregate_llm_usage(group)
 
         lats = [a.latitude for a in group if a.latitude is not None]
@@ -173,7 +222,10 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
                 )
                 created = True
                 created_count += 1
-                logger.info(f'[aggregate] Created  {location} [{category}] — {len(group)} article(s)')
+                logger.info(
+                    '[aggregate] Created  %s [%s] — %d article(s) (sub-cluster %d/%d)',
+                    location, category, len(group), gi, len(sub_groups),
+                )
             except Exception:
                 # Concurrent run already created this event — re-fetch and update below.
                 event = Event.objects.filter(
@@ -201,8 +253,15 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
             event.llm_usage = llm_usage
             event.save()
             updated_count += 1
-            logger.info(f'[aggregate] Updated  {location} [{category}] — {len(group)} article(s)')
+            logger.info(
+                '[aggregate] Updated  %s [%s] — %d article(s) (sub-cluster %d/%d)',
+                location, category, len(group), gi, len(sub_groups),
+            )
 
+    logger.info(
+        '[aggregate] run complete: created=%d updated=%d in %.2fs total',
+        created_count, updated_count, time.monotonic() - run_started,
+    )
     return created_count, updated_count
 
 

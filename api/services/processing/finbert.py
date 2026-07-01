@@ -13,6 +13,7 @@ The signed score in [-1, 1] is derived from the 3-class softmax:
 
 import logging
 
+from settings.model_names import FINBERT_MODEL_NAME
 from services.processing._lazy import lazy_loader
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ def _build_pipeline():
     from transformers import pipeline
     return pipeline(
         'text-classification',
-        model='ProsusAI/finbert',
+        model=FINBERT_MODEL_NAME,
         top_k=None,            # return all class scores
         truncation=True,
         max_length=512,

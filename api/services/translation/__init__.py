@@ -14,11 +14,10 @@ shortcut for a seq2seq model anymore.
 
 import logging
 
+from settings.model_names import TRANSLATION_MODEL_NAME as _MODEL_NAME
 from services.processing._lazy import lazy_loader
 
 logger = logging.getLogger(__name__)
-
-_MODEL_NAME = 'Helsinki-NLP/opus-mt-en-ar'
 # MarianMT truncates around 512 tokens; cap input chars to keep batching cheap
 # and translations focused on the title/summary (not full article bodies).
 _MAX_CHARS = 1000

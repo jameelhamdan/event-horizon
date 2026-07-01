@@ -17,30 +17,49 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# settings/model_names.py is copied standalone to the container root (Dockerfile)
+# so it's importable both here — at build time, before /app exists — and later
+# at runtime, when this same file is loaded as scripts.init_models from inside /app.
+try:
+    from settings.model_names import (
+        CLUSTER_MODEL_NAME, FINBERT_MODEL_NAME, TRANSLATION_MODEL_NAME, NER_MODEL_NAME,
+    )
+except ImportError:
+    from model_names import (
+        CLUSTER_MODEL_NAME, FINBERT_MODEL_NAME, TRANSLATION_MODEL_NAME, NER_MODEL_NAME,
+    )
+
 
 def download_models() -> None:
     """Build-time: fetch model weights into the HF cache. No app imports."""
     from transformers import pipeline
     from sentence_transformers import SentenceTransformer
 
-    print("Downloading paraphrase-multilingual-MiniLM-L12-v2...")
-    SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+    print(f"Downloading {CLUSTER_MODEL_NAME}...")
+    SentenceTransformer(CLUSTER_MODEL_NAME)
+    try:
+        # Pre-export/cache the ONNX graph at build time so the first production
+        # request doesn't pay the one-time torch->ONNX conversion cost.
+        SentenceTransformer(CLUSTER_MODEL_NAME, backend="onnx")
+        print(f"Exported {CLUSTER_MODEL_NAME} to ONNX.")
+    except Exception as e:
+        print(f"ONNX export skipped (will fall back to torch backend at runtime): {e}")
 
-    print("Downloading ProsusAI/finbert...")
-    pipeline("text-classification", model="ProsusAI/finbert", top_k=None, truncation=True, max_length=512)
+    print(f"Downloading {FINBERT_MODEL_NAME}...")
+    pipeline("text-classification", model=FINBERT_MODEL_NAME, top_k=None, truncation=True, max_length=512)
 
-    print("Downloading Helsinki-NLP/opus-mt-en-ar...")
+    print(f"Downloading {TRANSLATION_MODEL_NAME}...")
     # No generic "translation"/"text2text-generation" pipeline task in transformers
     # 5.x — fetch the tokenizer/model pair directly (matches services.translation).
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-    AutoTokenizer.from_pretrained("Helsinki-NLP/opus-mt-en-ar")
-    AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-en-ar")
+    AutoTokenizer.from_pretrained(TRANSLATION_MODEL_NAME)
+    AutoModelForSeq2SeqLM.from_pretrained(TRANSLATION_MODEL_NAME)
 
-    print("Downloading dslim/bert-base-NER...")
+    print(f"Downloading {NER_MODEL_NAME}...")
     # transformers>=5.3's TokenClassificationPipeline doesn't accept truncation/
     # max_length kwargs at all — it truncates automatically using the model's
     # own tokenizer.model_max_length.
-    pipeline("ner", model="dslim/bert-base-NER", aggregation_strategy="simple")
+    pipeline("ner", model=NER_MODEL_NAME, aggregation_strategy="simple")
 
     # VADER (services.processing.vader) is rule-based — ships with the
     # vaderSentiment package, no model weights to pre-fetch.
@@ -82,7 +101,7 @@ def preload_into_memory() -> None:
     try:
         from services.processing import ner
         if ner._pipeline() is not None:
-            logger.info("[preload] NER (dslim/bert-base-NER) warmed into worker memory")
+            logger.info("[preload] NER (%s) warmed into worker memory", NER_MODEL_NAME)
     except Exception:
         logger.exception("[preload] NER preload failed — will load lazily per job")
 

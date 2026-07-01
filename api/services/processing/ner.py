@@ -7,11 +7,10 @@ cached (mirrors services.processing.finbert).
 
 import logging
 
+from settings.model_names import NER_MODEL_NAME as _MODEL_NAME
 from services.processing._lazy import lazy_loader
 
 logger = logging.getLogger(__name__)
-
-_MODEL_NAME = 'dslim/bert-base-NER'
 # BERT truncates at 512 tokens; cap input chars to keep batching cheap.
 _MAX_CHARS = 1500
 # HF entity_group labels this model emits (aggregation_strategy='simple' merges

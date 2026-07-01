@@ -165,18 +165,16 @@ def dispatch_tag_topics_task(hours: int = DEFAULT_AGGREGATE_HOURS, force_retag: 
     return enq
 
 
-def route_events_chunk_task(event_ids: list, source: str | None = None) -> int:
+def route_events_chunk_task(event_ids: list) -> int:
     """Route a chunk of events by id. Idempotent."""
-    from django.conf import settings
     from core import models as core_models
     from services.routing import route_events
 
-    src = source or settings.FORECAST_ROUTER
     events = list(core_models.Event.objects.filter(pk__in=list(event_ids)))
-    return route_events(events, source=src)
+    return route_events(events)
 
 
-def dispatch_route_events_task(hours: int = 168, source: str | None = None, limit: int | None = None) -> int:
+def dispatch_route_events_task(hours: int = 168, limit: int | None = None) -> int:
     """Select recent events and fan out routing in chunks of 10. Returns jobs enqueued."""
     from core import models as core_models
     from services.queue import enqueue, make_retry
@@ -189,7 +187,7 @@ def dispatch_route_events_task(hours: int = 168, source: str | None = None, limi
     retry = make_retry()
     enq = 0
     for i in range(0, len(ids), ROUTE_CHUNK_SIZE):
-        enqueue(route_events_chunk_task, ids[i:i + ROUTE_CHUNK_SIZE], source, queue='heavy', retry=retry)
+        enqueue(route_events_chunk_task, ids[i:i + ROUTE_CHUNK_SIZE], queue='heavy', retry=retry)
         enq += 1
     return enq
 

@@ -17,8 +17,6 @@ def _apply_min_score_filter(qs, min_score: float):
         )
     return qs
 
-_FETCH_DEADLINE_SECONDS = 600.0
-
 
 def fetch_articles(
     source_code: str | None,

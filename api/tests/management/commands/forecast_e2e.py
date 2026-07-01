@@ -29,7 +29,6 @@ class Command(BaseCommand):
 
     def handle(self, *args, **opts):
         from datetime import datetime, timedelta, timezone as dt_timezone
-        from django.conf import settings as _settings
         from core import models as core_models
         from services.tasks import (
             backfill_prices_task,
@@ -38,10 +37,9 @@ class Command(BaseCommand):
         from services.routing import route_events as _route_events
 
         def _route_events_direct(hours):
-            src = _settings.FORECAST_ROUTER
             start = datetime.now(dt_timezone.utc) - timedelta(hours=hours)
             events = list(core_models.Event.objects.filter(started_at__gte=start))
-            return _route_events(events, source=src)
+            return _route_events(events)
 
         symbols = [s.strip() for s in opts['symbols'].split(',') if s.strip()] or None
         report = {'started_at': datetime.now(timezone.utc).isoformat(), 'steps': {}}

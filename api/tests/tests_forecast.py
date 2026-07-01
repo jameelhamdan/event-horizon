@@ -73,22 +73,12 @@ def test_to_utc_ts():
 
 
 def test_router_fallback():
-    """No LLM available → route_events must still populate via the deterministic router."""
+    """route_event_to_weighted_symbols (the deterministic router) always produces panel-valid weights."""
     from services.forecasting.routing import route_event_to_weighted_symbols
-    from services.routing.llm_router import LLMEventRouter
 
     out = route_event_to_weighted_symbols('conflict', 'Ukraine', ['ukraine-war'], ['war'], -0.5)
     assert out and all('symbol' in d and 'weight' in d for d in out)
-    # _clean rejects off-panel symbols and zero weights. It takes a {symbol: weight}
-    # dict (the shape the LLM router parses per event), not a list of {symbol, weight}.
-    panel = {'GC=F', 'CL=F', 'SPY', 'BTC-USD', 'EURUSD=X'}
-    cleaned = LLMEventRouter._clean(
-        {'GC=F': 0.5, 'FAKE': 0.9, 'CL=F': 0, 'SPY': 2.0},
-        panel,
-    )
-    syms = {c['symbol'] for c in cleaned}
-    assert syms == {'GC=F', 'SPY'}  # FAKE off-panel, CL=F weight=0 both dropped; SPY clamped 2.0→1.0
-    assert all(-1.0 <= c['weight'] <= 1.0 for c in cleaned)
+    assert all(-1.0 <= d['weight'] <= 1.0 for d in out)
 
 
 def test_metrics_perfect_and_naive():

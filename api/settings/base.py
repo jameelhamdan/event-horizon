@@ -306,7 +306,6 @@ LLM_ROUTES = {
     'scoring':       ['groq', 'cerebras', 'openrouter', 'ollama_small'],
     'historical':    ['groq', 'cerebras', 'openrouter', 'ollama_small'],
     'topics':        ['groq', 'cerebras', 'openrouter', 'ollama_medium'],  # enrichment/discovery only — tagging is local (embeddings)
-    'routing':       ['groq', 'cerebras', 'openrouter', 'ollama_small'],   # unused while FORECAST_ROUTER='rules'
 }
 
 # ── Forecasting (event-fused symbol prediction) ───────────────────────────────
@@ -314,7 +313,7 @@ FORECAST_ENABLED = config('FORECAST_ENABLED', default=True, cast=bool)
 FORECAST_MODEL_DIR = str(BASE_DIR / 'forecast_models')
 FORECAST_HORIZONS_DAYS = [1, 5]    # trading-day horizons trained + served
 FORECAST_TRAIN_WINDOW_DAYS = 540
-FORECAST_ROUTER = 'rules'          # 'llm' = LLMEventRouter w/ rules fallback; 'rules' = deterministic (no LLM calls)
+FORECAST_ROUTER = 'rules'          # deterministic event→symbol routing (no LLM calls); tagged onto Event/Forecast.router_source
 
 # ── RQ / django-rq ────────────────────────────────────────────────────────────
 _REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')

@@ -149,6 +149,14 @@ class Article(models.Model):
     created_on = models.DateTimeField(auto_now_add=True)
     extra_data = models.JSONField(default=dict, blank=True)
 
+    # Cached title embedding for semantic clustering (aggregate_events) — computed
+    # once and reused across runs instead of re-encoding on every aggregation pass
+    # (the lookback window overlaps runs, so the same article gets re-embedded
+    # repeatedly otherwise). title_embedding_model guards against stale vectors if
+    # the clustering model is ever swapped.
+    title_embedding = models.JSONField(default=list, blank=True)
+    title_embedding_model = models.CharField(max_length=128, null=True, blank=True)
+
     objects = MongoManager()
 
     class Meta:
@@ -160,6 +168,8 @@ class Article(models.Model):
             models.Index(fields=['category']),
             models.Index(fields=['processed_on']),
             models.Index(fields=['location']),
+            # aggregate_events' primary query filters processed_on + published_on range.
+            models.Index(fields=['processed_on', 'published_on'], name='core_article_proc_pub_idx'),
         ]
 
     def __str__(self):
@@ -201,8 +211,7 @@ class Event(models.Model):
     # Market indicators this event plausibly moves (a FEATURE/hypothesis, not a label).
     # Format: [{"symbol": "GC=F", "weight": 0.42}, ...] (weight signed; see routing.py)
     affected_indicators = models.JSONField(default=list, blank=True)
-    # Which router produced affected_indicators: 'llm' (LLMEventRouter) or 'rules' (routing.py).
-    # Recorded so the forecasting backtest can ablate LLM-routed vs rule-routed features.
+    # Which router produced affected_indicators — always 'rules' (deterministic, services/forecasting/routing.py).
     router_source = models.CharField(max_length=8, default='rules', blank=True)
 
     # References

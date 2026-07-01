@@ -16,6 +16,7 @@ ENV HF_HOME=/py/huggingface
 ENV UV_INDEX_STRATEGY=unsafe-best-match
 
 COPY ./scripts/init_models.py /init_models.py
+COPY ./settings/model_names.py /model_names.py
 
 RUN pip install --no-cache-dir uv \
     && uv venv /py \
