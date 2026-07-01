@@ -36,15 +36,7 @@ class SemanticClusterer:
     @cached_property
     def _model(self):
         from sentence_transformers import SentenceTransformer
-        try:
-            model = SentenceTransformer(_MODEL_NAME, backend="onnx")
-            logger.info("[cluster] Loaded sentence-transformer model (onnx backend): %s", _MODEL_NAME)
-        except Exception:
-            logger.exception(
-                "[cluster] ONNX backend unavailable for %s — falling back to torch backend", _MODEL_NAME,
-            )
-            model = SentenceTransformer(_MODEL_NAME)
-        return model
+        return SentenceTransformer(_MODEL_NAME)
 
     def encode(self, texts: list[str], batch_size: int = _BATCH_SIZE):
         """Embed *texts* with the shared multilingual model (normalized, tensor output)."""

@@ -37,13 +37,6 @@ def download_models() -> None:
 
     print(f"Downloading {CLUSTER_MODEL_NAME}...")
     SentenceTransformer(CLUSTER_MODEL_NAME)
-    try:
-        # Pre-export/cache the ONNX graph at build time so the first production
-        # request doesn't pay the one-time torch->ONNX conversion cost.
-        SentenceTransformer(CLUSTER_MODEL_NAME, backend="onnx")
-        print(f"Exported {CLUSTER_MODEL_NAME} to ONNX.")
-    except Exception as e:
-        print(f"ONNX export skipped (will fall back to torch backend at runtime): {e}")
 
     print(f"Downloading {FINBERT_MODEL_NAME}...")
     pipeline("text-classification", model=FINBERT_MODEL_NAME, top_k=None, truncation=True, max_length=512)
