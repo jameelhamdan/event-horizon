@@ -14,7 +14,7 @@ See [project.md](project.md) for full requirements and architecture. See [CLAUDE
 | Task queue | Redis + RQ + django-rq |
 | Storage | MongoDB 8 |
 | Ingestion | feedparser (RSS) + requests |
-| NLP | LLM entity/sentiment/category + sentence-transformers clustering + FinBERT + geonamescache geocoding |
+| NLP | LLM category/geo/intensity + local NER (entities) + VADER (sentiment) + sentence-transformers (clustering + topic matching) + FinBERT + MarianMT (Arabic translation) + geonamescache geocoding |
 | Email | AWS SES (prod) / SMTP (dev) |
 | Newsletter | LLM-generated daily briefing → subscriber list |
 | Frontend | React 19 + Vite + react-leaflet |
@@ -101,16 +101,19 @@ fetch            (every 10m)
   └─ feedparser (RSS) / requests → Article objects in MongoDB
 
 process          (every 4h, fan-out to heavy workers)
-  └─ LLM analyzer — entities, sentiment, category/sub-category, city/country
+  └─ LLM analyzer — category/sub-category, city/country, intensity
+  └─ Local NER (dslim/bert-base-NER) — entities
+  └─ Local VADER — general sentiment [-1, 1]
   └─ FinBERT — financial sentiment [-1, 1]
+  └─ Local MarianMT — Arabic translation (from the LLM's English title/summary)
   └─ geonamescache — city/country → lat/lng
 
 aggregate        (every 4h, 30m after process)
   └─ Groups articles by (location, category, day) + semantic clustering → Event objects
 
 tag + route      (every 6h)
-  └─ LLM topic matcher → Event.topic_slugs
-  └─ Deterministic routing → Event.affected_indicators (market symbols)
+  └─ Local sentence-transformer embeddings → Event.topic_slugs (LLM matcher available, unused by default)
+  └─ Deterministic rules routing → Event.affected_indicators (market symbols)
 
 forecast         (daily)
   └─ LightGBM trained on event features + price history → directional predictions
@@ -133,10 +136,11 @@ api/
   misc/          Static pages, sitemap
   services/
     data/        RSS + HTTP ingestion
-    processing/  ArticleCleaner — LLM analyzer, FinBERT, clustering
-    forecasting/ LightGBM model, features, backtest, event router
-    topics/      Topic scraper, LLM matcher, dedup
-    routing/     LLM event → symbol router
+    processing/  ArticleCleaner — LLM analyzer, local NER, VADER, FinBERT, clustering
+    translation/ Local Arabic translation (MarianMT)
+    forecasting/ LightGBM model, features, backtest, deterministic event router
+    topics/      Topic scraper, embedding matcher (local), LLM matcher (unused by default), dedup
+    routing/     LLM event → symbol router (unused by default — see forecasting/routing.py)
     streams/     Price, NOTAM, earthquake, forex live feeds
     newsletter/  Newsletter generator
     email/       SES / SMTP email service

@@ -152,6 +152,7 @@ def process_articles(
             extra['geo_failed'] = True
         article.extra_data = extra
         article.translations = features.translations
+        article.llm_usage = features.llm_usage
 
         mark_stage(article, 'process', ok=True)
         mark_stage(article, 'geocode', ok=bool(features.location),
@@ -160,7 +161,7 @@ def process_articles(
         update_fields = [
             'entities', 'sentiment', 'finbert_sentiment', 'location', 'latitude', 'longitude',
             'event_intensity', 'category', 'sub_category', 'processed_on',
-            'extra_data', 'translations', 'stage_status',
+            'extra_data', 'translations', 'llm_usage', 'stage_status',
         ]
         if (
             not lite

@@ -190,6 +190,63 @@ def _forecast_status():
     return status
 
 
+def _llm_status():
+    """
+    Per-provider call stats (ok/err/avg_ms) + debounce state from Redis.
+    Debounce keys: llm:debounce:{provider}:{hash}  — count active ones per provider.
+    Stats keys:    llm:req:{provider}:{ok|err|ms|last_ok|last_err}
+    """
+    try:
+        from django.conf import settings
+        from services.cache import get_redis_client, key_llm_debounce_scan_pattern, key_llm_req_stat
+        rc = get_redis_client(write=False)
+
+        all_providers: set[str] = set()
+        for route in settings.LLM_ROUTES.values():
+            if isinstance(route, str):
+                all_providers.add(route)
+            else:
+                all_providers.update(route)
+
+        rows = []
+        for provider in sorted(all_providers):
+            ok  = int(rc.get(key_llm_req_stat(provider, 'ok'))  or 0)
+            err = int(rc.get(key_llm_req_stat(provider, 'err')) or 0)
+            ms  = float(rc.get(key_llm_req_stat(provider, 'ms')) or 0)
+            avg_ms = int(ms / (ok + err)) if (ok + err) else 0
+
+            last_ok_ts  = rc.get(key_llm_req_stat(provider, 'last_ok'))
+            last_err_ts = rc.get(key_llm_req_stat(provider, 'last_err'))
+            last_ok  = datetime.fromtimestamp(int(last_ok_ts),  tz=timezone.utc) if last_ok_ts  else None
+            last_err = datetime.fromtimestamp(int(last_err_ts), tz=timezone.utc) if last_err_ts else None
+
+            # Count active debounce tokens and find shortest remaining TTL
+            debounce_keys = rc.keys(key_llm_debounce_scan_pattern(provider))
+            debounced = 0
+            min_ttl: int | None = None
+            for k in debounce_keys:
+                ttl = rc.ttl(k)
+                if ttl > 0:
+                    debounced += 1
+                    if min_ttl is None or ttl < min_ttl:
+                        min_ttl = ttl
+
+            rows.append({
+                'provider': provider,
+                'ok': ok,
+                'err': err,
+                'avg_ms': avg_ms,
+                'debounced': debounced,
+                'cooldown_s': min_ttl,
+                'last_ok': last_ok,
+                'last_err': last_err,
+            })
+        return rows
+    except Exception as exc:
+        logger.debug('[dashboard] llm_status unavailable: %s', exc)
+        return []
+
+
 def dashboard_view(request):
     if request.method == 'POST':
         return _handle_action(request)
@@ -210,5 +267,6 @@ def dashboard_view(request):
         'in_flight': _in_flight(),
         'coverage': coverage,
         'forecast': _forecast_status(),
+        'llm_status': _llm_status(),
     }
     return render(request, 'admin/dashboard.html', context)

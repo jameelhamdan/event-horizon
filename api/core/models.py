@@ -91,8 +91,8 @@ class Article(models.Model):
     )
 
     # NLP fields — populated by process_articles
-    entities = models.JSONField(default=list, blank=True)
-    # sentiment = LLM-extracted polarity [-1, 1].
+    entities = models.JSONField(default=list, blank=True)  # local NER (dslim/bert-base-NER)
+    # sentiment = VADER polarity [-1, 1] (local, rule-based).
     sentiment = models.FloatField(null=True, blank=True)
     # FinBERT signed sentiment [-1, 1] for news article text (domain-matched).
     # Both scores are exposed as separate downstream features; never the predictor.
@@ -108,6 +108,13 @@ class Article(models.Model):
     )
     sub_category = models.CharField(max_length=64, null=True, blank=True)
     processed_on = models.DateTimeField(null=True, blank=True)
+
+    # Set by dispatch_process_articles_task when a job is enqueued for this
+    # article; not cleared explicitly — once processed_on is set the article
+    # is excluded from selection regardless of this value. Prevents
+    # re-dispatch while an earlier job for the same article is still sitting
+    # in the queue (see PROCESS_QUEUE_CLAIM_TTL_HOURS).
+    process_queued_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     # Importance scoring — set by score_articles_task (LLM batch, every 15 min).
     # null = unscored (treated as medium priority in the process queue).
@@ -132,6 +139,11 @@ class Article(models.Model):
     # {"en": {"title": "...", "summary": "...", "country": "...", "city": "..."},
     #  "ar": {"title": "...", "summary": "...", "country": "...", "city": "..."}}
     translations = models.JSONField(default=dict, blank=True)
+
+    # LLM call metadata written by process_articles.
+    # {"provider": "groq", "model": "llama-3.1-8b-instant",
+    #  "prompt_tokens": 420, "completion_tokens": 180, "total_tokens": 600}
+    llm_usage = models.JSONField(default=dict, blank=True)
 
     updated_on = models.DateTimeField(auto_now=True)
     created_on = models.DateTimeField(auto_now_add=True)
@@ -210,10 +222,16 @@ class Event(models.Model):
     # Flat slug list for queryable filtering (parallel to topics dict)
     topic_slugs = models.JSONField(default=list, blank=True)
 
-    # Which matcher produced `topics`: 'llm' (LLMTopicMatcher succeeded) or
-    # 'keyword' (LLM was unavailable, fell back to keyword TopicMatcher).
+    # Aggregated LLM usage across all constituent articles (written by aggregate_events).
+    # {"total_tokens": 1800, "prompt_tokens": 1400, "completion_tokens": 400,
+    #  "by_provider": {"groq": {"total_tokens": 1200, ...}, "openrouter": {...}},
+    #  "article_count": 3}
+    llm_usage = models.JSONField(default=dict, blank=True)
+
+    # Which matcher produced `topics`: 'embed' (EmbeddingTopicMatcher succeeded) or
+    # 'keyword' (embedding model was unavailable, fell back to keyword TopicMatcher).
     # Keyword-fallback tags are low-confidence and possibly wrong, so they are
-    # re-evaluated by the LLM on a later tag_events_with_topics run. Empty = untagged.
+    # re-evaluated on a later tag_events_with_topics run. Empty = untagged.
     topics_source = models.CharField(max_length=8, default='', blank=True)
 
     # Per-stage pipeline outcome tracking — see Article.stage_status. Stages here are
@@ -662,8 +680,8 @@ class ArticleDocument:
 class ArticleFeatures:
     """NLP output for a single article, returned by ArticleCleaner."""
     id: str
-    entities: list[dict]    # [{text: str, label: str}]
-    sentiment: float        # LLM-extracted sentiment polarity [-1, 1]
+    entities: list[dict]    # [{text: str, label: str}] — local NER (dslim/bert-base-NER)
+    sentiment: float        # VADER polarity [-1, 1] (local, rule-based)
     finbert_sentiment: float | None  # FinBERT signed sentiment [-1, 1], news-domain
     location: str | None    # 'City, Country' from LLM analysis
     latitude: float | None  # from geonamescache city lookup
@@ -673,5 +691,6 @@ class ArticleFeatures:
     sub_category: str | None  # LLM-assigned sub-category slug within category
     llm_data: dict          # raw LLM response — stored in article.extra_data['llm']
     translations: dict      # i18n subdocument — stored in article.translations
+    llm_usage: dict         # {provider, model, prompt_tokens, completion_tokens, total_tokens}
 
 

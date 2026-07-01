@@ -22,7 +22,7 @@ python manage.py run_task dispatch_fetch_task --sync
 python manage.py run_task aggregate_events_task --sync
 
 # Smoke-test LLM routing for a given role
-python manage.py test_llm --role analyzer --prompt "your prompt"
+python manage.py test_llm --role analyzer_lite --prompt "your prompt"
 
 # End-to-end pipeline test (writes JSON report)
 python manage.py e2e_pipeline
@@ -59,7 +59,7 @@ Copy `api/.env.example` to `api/.env` (or `.env.app` at the project root). Key s
 
 - `TASK_QUEUE_ENABLED=false` — tasks run synchronously; no Redis/worker required locally.
 - `DATABASE_URL` — MongoDB connection string (default `mongodb://root:1234@localhost:27017/radar-live?authSource=admin`).
-- LLM credentials go in env (`GROQ_API_KEYS`, `CEREBRAS_API_KEYS`, `OPENROUTER_API_KEYS`, `OLLAMA_BASE_URL`); routing logic is in `settings/base.py` `LLM_ROUTES`.
+- LLM credentials go in env (`GROQ_API_KEYS`, `CEREBRAS_API_KEYS`, `OPENROUTER_API_KEYS`, `OLLAMA_BASE_URL`); routing logic is in `settings/base.py` `LLM_ROUTES`. The LLM only handles category/sub-category/geo/intensity classification and newsletter/topic-enrichment prose now — entities, sentiment, translation, topic tagging, and event routing all run on local models (see LLM routing below).
 
 ## Architecture
 
@@ -78,12 +78,19 @@ api/                       PYTHONPATH root inside Docker (/app)
     tasks.py               All task functions — plain Python, no decorator
     queue.py               enqueue() helper — sync fallback when TASK_QUEUE_ENABLED=False
     llm/                   LLM client — provider abstraction + round-robin key rotation
-    processing/            analyzer.py (LLM category/geo/NER/sentiment), cleaner.py, clustering.py
-    topics/                matcher.py, scraper.py, dedup.py, WikipediaCurrentEventsAdapter
+    processing/            analyzer.py (LLM: category/sub-category/geo/intensity), ner.py (local NER,
+                           entities), vader.py (local, sentiment), finbert.py (local, financial
+                           sentiment), cleaner.py (orchestrates all of the above), clustering.py
+    translation/           Local EN→AR translation (MarianMT) — replaces LLM-generated translations
+    topics/                matcher.py (EmbeddingTopicMatcher — local, default; LLMTopicMatcher — kept,
+                           unused by default; TopicMatcher — keyword fallback), scraper.py, dedup.py,
+                           WikipediaCurrentEventsAdapter
     streams/               prices.py, notam.py, earthquakes.py, forex.py
     data/                  DataService, rss.py (feedparser), telegram.py (Telethon)
     newsletter/            generator.py (LLM), sender.py (Markdown→HTML→SES)
-    forecasting/           routing.py — LLM event→symbol routing + LightGBM clf+reg
+    forecasting/           routing.py — deterministic (rules-based) event→symbol routing + LightGBM clf+reg
+    routing/               llm_router.py — LLM event→symbol routing, kept as an alternative
+                           (FORECAST_ROUTER='llm'), unused while the default is 'rules'
   migrations/              Centralized — all apps map here via MIGRATION_MODULES
   tests/                   Management-command e2e tests + offline unit tests
 ```
@@ -105,12 +112,16 @@ The crontab (`api/crontab`, run by supercronic in the `api` container) dispatche
 dispatch_fetch_task (every 10m)
   → fetch_source_task × N (one per enabled Source, default queue)
     → dispatch_process_articles_task (every 4h, heavy)
-      → process_articles_chunk_task × N (LLM analyze: category/geo/entities/sentiment + i18n)
+      → process_articles_chunk_task × N
+          — LLM: category/sub-category/geo/intensity + EN translation
+          — local: NER (entities), VADER (sentiment), FinBERT (financial sentiment),
+            MarianMT (EN→AR translation)
         → aggregate_events_task (every 4h+30m, heavy)
-          → dispatch_tag_topics_task → tag_topics_chunk_task × N (LLMTopicMatcher)
-            → discover_topics_task (daily 05:00)
-              → refresh_topics_task (daily 04:00, WikipediaCurrentEventsAdapter)
-                → generate_newsletter_task (daily 06:00)
+          → dispatch_tag_topics_task → tag_events_chunk_task × N (EmbeddingTopicMatcher, local — no LLM)
+dispatch_route_events_task (every 6h, heavy) — deterministic rules router (no LLM)
+discover_topics_task (daily 05:00, LLM)
+refresh_topics_task (daily 04:00, WikipediaCurrentEventsAdapter + LLM enrichment)
+generate_newsletter_task (daily 06:00, LLM)
 ```
 
 Stream tasks run independently: prices (5m), NOTAMs (15m), earthquakes (5m), forex (15m). Each saves to MongoDB and publishes to a Redis SSE channel (`sse:prices`, `sse:notams`, `sse:earthquakes`).
@@ -118,6 +129,20 @@ Stream tasks run independently: prices (5m), NOTAMs (15m), earthquakes (5m), for
 ### LLM routing
 
 `get_llm_service(role)` in `services/llm/__init__.py` reads `settings.LLM_ROUTES[role]` (a list of provider names) and tries each in order on failure. Providers: `groq`, `cerebras`, `openrouter`, `ollama_small/medium/large`. Strip code fences before `json.loads()` — always use `services.llm.strip_code_fences()`.
+
+Several tasks that used to go through the LLM now run on local CPU models instead — cheaper, faster, and no rate limits. When touching these areas, prefer extending the local model rather than adding LLM calls back:
+
+| Task | Local replacement | Module |
+| ---- | ------------------ | ------ |
+| Named entities | `dslim/bert-base-NER` (transformers) | `services/processing/ner.py` |
+| Article sentiment | VADER (rule-based) | `services/processing/vader.py` |
+| Arabic translation | `Helsinki-NLP/opus-mt-en-ar` (MarianMT) | `services/translation/` |
+| Event → topic tagging | sentence-transformer cosine similarity (`paraphrase-multilingual-MiniLM-L12-v2`, same model as clustering) | `services/topics/matcher.py::EmbeddingTopicMatcher` |
+| Event → market-symbol routing | Deterministic weighted rules (category/sub-category/country/sentiment) | `services/forecasting/routing.py` |
+
+Still LLM-driven (needs real judgment or free-form generation): article `category`/`sub_category`/`country`/`city`/`intensity` classification (`services/processing/analyzer.py`), article importance scoring (`services/scoring/`), topic description/keyword enrichment + discovery (`services/workflow/topics.py`), and the daily newsletter (`services/newsletter/generator.py`).
+
+`LLMTopicMatcher` (`services/topics/matcher.py`) and `LLMEventRouter` (`services/routing/llm_router.py`) are kept as opt-in alternatives (`FORECAST_ROUTER='llm'` for routing) but are not used by default.
 
 ### Django/MongoDB notes
 

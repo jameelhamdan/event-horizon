@@ -25,11 +25,14 @@ DEFAULT_AGGREGATE_HOURS = 24
 DEFAULT_AGGREGATE_MIN_ARTICLES = 1
 
 # Fan-out tuning — dispatchers cap records enqueued per tick; chunk size amortises overhead.
-PROCESS_CHUNK_SIZE = 1
+# Matches ArticleAnalyzer.ANALYZE_BATCH_SIZE so each chunk maps to exactly one batched LLM call
+# (mirrors TAG_CHUNK_SIZE below for topic tagging).
+PROCESS_CHUNK_SIZE = 8
 PROCESS_DISPATCH_LIMIT = 500
+PROCESS_QUEUE_CLAIM_TTL_HOURS = 6  # claim lease so a slow queue doesn't get re-dispatched every tick
 TAG_DISPATCH_LIMIT = 500
 ROUTE_DISPATCH_LIMIT = 500
-TAG_CHUNK_SIZE = 10     # one LLM call per chunk (LLMTopicMatcher.BATCH_SIZE)
+TAG_CHUNK_SIZE = 10     # events per chunk (EmbeddingTopicMatcher batch, local — no LLM call)
 ROUTE_CHUNK_SIZE = 10
 BOOTSTRAP_ARTICLE_YEARS = 1
 
@@ -95,27 +98,47 @@ def dispatch_process_articles_task(limit: int | None = None, only_failed: bool =
         qs = core_models.Article.objects.filter(processed_on__isnull=False, location__isnull=True)
         ids = [a.id for a in qs.only('id', 'extra_data') if not (a.extra_data or {}).get('geo_failed')][:limit]
     else:
+        from django.db.models import Q
         from django.conf import settings as _s
         from services.workflow.articles import _apply_min_score_filter
+        now = datetime.now(dt_timezone.utc)
+        claim_cutoff = now - timedelta(hours=PROCESS_QUEUE_CLAIM_TTL_HOURS)
         qs = core_models.Article.objects.filter(processed_on__isnull=True)
+        # Skip articles whose earlier dispatch is still (presumably) in flight —
+        # avoids re-enqueueing duplicate jobs when the heavy queue is backlogged.
+        qs = qs.filter(Q(process_queued_at__isnull=True) | Q(process_queued_at__lt=claim_cutoff))
         qs = _apply_min_score_filter(qs, _s.ARTICLE_MIN_IMPORTANCE_TO_PROCESS)
         ids = list(qs.order_by('-importance_score').values_list('id', flat=True)[:limit])
     if not ids:
         return 0
+    if not only_failed:
+        core_models.Article.objects.filter(id__in=ids).update(process_queued_at=now)
     retry = make_retry()
     enq = 0
-    for i in range(0, len(ids), chunk_size):
-        chunk = ids[i:i + chunk_size]
-        if len(chunk) == 1:
-            enqueue(process_article_task, chunk[0], only_failed, queue='heavy', retry=retry)
-        else:
-            enqueue(process_articles_chunk_task, chunk, only_failed, queue='heavy', retry=retry)
-        enq += 1
+    enqueued_ids: set = set()
+    try:
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i:i + chunk_size]
+            if len(chunk) == 1:
+                enqueue(process_article_task, chunk[0], only_failed, queue='heavy', retry=retry)
+            else:
+                enqueue(process_articles_chunk_task, chunk, only_failed, queue='heavy', retry=retry)
+            enqueued_ids.update(chunk)
+            enq += 1
+    except Exception:
+        if not only_failed:
+            # Release the claim on articles a mid-loop failure never actually got to
+            # enqueue, so the next dispatch tick can pick them up immediately instead
+            # of waiting out PROCESS_QUEUE_CLAIM_TTL_HOURS for a job that was never queued.
+            unclaimed = [aid for aid in ids if aid not in enqueued_ids]
+            if unclaimed:
+                core_models.Article.objects.filter(id__in=unclaimed).update(process_queued_at=None)
+        raise
     return enq
 
 
 def tag_events_chunk_task(event_ids: list) -> int:
-    """Tag a chunk of events by id (one LLM call). Idempotent."""
+    """Tag a chunk of events by id (local embedding matcher, no LLM call). Idempotent."""
     return tag_events_by_ids(event_ids)
 
 
@@ -183,18 +206,17 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
     PriceBar-presence heuristic so it runs exactly once. Trigger manually or via admin dashboard.
     """
     import logging
-    from django.core.cache import cache
     from django.conf import settings
     from core import models as core_models
+    from services.cache import KEY_BOOTSTRAP_INITIAL_DATA_DONE, cache_get, cache_set
     from services.queue import enqueue, make_retry
 
     log = logging.getLogger(__name__)
-    FLAG = 'bootstrap:initial_data:done'
     if not force:
-        if cache.get(FLAG):
+        if cache_get(KEY_BOOTSTRAP_INITIAL_DATA_DONE):
             return 0
         if core_models.PriceBar.objects.exists():
-            cache.set(FLAG, True, timeout=None)
+            cache_set(KEY_BOOTSTRAP_INITIAL_DATA_DONE, True, timeout=None)
             return 0
 
     retry = make_retry()
@@ -209,7 +231,7 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
         enqueue(train_forecast_model_task, queue='bulk', job_timeout=-1, retry=retry)
         enqueue(run_forecast_task, queue='bulk', job_timeout=-1)
 
-    cache.set(FLAG, True, timeout=None)
+    cache_set(KEY_BOOTSTRAP_INITIAL_DATA_DONE, True, timeout=None)
     log.info('[bootstrap] initial data backfill enqueued (article window %dy)', BOOTSTRAP_ARTICLE_YEARS)
     return 1
 
@@ -365,7 +387,7 @@ def backfill_history_task(
     import logging
 
     import core.models as m
-    from django.core.cache import cache
+    from services.cache import cache_get, cache_set, key_backfill_checkpoint
     from services.data.historical import HistoricalBackfillService
 
     logger = logging.getLogger(__name__)
@@ -386,8 +408,8 @@ def backfill_history_task(
         delay_seconds=delay_seconds,
     )
 
-    checkpoint_key = f'backfill:{source_code}:{start_date.date()}:{end_date.date()}:done'
-    resume_weeks: set[str] = (cache.get(checkpoint_key) or set()) if resume else set()
+    checkpoint_key = key_backfill_checkpoint(source_code, str(start_date.date()), str(end_date.date()))
+    resume_weeks: set[str] = (cache_get(checkpoint_key) or set()) if resume else set()
 
     total_weeks = total_fetched = total_saved = 0
     for result in service.run(resume_weeks=resume_weeks, dry_run=dry_run):
@@ -398,7 +420,7 @@ def backfill_history_task(
             progress(result)
         if resume and not dry_run:
             resume_weeks.add(result.week_start.isoformat())
-            cache.set(checkpoint_key, resume_weeks, timeout=None)
+            cache_set(checkpoint_key, resume_weeks, timeout=None)
 
     summary = {'weeks': total_weeks, 'fetched': total_fetched, 'saved': total_saved}
     logger.info('backfill_history_task %s done: %s', source_code, summary)

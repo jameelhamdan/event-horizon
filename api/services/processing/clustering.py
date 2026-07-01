@@ -20,13 +20,28 @@ _MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 
 
 class SemanticClusterer:
-    """Groups a list of Article objects by the semantic similarity of their titles."""
+    """Groups a list of Article objects by the semantic similarity of their titles.
+
+    Also the shared embedding accessor for anything else that wants this exact
+    multilingual model (e.g. services.topics.matcher.EmbeddingTopicMatcher) — call
+    ``encode()`` rather than reaching into ``_model`` directly, so model-loading
+    details stay internal to this class.
+    """
 
     @cached_property
     def _model(self):
         from sentence_transformers import SentenceTransformer
         logger.info("[cluster] Loading sentence-transformer model: %s", _MODEL_NAME)
         return SentenceTransformer(_MODEL_NAME)
+
+    def encode(self, texts: list[str]):
+        """Embed *texts* with the shared multilingual model (normalized, tensor output)."""
+        return self._model.encode(
+            texts,
+            convert_to_tensor=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
 
     def cluster(self, articles: list, threshold: float = DEFAULT_THRESHOLD) -> list[list]:
         """
@@ -41,12 +56,7 @@ class SemanticClusterer:
         from sentence_transformers import util
 
         titles = [a.title or "" for a in articles]
-        embeddings = self._model.encode(
-            titles,
-            convert_to_tensor=True,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )
+        embeddings = self.encode(titles)
 
         # community_detection groups sentences whose cosine similarity exceeds
         # *threshold*.  Each sentence appears in at most one community.

@@ -253,8 +253,8 @@ OPENROUTER_MODELS_COUNT = config('OPENROUTER_MODELS_COUNT', default=5, cast=int)
 # LLM-based 1.0–10.0 significance rating. Low-scoring articles are skipped by the
 # NLP pipeline and deleted after a grace period.
 ARTICLE_IMPORTANCE_SCORING_ENABLED = config('ARTICLE_IMPORTANCE_SCORING_ENABLED', default=True, cast=bool)
-ARTICLE_MIN_IMPORTANCE_TO_PROCESS = 4.0   # below this → skip process_articles_task
-ARTICLE_MIN_IMPORTANCE = 4.0              # below this → eligible for deletion
+ARTICLE_MIN_IMPORTANCE_TO_PROCESS = config('ARTICLE_MIN_IMPORTANCE_TO_PROCESS', default=4.0, cast=float)  # below this → skip process_articles_task
+ARTICLE_MIN_IMPORTANCE = config('ARTICLE_MIN_IMPORTANCE', default=4.0, cast=float)                        # below this → eligible for deletion
 ARTICLE_CLEANUP_GRACE_HOURS = 48
 ARTICLE_STALE_PROCESSED_DAYS = 7
 ARTICLE_MIN_WORD_COUNT = 30               # fetch-time filter, zero LLM cost
@@ -296,15 +296,17 @@ OLLAMA_TIMEOUTS = {'small': 30, 'medium': 60, 'large': 120}
 #     fast calls per minute then 429s and cascades; it only *leads* the
 #     low-volume daily newsletter, where 5 rpm + its 31B model are ideal.
 #   - OpenRouter is the mid fallback; Ollama is always last.
+# NB: article analysis is category/sub-category/geo/intensity only — entities
+# (NER), sentiment (VADER), and Arabic translation (MarianMT) all run locally,
+# never through the LLM. See CLAUDE.md "LLM routing" for the full local-model map.
 LLM_ROUTES = {
     'default':       ['groq', 'cerebras', 'openrouter', 'ollama_medium'],
-    'analyzer':      ['openrouter', 'ollama_large', 'groq'],               # EN+AR translations
-    'analyzer_lite': ['groq', 'cerebras', 'openrouter', 'ollama_medium'],  # EN-only backfill
+    'analyzer_lite': ['groq', 'cerebras', 'openrouter', 'ollama_medium'],  # article analysis (EN-only LLM output)
     'newsletter':    ['cerebras', 'openrouter', 'ollama_large'],           # long-form, low volume
     'scoring':       ['groq', 'cerebras', 'openrouter', 'ollama_small'],
     'historical':    ['groq', 'cerebras', 'openrouter', 'ollama_small'],
-    'topics':        ['groq', 'cerebras', 'openrouter', 'ollama_medium'],
-    'routing':       ['groq', 'cerebras', 'openrouter', 'ollama_small'],
+    'topics':        ['groq', 'cerebras', 'openrouter', 'ollama_medium'],  # enrichment/discovery only — tagging is local (embeddings)
+    'routing':       ['groq', 'cerebras', 'openrouter', 'ollama_small'],   # unused while FORECAST_ROUTER='rules'
 }
 
 # ── Forecasting (event-fused symbol prediction) ───────────────────────────────
@@ -312,7 +314,7 @@ FORECAST_ENABLED = config('FORECAST_ENABLED', default=True, cast=bool)
 FORECAST_MODEL_DIR = str(BASE_DIR / 'forecast_models')
 FORECAST_HORIZONS_DAYS = [1, 5]    # trading-day horizons trained + served
 FORECAST_TRAIN_WINDOW_DAYS = 540
-FORECAST_ROUTER = 'llm'            # 'llm' = LLMEventRouter w/ rules fallback; 'rules' = deterministic
+FORECAST_ROUTER = 'rules'          # 'llm' = LLMEventRouter w/ rules fallback; 'rules' = deterministic (no LLM calls)
 
 # ── RQ / django-rq ────────────────────────────────────────────────────────────
 _REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')

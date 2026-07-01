@@ -7,6 +7,30 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
+def _aggregate_llm_usage(articles: list) -> dict:
+    """Sum token counts from constituent articles, grouped by provider."""
+    by_provider: dict[str, dict] = {}
+    for a in articles:
+        u = getattr(a, 'llm_usage', None) or {}
+        if not u or not u.get('provider'):
+            continue
+        p = u['provider']
+        if p not in by_provider:
+            by_provider[p] = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}
+        by_provider[p]['prompt_tokens']     += u.get('prompt_tokens', 0)
+        by_provider[p]['completion_tokens'] += u.get('completion_tokens', 0)
+        by_provider[p]['total_tokens']      += u.get('total_tokens', 0)
+    if not by_provider:
+        return {}
+    return {
+        'prompt_tokens':     sum(v['prompt_tokens']     for v in by_provider.values()),
+        'completion_tokens': sum(v['completion_tokens'] for v in by_provider.values()),
+        'total_tokens':      sum(v['total_tokens']      for v in by_provider.values()),
+        'by_provider':       by_provider,
+        'article_count':     len(articles),
+    }
+
+
 def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
     """Group processed Articles by (location, category, day) into Events.
     Returns (created_count, updated_count).
@@ -92,6 +116,7 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
         affected_indicators = route_event_to_weighted_symbols(
             category, location, [], sub_categories, route_sentiment,
         )
+        llm_usage = _aggregate_llm_usage(group)
 
         lats = [a.latitude for a in group if a.latitude is not None]
         lngs = [a.longitude for a in group if a.longitude is not None]
@@ -144,6 +169,7 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
                     sub_categories=sub_categories,
                     affected_indicators=affected_indicators,
                     translations=event_translations,
+                    llm_usage=llm_usage,
                 )
                 created = True
                 created_count += 1
@@ -172,6 +198,7 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
             event.sub_categories = sub_categories
             event.affected_indicators = affected_indicators
             event.translations = {**(event.translations or {}), **event_translations}
+            event.llm_usage = llm_usage
             event.save()
             updated_count += 1
             logger.info(f'[aggregate] Updated  {location} [{category}] — {len(group)} article(s)')

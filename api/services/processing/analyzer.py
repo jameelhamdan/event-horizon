@@ -1,7 +1,6 @@
 import functools
 import json
 import logging
-import re
 
 from services.llm import strip_code_fences
 from dataclasses import dataclass
@@ -25,32 +24,20 @@ _SUB_CATEGORIES: dict[str, set[str]] = {
     'general':   {'other'},
 }
 
+# English-only schema. Two things are no longer requested from the LLM, each
+# handled by a purpose-built local model instead (see cleaner.py):
+#   - entities   → services.processing.ner   (dslim/bert-base-NER)
+#   - sentiment  → services.processing.vader (VADER, rule-based)
+# Arabic localization is likewise generated locally, by services.translation
+# (MarianMT), from the English fields below — see _add_arabic_translations.
+# What's left needs real judgment (taxonomy classification, geo naming,
+# severity rating), so it stays on the LLM.
 _OBJECT_SCHEMA = """\
 {
   "category": conflict|disaster|economic|political|health|general,
   "sub_category": sub-category slug for the chosen category (see guide) or null,
   "country": English country name or null,
   "city": English city/region name or null,
-  "entities": [{"text": named entity surface form, "label": PER|ORG|LOC|MISC}],
-  "sentiment": float -1.0 (very negative) to 1.0 (very positive),
-  "intensity": float 0.0 to 1.0 (newsworthiness/severity — see guide),
-  "translations": {
-    "en": {"title": English title, "summary": 2-3 sentence factual English summary, "country": English country or null, "city": English city or null},
-    "ar": {"title": Arabic title, "summary": 2-3 sentence factual Arabic summary, "country": Arabic country or null, "city": Arabic city or null}
-  }
-}"""
-
-# Lean schema for backfill: English-only (drops the token-heavy Arabic summary).
-# Geocoding + category still work, articles still render on the map; we just skip
-# the Arabic localization for historical records.
-_OBJECT_SCHEMA_LITE = """\
-{
-  "category": conflict|disaster|economic|political|health|general,
-  "sub_category": sub-category slug for the chosen category (see guide) or null,
-  "country": English country name or null,
-  "city": English city/region name or null,
-  "entities": [{"text": named entity surface form, "label": PER|ORG|LOC|MISC}],
-  "sentiment": float -1.0 (very negative) to 1.0 (very positive),
   "intensity": float 0.0 to 1.0 (newsworthiness/severity — see guide),
   "translations": {
     "en": {"title": English title, "summary": 2-3 sentence factual English summary, "country": English country or null, "city": English city or null}
@@ -73,16 +60,17 @@ Intensity (newsworthiness/severity of the event, not your opinion of it):
 - 0.6-0.8: major — many casualties, national-scale crises, significant attacks/disasters, central-bank decisions.
 - 0.9-1.0: severe/historic — mass-casualty events, wars, major disasters, globally market-moving shocks."""
 
-def _single_prompt(schema: str) -> str:
+def _batch_prompt(schema: str) -> str:
     return (
-        'News article analyzer. JSON only (no markdown).\n\nSchema:\n'
-        + schema + '\n\n' + _CATEGORY_GUIDE
+        'News article analyzer. JSON only (no markdown).\n\n'
+        'You will receive a numbered list of articles. Return a JSON array with '
+        'exactly one result object per article, in the same order — no other text.\n\n'
+        'Result object schema:\n' + schema + '\n\n' + _CATEGORY_GUIDE
     )
 
 
-# Full prompts carry EN+AR translations; lite prompts are EN-only (backfill).
-_SYSTEM_PROMPT = _single_prompt(_OBJECT_SCHEMA)
-_SYSTEM_PROMPT_LITE = _single_prompt(_OBJECT_SCHEMA_LITE)
+# Batch prompt (array-in, array-out) — a single article is just a batch of one.
+_SYSTEM_PROMPT = _batch_prompt(_OBJECT_SCHEMA)
 
 
 @dataclass
@@ -93,11 +81,10 @@ class ArticleAnalysis:
     city: str | None          # e.g. "Kyiv"
     latitude: float | None
     longitude: float | None
-    entities: list            # [{"text": ..., "label": PER|ORG|LOC|MISC}] — LLM-extracted
-    sentiment: float          # -1.0..1.0 polarity — LLM-extracted
     intensity: float          # 0.0..1.0 newsworthiness/severity — LLM-rated
     llm_data: dict            # raw parsed LLM response for storage in extra_data
     translations: dict        # i18n subdocument: {"en": {...}, "ar": {...}}
+    llm_usage: dict           # {provider, model, prompt_tokens, completion_tokens, total_tokens}
 
 
 @functools.lru_cache(maxsize=1)
@@ -174,9 +161,9 @@ def _geocode(city: str | None, country: str | None = None) -> tuple[float | None
 
 class ArticleAnalyzer:
     """
-    Uses the LLM to extract category, country, city, and coordinates from article text.
+    Uses the LLM to extract category, sub-category, country, city, and intensity from
+    article text (route 'analyzer_lite' — see settings.LLM_ROUTES).
 
-    Requires OPENROUTER_API_KEYS to be configured.
     Falls back to ArticleAnalysis(category='general', ...) on any failure.
 
     Usage:
@@ -185,25 +172,27 @@ class ArticleAnalyzer:
         # ArticleAnalysis(category='conflict', country='Ukraine', city='Kyiv', latitude=50.45, longitude=30.52)
     """
 
-    _MAX_CHARS = 1200
+    # Multi-article batching — cuts LLM call count roughly by this factor vs.
+    # one call per article. Smaller than ArticleImportanceScorer.BATCH_SIZE
+    # (30) because full article content is included here, not just titles.
+    ANALYZE_BATCH_SIZE = 8
+    # Per-article content cap inside a multi-article prompt — keeps an
+    # 8-article batch prompt within safe context/latency bounds.
+    _BATCH_MAX_CHARS = 550
 
     def __init__(self) -> None:
         from services.llm import get_llm_service
         self._get_llm_service = get_llm_service
-        # Two routes by complexity: full (EN+AR) → 'analyzer' (OpenRouter);
-        # lite (English-only backfill) → 'analyzer_lite' (local Ollama 7B, OR fallback).
-        # Resolved lazily and cached so an unused route never instantiates a client.
-        self._llm_full = None
-        self._llm_lite = None
+        # Single route: the LLM only handles category/geo/intensity + EN
+        # translation now — entities/sentiment are local (NER/VADER, see
+        # cleaner.py) and Arabic is added locally afterward via
+        # services.translation. Resolved lazily and cached.
+        self._llm = None
 
-    def _service(self, translate: bool):
-        if translate:
-            if self._llm_full is None:
-                self._llm_full = self._get_llm_service('analyzer')
-            return self._llm_full
-        if self._llm_lite is None:
-            self._llm_lite = self._get_llm_service('analyzer_lite')
-        return self._llm_lite
+    def _service(self):
+        if self._llm is None:
+            self._llm = self._get_llm_service('analyzer_lite')
+        return self._llm
 
     @staticmethod
     def _empty() -> ArticleAnalysis:
@@ -211,42 +200,9 @@ class ArticleAnalyzer:
             category='general', sub_category=None,
             country=None, city=None,
             latitude=None, longitude=None,
-            entities=[], sentiment=0.0, intensity=0.0,
-            llm_data={}, translations={},
+            intensity=0.0,
+            llm_data={}, translations={}, llm_usage={},
         )
-
-    @staticmethod
-    def _parse_entities(raw) -> list:
-        """Normalise the LLM entities field to [{'text','label'}] with valid labels.
-
-        Accepts a list of {text,label} dicts (preferred) or bare strings (labelled
-        MISC). Drops malformed/empty entries. Output shape is
-        [{'text','label'}] — stored on Article.entities.
-        """
-        if not isinstance(raw, list):
-            return []
-        valid = {'PER', 'ORG', 'LOC', 'MISC'}
-        out = []
-        for e in raw:
-            if isinstance(e, str):
-                text, label = e.strip(), 'MISC'
-            elif isinstance(e, dict):
-                text = str(e.get('text') or '').strip()
-                label = str(e.get('label') or 'MISC').upper()
-            else:
-                continue
-            if not text:
-                continue
-            out.append({'text': text, 'label': label if label in valid else 'MISC'})
-        return out
-
-    @staticmethod
-    def _parse_sentiment(raw) -> float:
-        """Coerce the LLM sentiment field to a float clamped to [-1.0, 1.0]."""
-        try:
-            return round(max(-1.0, min(1.0, float(raw))), 4)
-        except (TypeError, ValueError):
-            return 0.0
 
     @staticmethod
     def _parse_intensity(raw, default: float = _DEFAULT_INTENSITY) -> float:
@@ -263,36 +219,129 @@ class ArticleAnalyzer:
             return default
 
     def analyze(self, text: str, translate: bool = True) -> ArticleAnalysis:
-        """
-        Analyze a single article. Returns a zeroed-out ArticleAnalysis on failure.
+        """Analyze a single article. Returns a zeroed-out ArticleAnalysis on failure."""
+        return self.analyze_batch([text], translate=translate)[0]
 
-        translate=False uses the lite (English-only) schema — used for backfilled
-        historical articles where the Arabic localization isn't worth the tokens.
+    def analyze_batch(self, texts: list[str], translate: bool = True) -> list[ArticleAnalysis]:
         """
-        system = _SYSTEM_PROMPT if translate else _SYSTEM_PROMPT_LITE
+        Analyze articles in batches of one LLM call each. Returns one ArticleAnalysis
+        per input text, in order — failures fall back to _empty() per-item or per-chunk.
+
+        The LLM call itself only ever produces English output (category, geo,
+        intensity, EN translation) — entities and sentiment never touch the LLM at
+        all (see cleaner.py: NER + VADER, local, on every document regardless of
+        this flag). translate=True additionally adds a locally-generated ('ar')
+        translation block via services.translation (MarianMT) — no extra LLM cost
+        either way. translate=False skips that local translation step entirely
+        (used for backfilled historical articles where Arabic localization isn't
+        needed).
+
+        Batch size depends on which provider will actually serve the call: Ollama is
+        a single local model server (one request at a time), so a route that
+        effectively resolves to Ollama (no cloud keys configured, or all of them
+        exhausted/unconfigured) degrades to one article per call instead of risking a
+        big multi-article prompt timing out and losing the whole chunk.
+        """
+        if not texts:
+            return []
+        from services.llm import resolved_provider_names
+
+        service = self._service()
+        primary = (resolved_provider_names(service) or ['unknown'])[0]
+        batch_size = 1 if primary.startswith('ollama') else self.ANALYZE_BATCH_SIZE
+
+        results: list[ArticleAnalysis] = []
+        for i in range(0, len(texts), batch_size):
+            results.extend(self._analyze_chunk(texts[i : i + batch_size], translate, service))
+        return results
+
+    def _analyze_chunk(self, texts: list[str], translate: bool, service) -> list[ArticleAnalysis]:
+        """Send one multi-article prompt (array-in, array-out) and parse it back."""
+        user = '\n\n'.join(
+            f'Article {i + 1}:\n{t[: self._BATCH_MAX_CHARS]}' for i, t in enumerate(texts)
+        )
         try:
-            raw = self._service(translate).chat(
+            raw, usage = service.chat_with_usage(
                 messages=[
-                    {'role': 'system', 'content': system},
-                    {'role': 'user', 'content': text[: self._MAX_CHARS]},
+                    {'role': 'system', 'content': _SYSTEM_PROMPT},
+                    {'role': 'user', 'content': user},
                 ],
                 temperature=0,
             )
-            return self._parse_obj(self._loads(raw))
+            data = self._loads(raw)
+            if not isinstance(data, list):
+                data = [data]  # tolerate a bare object for a batch of one
         except Exception:
-            logger.exception('ArticleAnalyzer.analyze failed')
-            return self._empty()
+            logger.exception('ArticleAnalyzer._analyze_chunk failed (%d article(s))', len(texts))
+            return [self._empty() for _ in texts]
 
-    def analyze_batch(self, texts: list[str], translate: bool = True) -> list[ArticleAnalysis]:
-        """Analyze each article individually. Returns one ArticleAnalysis per input text."""
-        return [self.analyze(t, translate) for t in texts]
+        per_article_usage = self._split_usage(usage, len(texts))
+        results = [
+            self._parse_obj(data[i], per_article_usage[i]) if i < len(data) and isinstance(data[i], dict) else self._empty()
+            for i in range(len(texts))
+        ]
+        if translate:
+            self._add_arabic_translations(results)
+        return results
+
+    @staticmethod
+    def _split_usage(usage: dict, n: int) -> list[dict]:
+        """Split one batch call's token usage evenly across the ``n`` articles it
+        covered, so per-article llm_usage sums back to the true batch total instead
+        of every article being stamped with the whole batch's token count.
+
+        Token counts divide with the remainder going to the first few articles
+        (so the split always sums exactly to the original); ``provider``/``model``
+        are copied as-is since they're the same for every article in the call.
+        """
+        if not usage or n <= 0:
+            return [dict(usage or {}) for _ in range(max(n, 0))]
+        token_fields = ('prompt_tokens', 'completion_tokens', 'total_tokens')
+        shares = [dict(usage) for _ in range(n)]
+        for field in token_fields:
+            total = int(usage.get(field) or 0)
+            base, remainder = divmod(total, n)
+            for i, share in enumerate(shares):
+                share[field] = base + (1 if i < remainder else 0)
+        return shares
+
+    @staticmethod
+    def _add_arabic_translations(results: list[ArticleAnalysis]) -> None:
+        """Add a locally-generated ('ar') translation block to each result's
+        translations dict, derived from the LLM's ('en') block. Batches every
+        field across every result into a single translation-model call.
+        """
+        from services.translation import translate_en_ar_batch
+
+        fields = ('title', 'summary', 'country', 'city')
+        flat_texts: list[str] = []
+        slots: list[tuple[int, str]] = []  # (result_index, field)
+        for i, r in enumerate(results):
+            en = r.translations.get('en') if isinstance(r.translations, dict) else None
+            if not isinstance(en, dict):
+                continue
+            for field in fields:
+                val = en.get(field)
+                if isinstance(val, str) and val.strip():
+                    slots.append((i, field))
+                    flat_texts.append(val)
+        if not flat_texts:
+            return
+
+        translated = translate_en_ar_batch(flat_texts)
+        ar_blocks: dict[int, dict] = {}
+        for (i, field), tr in zip(slots, translated):
+            if tr:
+                ar_blocks.setdefault(i, {})[field] = tr
+        for i, ar in ar_blocks.items():
+            results[i].translations['ar'] = ar
 
     @staticmethod
     def _loads(raw: str):
         # Free/no-key models often wrap JSON in ```json fences — strip them first.
         return json.loads(strip_code_fences(raw))
 
-    def _parse_obj(self, data: dict) -> ArticleAnalysis:
+    def _parse_obj(self, data: dict, llm_usage: dict | None = None) -> ArticleAnalysis:
         category = data.get('category', 'general')
         if category not in _CATEGORIES:
             category = 'general'
@@ -309,8 +358,6 @@ class ArticleAnalyzer:
         for lang_key in list(translations.keys()):
             if not isinstance(translations[lang_key], dict):
                 del translations[lang_key]
-        entities = self._parse_entities(data.get('entities'))
-        sentiment = self._parse_sentiment(data.get('sentiment'))
         intensity = self._parse_intensity(data.get('intensity'))
         llm_data = {
             'category': category,
@@ -322,7 +369,8 @@ class ArticleAnalyzer:
             category=category, sub_category=sub_category,
             country=country, city=city,
             latitude=lat, longitude=lon,
-            entities=entities, sentiment=sentiment, intensity=intensity,
+            intensity=intensity,
             llm_data=llm_data,
             translations=translations,
+            llm_usage=llm_usage or {},
         )

@@ -81,8 +81,8 @@ python manage.py backfill_history <source> --start-date 2022-01-01 --end-date 20
 ## Stage 2 — Process articles
 
 **Task:** `dispatch_process_articles_task` (default queue, every 4h). **Code:**
-`services/processing/` (`cleaner.py` drives it; `analyzer.py`, `finbert.py` are
-called within).
+`services/processing/` (`cleaner.py` drives it; `analyzer.py`, `ner.py`, `vader.py`,
+`finbert.py` are called within, plus `services/translation/` for Arabic).
 
 `dispatch_process_articles_task` fans out to one `process_article_task(id)` per
 unprocessed article on the heavy queue. A recovery pass with `only_failed=true` runs
@@ -92,11 +92,13 @@ Per article, enrich in place:
 
 | Field | How |
 |-------|-----|
-| Entities / locations | LLM entities + geonamescache geocode |
+| Entities | Local NER (`dslim/bert-base-NER`) — no LLM call |
+| Locations (country/city) | LLM-named, resolved to lat/lng via geonamescache |
 | Category + **sub-category** | LLM, two-level taxonomy (see below) |
-| Sentiment | `Article.sentiment` — LLM-extracted polarity [-1, 1] |
+| Intensity | LLM-rated newsworthiness/severity [0, 1] |
+| Sentiment | `Article.sentiment` — local VADER polarity [-1, 1], rule-based, no LLM call |
 | Sentiment (**FinBERT**) | `Article.finbert_sentiment` — news-domain, batched on the heavy queue, computed **once at process time** |
-| i18n (en/ar) | LLM translations → `Article.translations` |
+| i18n (en/ar) | LLM produces the English title/summary; Arabic is generated locally (MarianMT, `Helsinki-NLP/opus-mt-en-ar`) from that English text — `Article.translations` |
 
 **Two-level category taxonomy** (`EventCategory`): top-level stays small
 (`conflict, disaster, economic, political, health, general`); the LLM-produced
@@ -130,7 +132,7 @@ same time/type" the system is built around.
 
 | Task | Cadence | Role |
 |------|---------|------|
-| `dispatch_tag_topics_task` | on demand (admin) | `LLMTopicMatcher` (batch 10 events/call) → `Event.topic_slugs` + `Event.topics`. Re-routes `affected_indicators` once topics are known (topic routing is higher-signal). Falls back to keyword `TopicMatcher` on LLM error. |
+| `dispatch_tag_topics_task` | on demand (admin) | `EmbeddingTopicMatcher` (local sentence-transformer cosine similarity, no LLM call) → `Event.topic_slugs` + `Event.topics`. Re-routes `affected_indicators` once topics are known (topic routing is higher-signal). Falls back to keyword `TopicMatcher` if the embedding model can't load. `LLMTopicMatcher` still exists as an opt-in alternative but isn't used by default. |
 | `discover_topics_task` | daily 05:00 | LLM discovers new `Topic`s from recent events. |
 | `refresh_topics_task` | daily 04:00 | Scrape Wikipedia `Portal:Current_events` (last `TOPIC_SOURCES_DAYS`) → dedupe → semantic merge (≥0.85) → LLM enrich descriptions/keywords → upsert; age-off stale topics. |
 

@@ -8,10 +8,11 @@ class ArticleCleaner:
     """
     Step 2 — Clean: enriches raw ArticleDocuments with NLP features.
 
-    - ArticleAnalyzer (LLM): category, country, city, coordinates, named
-      entities, and sentiment.
-    - FinBERT (local): financial sentiment — retained as a calibrated numeric
-      forecasting feature.
+    - ArticleAnalyzer (LLM): category, sub-category, country, city, coordinates,
+      and event_intensity — the fields that need real judgment.
+    - NER (local, dslim/bert-base-NER): named entities.
+    - VADER (local, rule-based): general sentiment polarity.
+    - FinBERT (local): financial sentiment — a separate, domain-specific signal.
 
     Input:  sequence of ArticleDocument
     Output: list of ArticleFeatures
@@ -31,47 +32,44 @@ class ArticleCleaner:
     ) -> list[ArticleFeatures]:
         """Enrich many documents.
 
-        ``lite_flags`` selects the English-only analyzer per document (or for all,
-        if a single bool). Entities, sentiment, and event_intensity all come from
-        the LLM analysis; FinBERT (local) runs on every document. Documents are
-        grouped by mode so each LLM call stays homogeneous (full vs lite use
-        different schemas/batch sizes) while still batching maximally within each
-        group.
+        ``lite_flags`` selects whether the local Arabic translation step runs per
+        document (or for all, if a single bool) — it no longer affects the LLM call
+        itself, which is always English-only regardless. category/sub_category/geo/
+        event_intensity come from one LLM call over the whole chunk (so a mixed
+        lite/full chunk still maps to exactly one batched call — see
+        ArticleAnalyzer.ANALYZE_BATCH_SIZE); entities (NER), sentiment (VADER), and
+        finbert_sentiment all run locally on every document, independent of the
+        LLM call.
         """
         if not documents:
             return []
         texts = [doc.full_text for doc in documents]
-        from services.processing import finbert
+        from services.processing import finbert, ner, vader
         finbert_batch = finbert.score_batch(texts)
+        entities_batch = ner.extract_batch(texts)
+        sentiment_batch = vader.score_batch(texts)
 
         if isinstance(lite_flags, bool):
             lite_flags = [lite_flags] * len(documents)
 
-        # One batched LLM call per mode; scatter results back into input order.
-        analyses: list = [None] * len(documents)
-        for lite in (False, True):
-            idxs = [i for i, lf in enumerate(lite_flags) if bool(lf) is lite]
-            if not idxs:
-                continue
-            sub = self._analyzer.analyze_batch([texts[i] for i in idxs], translate=not lite)
-            for i, analysis in zip(idxs, sub):
-                analyses[i] = analysis
-
-        # Belt-and-suspenders: fill any None slot (shouldn't happen — analyze_batch
-        # guarantees equal-length output, but protects if a future change breaks that).
-        analyses = [a if a is not None else self._analyzer._empty() for a in analyses]
+        # Single LLM pass for the whole chunk (translate=False: the LLM output is
+        # EN-only either way). Local Arabic translation is then added only for the
+        # non-lite subset, mutating those ArticleAnalysis objects in place — this
+        # keeps chunk-to-LLM-call mapping 1:1 even when lite_flags are mixed.
+        analyses = self._analyzer.analyze_batch(texts, translate=False)
+        full_idxs = [i for i, lf in enumerate(lite_flags) if not lf]
+        if full_idxs:
+            self._analyzer._add_arabic_translations([analyses[i] for i in full_idxs])
 
         results = []
-        for doc, finbert_sentiment, analysis in zip(
-            documents, finbert_batch, analyses,
+        for doc, finbert_sentiment, entities, sentiment, analysis in zip(
+            documents, finbert_batch, entities_batch, sentiment_batch, analyses,
         ):
-            # Entities, sentiment, intensity, city/country (and coords) all come
-            # straight from the single LLM analysis — no local NLP heuristics.
             location = ', '.join(filter(None, [analysis.city, analysis.country])) or None
             results.append(ArticleFeatures(
                 id=doc.id,
-                entities=analysis.entities,
-                sentiment=analysis.sentiment,
+                entities=entities,
+                sentiment=sentiment,
                 finbert_sentiment=finbert_sentiment,
                 location=location,
                 latitude=analysis.latitude,
@@ -81,5 +79,6 @@ class ArticleCleaner:
                 sub_category=analysis.sub_category,
                 llm_data=analysis.llm_data,
                 translations=analysis.translations,
+                llm_usage=analysis.llm_usage,
             ))
         return results

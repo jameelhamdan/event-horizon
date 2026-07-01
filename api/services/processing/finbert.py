@@ -11,9 +11,9 @@ The signed score in [-1, 1] is derived from the 3-class softmax:
 """
 
 
-import functools
 import logging
-import os
+
+from services.processing._lazy import lazy_loader
 
 logger = logging.getLogger(__name__)
 
@@ -21,39 +21,22 @@ logger = logging.getLogger(__name__)
 _MAX_CHARS = 1500
 
 
-def _enabled() -> bool:
-    """FinBERT is opt-out via FINBERT_ENABLED (default on).
+def _build_pipeline():
+    from transformers import pipeline
+    return pipeline(
+        'text-classification',
+        model='ProsusAI/finbert',
+        top_k=None,            # return all class scores
+        truncation=True,
+        max_length=512,
+    )
 
-    Lets a lean deployment skip the ~500 MB model download + its memory/CPU cost
-    without removing transformers (still required by core sentence-transformers
-    clustering). When off, scores fall back to None and the pipeline degrades
-    gracefully — the LLM-extracted sentiment remains the available signal.
-    """
-    return os.getenv('FINBERT_ENABLED', 'true').strip().lower() not in ('0', 'false', 'no')
 
-
-@functools.lru_cache(maxsize=1)
-def _pipeline():
-    """Lazily build the FinBERT pipeline. Returns None if disabled or unavailable."""
-    if not _enabled():
-        logger.info('[finbert] FINBERT_ENABLED is off — FinBERT disabled')
-        return None
-    try:
-        from transformers import pipeline
-    except ImportError:
-        logger.warning('[finbert] transformers not installed — FinBERT disabled')
-        return None
-    try:
-        return pipeline(
-            'text-classification',
-            model='ProsusAI/finbert',
-            top_k=None,            # return all class scores
-            truncation=True,
-            max_length=512,
-        )
-    except Exception:
-        logger.exception('[finbert] failed to load model — FinBERT disabled')
-        return None
+# Opt-out via FINBERT_ENABLED (default on) — lets a lean deployment skip the ~500 MB
+# model download + its memory/CPU cost without removing transformers (still required
+# by core sentence-transformers clustering). When off, scores fall back to None and
+# the pipeline degrades gracefully — the LLM-extracted sentiment remains available.
+_pipeline = lazy_loader('finbert', 'FINBERT_ENABLED', _build_pipeline)
 
 
 def _to_signed(scores: list[dict]) -> float:

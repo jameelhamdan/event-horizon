@@ -78,8 +78,8 @@ Raw news item from one source, enriched **in place** by the processing stage.
 | `content` | text | Body text |
 | `published_on` | datetime | Publish timestamp (UTC); drives all as-of cuts |
 | `related` | FK→self | Optional link to a related article |
-| `entities` | `[]` | LLM-extracted entities `[{text, label}]` |
-| `sentiment` | float \| null | LLM-extracted polarity [-1, 1] |
+| `entities` | `[]` | Local NER entities `[{text, label}]` (`dslim/bert-base-NER`, no LLM call) |
+| `sentiment` | float \| null | Local VADER polarity [-1, 1] (rule-based, no LLM call) |
 | `finbert_sentiment` | float \| null | **FinBERT** signed sentiment [-1, 1] — news-domain (new) |
 | `location` | str(255) \| null | `City, Country` from LLM analysis |
 | `event_intensity` | float \| null | LLM-rated newsworthiness/severity [0, 1] |
@@ -88,7 +88,7 @@ Raw news item from one source, enriched **in place** by the processing stage.
 | `processed_on` | datetime \| null | Set when NLP processing completes |
 | `banner_image_url` | URL(512) \| null | RSS media or OG-image fallback |
 | `latitude` / `longitude` | float \| null | Geocoded coordinates |
-| `translations` | `{}` | Per-language `{en:{...}, ar:{...}}` |
+| `translations` | `{}` | Per-language `{en:{...}, ar:{...}}` — `en` from the LLM, `ar` generated locally (MarianMT, `services/translation/`) |
 | `extra_data` | `{}` | Raw LLM payload etc. |
 | `updated_on` / `created_on` | datetime | Audit timestamps |
 
@@ -122,6 +122,7 @@ An aggregated real-world happening; **one event, many source articles**. Built b
 | `translations` | `{}` | Per-language `{en:{...}, ar:{...}}` |
 | `topics` | `{}` | `{slug: confidence}` (float 0–1) |
 | `topic_slugs` | `[]` | Flat slug list parallel to `topics` (queryable) |
+| `topics_source` | str(8) | Provenance: `embed` (`EmbeddingTopicMatcher`, local) or `keyword` (fallback — re-evaluated on a later run) |
 | `updated_on` / `created_on` | datetime | Audit timestamps |
 
 **Indexes:** `started_at`, `latest_article_at`, `category`, `location_name`.

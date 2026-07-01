@@ -9,27 +9,36 @@
 Financial markets respond continuously to a stream of unstructured, multi-lingual,
 geographically dispersed news. This thesis presents the design, implementation, and honest
 evaluation of an end-to-end system that ingests real-time news from heterogeneous sources,
-extracts and **geolocates** discrete events using a hybrid neural and large-language-model
-(LLM) pipeline, links those events to a configurable panel of market indicators, and produces
-calibrated **directional and magnitude forecasts** over short horizons (1 and 5 trading days).
+extracts and **geolocates** discrete events using a hybrid pipeline of specialised local models
+and a large-language-model (LLM), links those events to a configurable panel of market
+indicators, and produces calibrated **directional and magnitude forecasts** over short horizons
+(1 and 5 trading days).
 
 The central methodological commitment is **leakage-free supervised learning**: the
-event→indicator association produced by an LLM router is treated strictly as an *input feature*
-— a hypothesis — while the supervised label is the *realized* price return between two observed
-price nodes. A walk-forward backtest with four ablation arms (naïve persistence, price-only,
-price + rule-routed events, price + LLM-routed events) quantifies whether news events add
-predictive value over price history alone. On real daily data the system attains directional
-accuracy of approximately **0.52** with ROC-AUC ≈ 0.52–0.53 — consistent with the
-near-random-walk behaviour of liquid markets — and the contribution is therefore framed
-relative to the naïve baseline rather than as a trading strategy. Alongside the forecasting
-layer, the system delivers a live geospatial event map, automatic topic discovery, and a daily
-generated news briefing, demonstrating that a single ingestion-and-understanding pipeline can
-serve both situational-awareness and quantitative-forecasting use cases.
+event→indicator association — produced, in production, by a deterministic rule router (an LLM
+router is retained as an interchangeable, opt-in alternative and as a backtest ablation arm) —
+is treated strictly as an *input feature* — a hypothesis — while the supervised label is the
+*realized* price return between two observed price nodes. A walk-forward backtest with four
+ablation arms (naïve persistence, price-only, price + rule-routed events, price + LLM-routed
+events) quantifies whether news events add predictive value over price history alone. On real
+daily data the system attains directional accuracy of approximately **0.52** with ROC-AUC ≈
+0.52–0.53 — consistent with the near-random-walk behaviour of liquid markets — and the
+contribution is therefore framed relative to the naïve baseline rather than as a trading
+strategy. Alongside the forecasting layer, the system delivers a live geospatial event map,
+automatic topic discovery, and a daily generated news briefing, demonstrating that a single
+ingestion-and-understanding pipeline can serve both situational-awareness and
+quantitative-forecasting use cases.
 
 A secondary engineering contribution is a **provider-agnostic LLM orchestration layer** with
 per-task routing, automatic fallback across self-hosted and hosted providers, and a daily
 discovery service that probes and caches currently-available free models — addressing the
-operational reality that hosted LLM availability and rate limits fluctuate continuously.
+operational reality that hosted LLM availability and rate limits fluctuate continuously. A
+related, and initially counter-intuitive, engineering finding is that narrowing the LLM's scope
+— offloading entity extraction, sentiment, translation, topic tagging, and event routing to
+small specialised local models and keeping the LLM only for tasks that genuinely require
+open-ended judgement (taxonomy classification, geo naming, severity rating, free-form prose) —
+reduced both cost and latency without a perceptible quality regression, on commodity CPU-only
+hardware.
 
 ---
 
@@ -81,11 +90,16 @@ is lagged and largely priced-in.
 
 1. An **end-to-end real-time pipeline** from multi-source ingestion to geolocated event
    extraction, served as a live map and an event API.
-2. An **event-fused forecasting layer** that cleanly separates the LLM-produced event→indicator
-   *feature* from the realized-return *label*, trained per horizon with calibrated LightGBM
-   models and validated by a leakage-checked walk-forward backtest with four ablation arms.
+2. An **event-fused forecasting layer** that cleanly separates the event→indicator *feature*
+   (produced, by default, by a deterministic rule router, with an LLM router kept as an
+   interchangeable alternative) from the realized-return *label*, trained per horizon with
+   calibrated LightGBM models and validated by a leakage-checked walk-forward backtest with four
+   ablation arms.
 3. A **provider-agnostic LLM orchestration layer** with per-role routing, cross-provider
-   fallback, and daily dynamic discovery of available free models.
+   fallback, and daily dynamic discovery of available free models — paired with a deliberately
+   **narrowed LLM scope**, where entity extraction, sentiment, translation, topic tagging, and
+   event routing were migrated to specialised local models once the pipeline matured, leaving the
+   LLM responsible only for tasks that need open-ended judgement.
 4. An **honest empirical study** reporting near-baseline predictive performance, framed as a
    research-grade signal rather than alpha.
 
@@ -102,10 +116,15 @@ or transaction-cost modelling is performed.
 The work sits at the intersection of three research areas:
 
 - **Event and entity extraction** from news, traditionally addressed with sequence-labelling
-  models (e.g. transformer-based NER) but, in this work, performed by **LLM prompting** for joint
-  entity/category/sentiment extraction in a single pass.
-- **Geoparsing**, the resolution of place mentions to coordinates, here handled by the same
-  LLM call with gazetteer-assisted normalisation.
+  models (e.g. transformer-based NER). This work initially collapsed entity, category, and
+  sentiment extraction into a single LLM prompt, then — once the pipeline was operating at
+  volume — deliberately reverted entity recognition to a dedicated transformer NER model and
+  sentiment to a lexicon-based scorer, keeping only category/sub-category classification, event
+  severity rating, and geo naming on the LLM. This iteration is itself a small case study in
+  matching model capacity to task complexity rather than defaulting to the largest available
+  model for every sub-task.
+- **Geoparsing**, the resolution of place mentions to coordinates, here handled by the LLM's
+  named-location output (country/city) with gazetteer-assisted coordinate resolution.
 - **News-driven financial prediction**, a long literature relating textual sentiment and event
   signals to asset returns, with the persistent finding that public-news signals are weak,
   lagged, and partially priced-in. This motivates the thesis's baseline-first evaluation stance.
@@ -149,26 +168,43 @@ in a fan-out pattern so a slow stage never blocks collection.
 
 ## 5. The Natural-Language Understanding Pipeline
 
-Each article is enriched by a hybrid pipeline in which most language understanding is performed
-by a single large-language-model (LLM) call, complemented by one specialised local model:
+Each article is enriched by a hybrid pipeline that deliberately splits language understanding
+between one LLM call and several specialised local models, each matched to the complexity of
+its sub-task:
 
-- **Entity, category, sub-category, geolocation, sentiment, and EN/AR translation** are all
-  obtained from one LLM analysis call. The model returns named entities (labelled
-  PER/ORG/LOC/MISC) alongside the event's category and location, with code-fence stripping and
-  robust JSON parsing applied to every response. An earlier design used a dedicated transformer
-  NER model and a lexicon-based sentiment scorer for these steps; both were retired once the LLM
-  call was found to produce entities and general sentiment of sufficient quality in a single
-  pass, simplifying the pipeline.
-- **Financial sentiment** is scored by a dedicated **FinBERT** model and retained as a numeric
-  feature for forecasting — the one understanding component kept as a local specialised model,
-  because a calibrated finance-domain sentiment score is more reliable than a general LLM
-  judgement for this quantitative feature.
+- **Category, sub-category, geolocation (country/city), and event intensity (severity/
+  newsworthiness)** are obtained from a single, batched LLM analysis call, together with an
+  English title and summary. These are the sub-tasks judged to genuinely require open-ended
+  reasoning — a closed six-way category taxonomy with per-category sub-slugs, free-form place
+  naming, and a subjective severity rating — so the LLM's marginal cost is justified. Code-fence
+  stripping and robust JSON parsing are applied to every response, and the batch is idempotent
+  under provider failure (each item independently falls back to a neutral default).
+- **Named-entity recognition** runs on a dedicated local transformer NER model (labelling
+  PER/ORG/LOC/MISC spans), never touching the LLM. An earlier design folded entity extraction
+  into the LLM analysis call; it was reverted once volume made the marginal LLM cost of a
+  variable-length entity list — the least reliable field to batch correctly in a JSON array —
+  outweigh the convenience of a single call, and a purpose-trained NER model matched or exceeded
+  the LLM's entity quality at a fraction of the latency.
+- **General sentiment** is scored locally by a lexicon-based (VADER) analyser, for the same
+  reason: sentiment polarity does not require the reasoning capacity of an LLM, and a rule-based
+  scorer is deterministic, auditable, and effectively free to run at scale.
+- **Arabic translation** is generated by a dedicated local sequence-to-sequence translation
+  model (MarianMT) from the LLM's English title/summary, rather than asking the LLM to produce
+  both languages directly — translation is itself a narrow, well-studied task better served by
+  a model trained specifically for it than by prompting a general-purpose LLM.
+- **Financial sentiment** is scored by a dedicated **FinBERT** model and retained as a separate
+  numeric feature for forecasting, because a calibrated finance-domain sentiment score is more
+  reliable than either the LLM or the general VADER score for this quantitative feature.
 - **Importance scoring** (1–10) gates the pipeline: low-scoring articles are skipped before the
   expensive analysis stage and pruned after a grace period, conserving compute and LLM quota.
 
-This division reflects a cost/quality trade-off: the LLM handles the open-ended, multilingual
-understanding (entities, category, geolocation, translation) in one call, while FinBERT supplies
-a deterministic, domain-calibrated sentiment feature for the forecasting layer.
+This division reflects a cost/quality trade-off arrived at empirically rather than assumed at
+design time: the LLM is reserved for the sub-tasks that need real judgement (taxonomy
+classification, geo naming, severity rating, free-form prose), while every sub-task with a
+narrow, well-defined shape — entity recognition, general sentiment, translation — runs on a
+small, purpose-built local model. The practical effect is a large reduction in LLM call volume
+and token count per article with no observed quality regression, and it removes several of the
+pipeline's highest-frequency calls from dependency on external provider rate limits entirely.
 
 ---
 
@@ -189,11 +225,22 @@ feature builder.
 
 A topic layer gives events a higher-level, curated semantics. Candidate topics are sourced from
 the Wikipedia *Current events* portal subpages over a lookback window, deduplicated, merged, and
-enriched by an LLM. Events are tagged to topics by an LLM matcher (batched), and new topics are
-periodically auto-discovered from the event stream. Topics carry a score and flags distinguishing
-those currently in the news cycle from those shown in the UI; the highest-signal topic tags
-(e.g. conflict, central-bank rates, inflation, energy cartels, bilateral-trade tensions) later
-serve as the **most curated feature** for forecasting.
+enriched by an LLM (free-form description and keyword expansion — a generative task retained on
+the LLM). New topics are also periodically auto-discovered from the event stream by an LLM pass
+over recent untagged event clusters.
+
+Event-to-topic **tagging**, by contrast, is the pipeline's highest-frequency event-level
+operation and does not require open-ended generation — it is a semantic-similarity matching
+problem — so it runs entirely on a local sentence-transformer embedding model (the same
+multilingual model used for article clustering): each event and each topic's
+name/description/keywords are embedded, and a topic is tagged when cosine similarity clears a
+threshold. A cheap keyword-overlap matcher acts as a fallback should the embedding model be
+unavailable. An LLM-based batched matcher was evaluated and is retained in the codebase as an
+interchangeable alternative, but is not used in production, since the local embedding matcher
+was found to produce comparable tagging quality without an LLM call per event batch. Topics
+carry a score and flags distinguishing those currently in the news cycle from those shown in the
+UI; the highest-signal topic tags (e.g. conflict, central-bank rates, inflation, energy cartels,
+bilateral-trade tensions) later serve as the **most curated feature** for forecasting.
 
 ---
 
@@ -202,15 +249,19 @@ serve as the **most curated feature** for forecasting.
 Routing associates each event with a signed weight in [-1, 1] per indicator on the panel,
 stored as `Event.affected_indicators`. **This is the thesis's most important conceptual
 distinction: the routed weight is a feature (a hypothesis about influence), never the
-supervised label.** Two interchangeable routers produce it:
+supervised label.** Two interchangeable routers produce it, selected by configuration:
 
-- An **LLM router** (primary) batches events, prompts with the panel description and the event's
-  text, category, and topic tags, and returns signed per-indicator weights; it caches by event
-  and falls back to the rule router on any error.
-- A **deterministic rule router** (fallback and reproducible backtest baseline) computes the
-  weight as a product of sub-category affinity, symbol affinity, country risk, and an asymmetric
-  sentiment term; it intersects its output with the live panel so it can never emit an
-  off-panel symbol.
+- A **deterministic rule router** (production default) computes the weight as a product of
+  sub-category affinity, symbol affinity, country risk, and an asymmetric sentiment term; it
+  intersects its output with the live panel so it can never emit an off-panel symbol. Being
+  fully deterministic, it is reproducible by construction, incurs no LLM cost or latency, and is
+  used as the primary router in production and as a backtest baseline arm.
+- An **LLM router** (opt-in alternative) batches events, prompts with the panel description and
+  the event's text, category, and topic tags, and returns signed per-indicator weights; it
+  caches by event and falls back to the rule router on any error. It remains available for
+  comparison and as the fourth backtest ablation arm, but is not the production default, since
+  the deterministic router was judged to give comparable routing quality with none of the LLM
+  router's cost, latency, or non-determinism.
 
 ---
 
@@ -249,12 +300,24 @@ is mitigated by the as-of discipline and an automated self-check in the backtest
 ## 10. LLM Orchestration
 
 LLM access is mediated by a provider-agnostic layer exposing a uniform chat interface over
-self-hosted (Ollama, three model tiers) and hosted OpenAI-compatible providers (OpenRouter,
-Groq, Cerebras). Each *role* (e.g. analyzer, scoring, topics, routing, newsletter) maps to an
-ordered fallback chain in configuration; unconfigured providers are skipped silently, and a
-failure on one provider transparently advances to the next. Per-provider timeouts are tuned to
-the provider's latency profile (notably a short, model-size-scaled timeout for the slow CPU-bound
-local models so they fail fast as a last resort).
+hosted OpenAI-compatible providers (Groq, Cerebras, OpenRouter) and a self-hosted fallback
+(Ollama, three model tiers). Each *role* (e.g. article analysis, importance scoring, topic
+enrichment/discovery, event routing, newsletter generation) maps to an ordered fallback chain in
+configuration, leading with the free-tier hosted providers and falling back to the local Ollama
+tier only as a last resort; unconfigured providers are skipped silently, and a failure on one
+provider transparently advances to the next. Per-provider timeouts are tuned to the provider's
+latency profile (notably a short, model-size-scaled timeout for the slow CPU-bound local models
+so they fail fast as a last resort).
+
+Several roles that historically routed through this layer — entity extraction, general
+sentiment, event-to-topic tagging, and event-to-indicator routing — were migrated to local
+non-LLM models (§5, §7, §8) once the pipeline matured past its initial design. The orchestration
+layer itself is unchanged by this migration; what changed is simply how many of the pipeline's
+call sites use it, and for which sub-tasks. The remaining LLM-routed roles are the ones with
+genuinely open-ended or generative output: article category/sub-category/geo/intensity
+classification, article importance rating, topic description/keyword enrichment and discovery,
+event routing (kept as an opt-in alternative to the deterministic router), and the daily
+newsletter.
 
 Because hosted free-tier model availability and rate limits fluctuate continuously, a daily
 **discovery service** queries the provider's model catalogue, filters to free text models, probes
@@ -311,9 +374,12 @@ JSON report for the final manuscript.)*
 
 - **News is lagged and priced-in.** The predictive ceiling for public-news features on liquid
   instruments is low by construction; results should be read against the naïve baseline.
-- **LLM non-determinism.** Routing and extraction via LLMs are non-deterministic; for the live
-  system results are cached per event, and for the backtest the rule router provides a fully
-  reproducible baseline arm.
+- **LLM non-determinism.** Where the LLM is still used (category/geo/intensity classification,
+  topic enrichment/discovery, newsletter generation, and the opt-in LLM router), its output is
+  non-deterministic; for the live system LLM-routed results are cached per event, and the
+  production-default deterministic rule router removes non-determinism from the routing feature
+  entirely. Entity extraction, sentiment, translation, and topic tagging no longer touch the LLM
+  at all, further narrowing where this concern applies.
 - **Coverage and source bias.** Source selection, language coverage, and feed latency bias which
   events are seen at all.
 - **Geolocation ambiguity.** Place disambiguation is imperfect; mis-geolocated events introduce
@@ -356,8 +422,8 @@ triggers a retrain because feature columns are one-hot encoded over the active p
 
 ```bash
 # Forecasting layer
-python manage.py backfill_prices --years 5      # seed daily OHLC bars
-python manage.py route_events --router llm       # associate events with indicators
+python manage.py backfill_prices --years 5       # seed daily OHLC bars
+python manage.py route_events --router rules     # associate events with indicators (default; --router llm for the opt-in LLM router)
 python manage.py train_forecast                  # fit calibrated clf + reg per horizon
 python manage.py run_forecast                    # write current forecasts
 python manage.py evaluate_forecast               # walk-forward backtest → JSON report

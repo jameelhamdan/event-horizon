@@ -18,14 +18,16 @@ The pipeline has one easy-to-misread step. Spelling it out:
 
 ```mermaid
 flowchart TD
-    A[Scrapers / RSS] --> B[NLP: LLM entities/sentiment/category/geocode + FinBERT]
+    A[Scrapers / RSS] --> B[NLP: LLM category/geo/intensity · local NER/VADER/FinBERT]
     B --> C[Events + topic tags<br/>existing pipeline]
 
     subgraph ROUTING [Event to Symbol Routing]
-        C --> D{LLMEventRouter<br/>primary}
-        D -->|ok| E[signed per-symbol weights<br/>router_source=llm]
-        D -->|error / fallback| F[routing.py rules<br/>router_source=rules]
-        F --> E
+        C --> D{router source}
+        D -->|rules · default| F[routing.py rules<br/>router_source=rules]
+        D -->|llm · opt-in| G[LLMEventRouter<br/>router_source=llm]
+        G -->|error / fallback| F
+        F --> E[signed per-symbol weights]
+        G --> E
     end
 
     E --> G[Event.affected_indicators<br/>= FEATURE, a hypothesis NOT the label]
@@ -68,26 +70,27 @@ automatically (feature columns are one-hot over `get_panel_symbols()`).
 ## Moving parts
 
 ### 1. Event → symbol routing
-Two interchangeable sources, selected per run, both producing
-`Event.affected_indicators = [{symbol, weight(signed -1..1)}]`:
+Two interchangeable sources, selected via `settings.FORECAST_ROUTER` (default `'rules'`),
+both producing `Event.affected_indicators = [{symbol, weight(signed -1..1)}]`:
 
 ```mermaid
 flowchart LR
     EV[Event: title, summary,<br/>category, topic tags, sentiment] --> R{router}
-    R -->|llm| LLM[LLMEventRouter<br/>batched LLM, cached per event]
-    R -->|rules| RU[routing.py<br/>deterministic weight product]
+    R -->|rules · default| RU[routing.py<br/>deterministic weight product]
+    R -->|llm · opt-in| LLM[LLMEventRouter<br/>batched LLM, cached per event]
     LLM -->|on error| RU
     LLM --> AI[(affected_indicators)]
     RU --> AI
 ```
 
+- **Rules** (`services/forecasting/routing.py`): deterministic, auditable weight =
+  `sub_category_affinity × symbol_affinity × country_risk × asymmetric_sentiment`. **Default**
+  (`FORECAST_ROUTER='rules'`) — no LLM call, no rate limits, fully reproducible.
 - **LLM** (`services/routing/llm_router.py`, `LLMEventRouter`): batches ~10 events/call, prompts
   with the panel + the event's text/category/tags, asks for signed weights, strips code fences,
   caches by event id, and **falls back to the rule router** on any error. Role `'routing'` in
-  `settings.LLM_ROUTES`.
-- **Rules** (`services/forecasting/routing.py`): deterministic, auditable weight =
-  `sub_category_affinity × symbol_affinity × country_risk × asymmetric_sentiment`. Kept as the
-  fallback and as a backtest baseline arm.
+  `settings.LLM_ROUTES`. Opt-in only (`FORECAST_ROUTER='llm'`) — kept for comparison, not used
+  in production.
 
 ### 2. Price history — `PriceBar`
 Daily OHLC backfilled via **yfinance** (non-crypto) and **CoinGecko** (BTC/ETH), distinct from
@@ -153,16 +156,16 @@ realized `PriceBar` close; surfaced at `/api/forecasts/accuracy/`.
 ## Commands
 
 ```bash
-python manage.py backfill_prices --years 5            # seed PriceBar (yfinance + CoinGecko)
-python manage.py route_events --router llm --hours 168 # (re)route recent events
+python manage.py backfill_prices --years 5             # seed PriceBar (yfinance + CoinGecko)
+python manage.py route_events --router rules --hours 168 # (re)route recent events (default; --router llm for the opt-in LLM router)
 python manage.py train_forecast                        # fit clf+reg for both horizons
 python manage.py run_forecast                          # write today's Forecast rows
 python manage.py evaluate_forecast                     # walk-forward backtest → JSON report
 python manage.py forecast_e2e --years 3 --backtest    # run the whole flow → JSON report
 ```
 
-`backfill_prices --dry-run` and `route_events --router rules` are useful for checking coverage
-and building the rule-routed ablation arm. `forecast_e2e` chains backfill→route→train→run→score
+`backfill_prices --dry-run` and `route_events --router llm` are useful for checking coverage
+and building the LLM-routed ablation arm. `forecast_e2e` chains backfill→route→train→run→score
 (+ optional backtest) and writes a per-stage JSON report (mirrors `e2e_pipeline`).
 
 ## Testing
@@ -204,7 +207,7 @@ so crypto bars need a key or a Yahoo fallback. Neither affects the Docker stack.
 | `FORECAST_MODEL_DIR` | `/app/forecast_models` | model artifacts |
 | `FORECAST_HORIZONS_DAYS` | `1,5` | horizons trained/served |
 | `FORECAST_TRAIN_WINDOW_DAYS` | `540` | training lookback |
-| `FORECAST_ROUTER` | `llm` | live router source (`llm`/`rules`) |
+| `FORECAST_ROUTER` | `rules` | live router source (`rules`/`llm`) |
 
 ## Honest caveats (for the write-up & defense)
 
@@ -214,15 +217,16 @@ so crypto bars need a key or a Yahoo fallback. Neither affects the Docker stack.
 3. **Baseline first** — report directional accuracy next to the naive baseline; beating it by a
    few points (with significance) is the honest positive result. Frame as direction/volatility,
    not price-level prediction.
-4. **LLM routing is non-deterministic** — cached per event for the live system, run once over the
-   frozen dataset for the backtest, with the rule router as a reproducible baseline arm.
+4. **LLM routing is opt-in, not the default** — the deterministic rule router runs in production
+   (`FORECAST_ROUTER='rules'`); the LLM router is non-deterministic and kept only as a comparison
+   arm in the backtest, cached per event when it is used.
 
 ## Key files
 
 | File | Responsibility |
 |------|----------------|
-| `services/forecasting/routing.py` | deterministic event→symbol weights (baseline + fallback) |
-| `services/routing/llm_router.py` | LLM event→symbol router (primary) |
+| `services/forecasting/routing.py` | deterministic event→symbol weights (default router + fallback) |
+| `services/routing/llm_router.py` | LLM event→symbol router (opt-in, `FORECAST_ROUTER='llm'`) |
 | `services/forecasting/history.py` | OHLC backfill (yfinance + CoinGecko) |
 | `services/forecasting/features.py` | as-of, leak-free feature matrix |
 | `services/forecasting/model.py` | LightGBM clf+reg train/predict per horizon |

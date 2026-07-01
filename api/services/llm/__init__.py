@@ -44,8 +44,8 @@ class _Cycle:
         """
         if self._redis_key and len(self._items) > 1:
             try:
-                from django.core.cache import caches
-                rc = caches['redis-cache'].client.get_client(write=True)
+                from services.cache import get_redis_client
+                rc = get_redis_client(write=True)
                 return int(rc.incr(self._redis_key)) - 1
             except Exception:
                 pass
@@ -86,14 +86,15 @@ class _Debounce:
 
     @staticmethod
     def _rkey(provider: str, credential: str) -> str:
+        from services.cache import key_llm_debounce
         h = hashlib.md5(credential.encode(), usedforsecurity=False).hexdigest()[:12]
-        return f'llm:debounce:{provider}:{h}'
+        return key_llm_debounce(provider, h)
 
     def is_active(self, provider: str, credential: str) -> bool:
         k = self._rkey(provider, credential)
         try:
-            from django.core.cache import caches
-            return bool(caches['redis-cache'].get(k))
+            from services.cache import cache_get
+            return bool(cache_get(k))
         except Exception:
             with self._lock:
                 return self._local.get(k, 0.0) > _time.monotonic()
@@ -104,14 +105,31 @@ class _Debounce:
         tail = credential[-8:] if len(credential) > 8 else '***'
         logger.info('LLM 429 debounce: provider=%r ...%s cooling for %ds', provider, tail, ttl)
         try:
-            from django.core.cache import caches
-            caches['redis-cache'].set(k, 1, timeout=ttl)
+            from services.cache import cache_set
+            cache_set(k, 1, timeout=ttl)
         except Exception:
             with self._lock:
                 self._local[k] = _time.monotonic() + ttl
 
 
 _debounce = _Debounce()
+
+
+# ── Per-provider call stats (Redis counters) ──────────────────────────────────
+
+def _record_llm_call(provider: str, success: bool, latency_ms: int) -> None:
+    """Increment lightweight Redis counters for the admin dashboard."""
+    try:
+        from services.cache import get_redis_client, key_llm_req_stat
+        rc = get_redis_client(write=True)
+        pipe = rc.pipeline(transaction=False)
+        key = 'ok' if success else 'err'
+        pipe.incr(key_llm_req_stat(provider, key))
+        pipe.incrbyfloat(key_llm_req_stat(provider, 'ms'), latency_ms)
+        pipe.set(key_llm_req_stat(provider, f'last_{key}'), int(_time.time()), ex=7 * 86400)
+        pipe.execute()
+    except Exception:
+        pass
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -149,6 +167,12 @@ class BaseLLMService:
     """Shared interface — every backend exposes chat() and complete()."""
 
     def chat(self, messages: list[dict], **kwargs) -> str:
+        content, _ = self.chat_with_usage(messages, **kwargs)
+        return content
+
+    def chat_with_usage(self, messages: list[dict], **kwargs) -> tuple[str, dict]:
+        """Like chat() but also returns a usage dict: {provider, model, prompt_tokens,
+        completion_tokens, total_tokens}. Empty dict when unavailable."""
         raise NotImplementedError
 
     def complete(self, prompt: str, system: str | None = None, **kwargs) -> str:
@@ -182,12 +206,14 @@ class OpenAICompatLLMService(BaseLLMService):
         if not base_url:
             raise LLMError('OpenAICompatLLMService requires a base_url')
 
+        from services.cache import key_llm_cycle
+
         self._base_url = base_url
         self._provider = provider_name
 
         self._models = _Cycle(
             [model] if isinstance(model, str) else list(model),
-            redis_key=f'llm:cycle:{provider_name}:models',
+            redis_key=key_llm_cycle(provider_name, 'models'),
         )
         if not self._models:
             raise LLMError('OpenAICompatLLMService requires at least one model')
@@ -195,7 +221,7 @@ class OpenAICompatLLMService(BaseLLMService):
         keys = _parse_csv(api_keys) if isinstance(api_keys, str) else list(api_keys)
         if not keys:
             keys = [_NO_KEY]
-        self._keys = _Cycle(keys, redis_key=f'llm:cycle:{provider_name}:keys')
+        self._keys = _Cycle(keys, redis_key=key_llm_cycle(provider_name, 'keys'))
 
     @property
     def _model(self) -> str:
@@ -222,7 +248,7 @@ class OpenAICompatLLMService(BaseLLMService):
                 return key, available
         return None
 
-    def chat(self, messages: list[dict], **kwargs) -> str:
+    def chat_with_usage(self, messages: list[dict], **kwargs) -> tuple[str, dict]:
         from openai import RateLimitError
 
         kwargs.pop('think', None)
@@ -237,6 +263,7 @@ class OpenAICompatLLMService(BaseLLMService):
 
         last_error: Exception | None = None
         for model in models:
+            t0 = _time.monotonic()
             try:
                 completion = client.chat.completions.create(
                     model=model,
@@ -247,15 +274,29 @@ class OpenAICompatLLMService(BaseLLMService):
                 content = completion.choices[0].message.content
                 if not content:
                     raise LLMError('No content returned in completion response.')
-                return content
+                latency = int((_time.monotonic() - t0) * 1000)
+                _record_llm_call(self._provider, True, latency)
+                usage: dict = {}
+                if completion.usage:
+                    usage = {
+                        'provider': self._provider,
+                        'model': completion.model or model,
+                        'prompt_tokens': completion.usage.prompt_tokens or 0,
+                        'completion_tokens': completion.usage.completion_tokens or 0,
+                        'total_tokens': completion.usage.total_tokens or 0,
+                    }
+                return content, usage
             except RateLimitError as e:
                 _debounce.mark(self._provider, f'{api_key}:{model}', _retry_after_seconds(e))
+                _record_llm_call(self._provider, False, int((_time.monotonic() - t0) * 1000))
                 last_error = LLMError(f'429 rate-limited ({self._provider}/{model})')
                 # continue — only this (key, model) pair is exhausted
             except (KeyError, IndexError, AttributeError, TypeError) as e:
+                _record_llm_call(self._provider, False, int((_time.monotonic() - t0) * 1000))
                 logger.warning('Malformed response from LLM model %s: %s', model, str(e)[:160])
                 last_error = LLMError('Malformed response from LLM provider')
             except Exception as e:
+                _record_llm_call(self._provider, False, int((_time.monotonic() - t0) * 1000))
                 logger.warning('LLM model %s failed: %s', model, str(e)[:160])
                 last_error = e
 
@@ -271,13 +312,15 @@ class OllamaLLMService(BaseLLMService):
         self._base_url = base_url.rstrip('/')
         self._model = model
         self._timeout = float(timeout) if timeout else _OLLAMA_TIMEOUT
+        self._provider = 'ollama'
 
-    def chat(self, messages: list[dict], **kwargs) -> str:
+    def chat_with_usage(self, messages: list[dict], **kwargs) -> tuple[str, dict]:
         options = {}
         if 'temperature' in kwargs:
             options['temperature'] = kwargs['temperature']
         if kwargs.get('max_tokens') is not None:
             options['num_predict'] = kwargs['max_tokens']
+        t0 = _time.monotonic()
         try:
             response = requests.post(
                 f'{self._base_url}/api/chat',
@@ -291,17 +334,32 @@ class OllamaLLMService(BaseLLMService):
                 timeout=self._timeout,
             )
             response.raise_for_status()
-            content = response.json()['message']['content']
+            body = response.json()
+            content = body['message']['content']
             result = _THINK_RE.sub('', content).strip()
             if not result:
                 raise LLMError(f'Ollama model {self._model} returned empty content')
-            return result
+            latency = int((_time.monotonic() - t0) * 1000)
+            _record_llm_call('ollama', True, latency)
+            prompt_tokens = body.get('prompt_eval_count') or 0
+            completion_tokens = body.get('eval_count') or 0
+            usage = {
+                'provider': 'ollama',
+                'model': body.get('model') or self._model,
+                'prompt_tokens': prompt_tokens,
+                'completion_tokens': completion_tokens,
+                'total_tokens': prompt_tokens + completion_tokens,
+            }
+            return result, usage
         except LLMError:
+            _record_llm_call('ollama', False, int((_time.monotonic() - t0) * 1000))
             raise
         except requests.HTTPError as e:
+            _record_llm_call('ollama', False, int((_time.monotonic() - t0) * 1000))
             logger.error('Ollama %s: %s', e.response.status_code, e.response.text[:200])
             raise LLMError(f'Ollama request failed ({e.response.status_code})') from e
         except Exception as e:
+            _record_llm_call('ollama', False, int((_time.monotonic() - t0) * 1000))
             logger.error('OllamaLLMService error: %s', e)
             raise LLMError(str(e)) from e
 
@@ -319,11 +377,11 @@ class FallbackLLMService(BaseLLMService):
     def _model(self) -> str:
         return ' -> '.join(self._names)
 
-    def chat(self, messages: list[dict], **kwargs) -> str:
+    def chat_with_usage(self, messages: list[dict], **kwargs) -> tuple[str, dict]:
         last_error: Exception | None = None
         for name, backend in zip(self._names, self._backends):
             try:
-                return backend.chat(messages, **kwargs)
+                return backend.chat_with_usage(messages, **kwargs)
             except LLMError as e:
                 last_error = e
                 logger.warning('LLM provider %r failed, trying next: %s', name, e)
@@ -424,3 +482,17 @@ def get_llm_service(role: str = 'default') -> BaseLLMService:
     if len(backends) == 1:
         return backends[0]
     return FallbackLLMService(backends, resolved)
+
+
+def resolved_provider_names(service: BaseLLMService) -> list[str]:
+    """Ordered provider names a resolved service will actually try, in order.
+
+    Callers that need to know which provider is *actually* primary for a route
+    (e.g. to size batch requests) should use names[0] — LLM_ROUTES lists a
+    static fallback order, but get_llm_service() skips unconfigured providers,
+    so the effective primary can differ from route[0] (e.g. a deployment with
+    only OLLAMA_BASE_URL set resolves straight to Ollama).
+    """
+    if isinstance(service, FallbackLLMService):
+        return list(service._names)
+    return [getattr(service, '_provider', 'unknown')]

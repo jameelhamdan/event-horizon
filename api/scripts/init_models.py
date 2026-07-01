@@ -29,6 +29,15 @@ def download_models() -> None:
     print("Downloading ProsusAI/finbert...")
     pipeline("text-classification", model="ProsusAI/finbert", top_k=None, truncation=True, max_length=512)
 
+    print("Downloading Helsinki-NLP/opus-mt-en-ar...")
+    pipeline("translation", model="Helsinki-NLP/opus-mt-en-ar", truncation=True, max_length=512)
+
+    print("Downloading dslim/bert-base-NER...")
+    pipeline("ner", model="dslim/bert-base-NER", aggregation_strategy="simple", truncation=True, max_length=512)
+
+    # VADER (services.processing.vader) is rule-based — ships with the
+    # vaderSentiment package, no model weights to pre-fetch.
+
     print("All models downloaded.")
 
 
@@ -55,6 +64,27 @@ def preload_into_memory() -> None:
         logger.info("[preload] sentence-transformer clusterer warmed into worker memory")
     except Exception:
         logger.exception("[preload] clusterer preload failed — will load lazily per job")
+
+    try:
+        from services.translation import _pipeline as _translation_pipeline
+        if _translation_pipeline() is not None:
+            logger.info("[preload] translation (MarianMT) warmed into worker memory")
+    except Exception:
+        logger.exception("[preload] translation preload failed — will load lazily per job")
+
+    try:
+        from services.processing import ner
+        if ner._pipeline() is not None:
+            logger.info("[preload] NER (dslim/bert-base-NER) warmed into worker memory")
+    except Exception:
+        logger.exception("[preload] NER preload failed — will load lazily per job")
+
+    try:
+        from services.processing import vader
+        if vader._analyzer() is not None:
+            logger.info("[preload] VADER warmed into worker memory")
+    except Exception:
+        logger.exception("[preload] VADER preload failed — will load lazily per job")
 
 
 if __name__ == "__main__":

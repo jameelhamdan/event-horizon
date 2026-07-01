@@ -40,10 +40,7 @@ def upcoming_runs(limit: int = 40) -> list[dict]:
     try:
         from croniter import croniter
     except ImportError:
-        return [
-            {'task': e['task'], 'when': None, 'cron': e['cron']}
-            for e in parse_entries()[:limit]
-        ]
+        return [{'task': e['task'], 'cron': e['cron'], 'when': None} for e in parse_entries()[:limit]]
 
     now = datetime.now(timezone.utc)
     out: list[dict] = []
@@ -52,8 +49,8 @@ def upcoming_runs(limit: int = 40) -> list[dict]:
             when = croniter(entry['cron'], now).get_next(datetime)
             if when.tzinfo is None:
                 when = when.replace(tzinfo=timezone.utc)
-            out.append({'task': entry['task'], 'when': when})
+            out.append({'task': entry['task'], 'cron': entry['cron'], 'when': when})
         except Exception:  # noqa: BLE001 — bad cron expression
-            out.append({'task': entry['task'], 'when': None})
+            out.append({'task': entry['task'], 'cron': entry['cron'], 'when': None})
     out.sort(key=lambda x: x['when'] or datetime.max.replace(tzinfo=timezone.utc))
     return out[:limit]

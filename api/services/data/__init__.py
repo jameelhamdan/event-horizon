@@ -3,10 +3,10 @@ import logging
 from typing import TYPE_CHECKING
 
 from django.conf import settings
-from django.core.cache import cache
 from django.utils import timezone
 
 import core.models
+from services.cache import KEY_ARTICLE_TITLE_DEDUP, cache_get, cache_set
 from services.utils import tokenize as _tokenize_title, jaccard as _jaccard
 
 logger = logging.getLogger(__name__)
@@ -14,18 +14,18 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from services.data.base import BaseClientService
 
-_DEDUP_CACHE_KEY = 'article_title_dedup'
 _DEDUP_MAX_SETS  = 2000  # rolling window cap to avoid unbounded growth
 
 
 def _filter_title_dupes(datums: list, threshold: float = 0.75, hours: int = 24) -> list:
     """
     Drop datums whose title is a near-duplicate of a recently stored article title.
-    Maintains a rolling window of title token sets in Django's cache (Redis in production).
+    Maintains a rolling window of title token sets in the shared Redis cache — must be
+    cross-worker since fetch_source_task runs on multiple default-queue workers.
     Race conditions between workers are acceptable — URL dedup in get_or_create is the
     definitive guard; this filter reduces noise before it reaches the DB.
     """
-    cached: list[frozenset] = cache.get(_DEDUP_CACHE_KEY) or []
+    cached: list[frozenset] = cache_get(KEY_ARTICLE_TITLE_DEDUP) or []
     # new_sets grows as we accept datums; checked against incoming ones too (intra-batch dedup).
     new_sets = list(cached)
     kept = []
@@ -47,7 +47,7 @@ def _filter_title_dupes(datums: list, threshold: float = 0.75, hours: int = 24) 
         new_sets = new_sets[-_DEDUP_MAX_SETS:]
 
     if new_sets != cached:
-        cache.set(_DEDUP_CACHE_KEY, new_sets, timeout=hours * 3600)
+        cache_set(KEY_ARTICLE_TITLE_DEDUP, new_sets, timeout=hours * 3600)
 
     return kept
 

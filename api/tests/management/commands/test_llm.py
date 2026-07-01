@@ -12,7 +12,7 @@ class Command(BaseCommand):
         parser.add_argument(
             '--role',
             default='default',
-            help='LLM route role to test (e.g. analyzer, topics, default).',
+            help='LLM route role to test (e.g. analyzer_lite, topics, default).',
         )
         parser.add_argument(
             '--prompt',

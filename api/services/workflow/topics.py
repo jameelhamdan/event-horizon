@@ -218,12 +218,12 @@ def _apply_topic_tags(events: list, all_active_topics: list) -> int:
     """Run the LLM matcher over events and persist topics + re-routed indicators.
     Returns the number of events processed.
     """
-    from services.topics.matcher import LLMTopicMatcher
+    from services.topics.matcher import EmbeddingTopicMatcher
     from services.forecasting.routing import route_event_to_weighted_symbols
     from services.utils import mark_stage
 
-    llm_matcher = LLMTopicMatcher()
-    batch_results, batch_sources = llm_matcher.match_batch(events, all_active_topics)
+    matcher = EmbeddingTopicMatcher()
+    batch_results, batch_sources = matcher.match_batch(events, all_active_topics)
 
     tagged = 0
     for event in events:
@@ -241,8 +241,8 @@ def _apply_topic_tags(events: list, all_active_topics: list) -> int:
             event.category, event.location_name, event.topic_slugs,
             event.sub_categories or [], route_sentiment,
         )
-        mark_stage(event, 'tag', ok=(source == 'llm'),
-                   error=None if source == 'llm' else 'keyword fallback (LLM unavailable)')
+        mark_stage(event, 'tag', ok=(source == 'embed'),
+                   error=None if source == 'embed' else 'keyword fallback (embedding model unavailable)')
         event.save(update_fields=[
             'topics', 'topic_slugs', 'topics_source', 'affected_indicators', 'stage_status',
         ])

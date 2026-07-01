@@ -496,10 +496,10 @@ class Command(BaseCommand):
 
     def _stage_bootstrap_guard(self, c):
         self.stdout.write('→ Stage 12: bootstrap idempotency guard')
-        from django.core.cache import cache
+        from services.cache import KEY_BOOTSTRAP_INITIAL_DATA_DONE, cache_set
         from services.tasks import bootstrap_initial_data_task
         # Pre-set the done flag so the task short-circuits WITHOUT enqueuing heavy backfills.
-        cache.set('bootstrap:initial_data:done', True, timeout=None)
+        cache_set(KEY_BOOTSTRAP_INITIAL_DATA_DONE, True, timeout=None)
         try:
             result = bootstrap_initial_data_task()
             c.hard('bootstrap.guard_skips', result == 0, f'returned {result} (expected 0)')

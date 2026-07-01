@@ -33,7 +33,7 @@ flowchart TD
 
     ART --> S2
     subgraph S2["Stage 2 · Process"]
-        NLP[LLM entities/sentiment/category/sub-category · geocode<br/>FinBERT · i18n en/ar]
+        NLP[LLM category/sub-category/geo/intensity · local NER + VADER<br/>FinBERT · local MarianMT i18n en→ar]
     end
     S2 --> ARTE[(Article · enriched)]
 
@@ -69,7 +69,7 @@ cd api && python manage.py migrate
 python manage.py run_task dispatch_fetch_task   # enqueue one scheduled job manually
 ```
 
-> **LLM**: Ollama is the default backend (self-hosted, no API key). Set `OLLAMA_BASE_URL` in `.env` if Ollama runs elsewhere (default: `http://localhost:11434`). For free cloud fallback, add `GROQ_API_KEYS` or `CEREBRAS_API_KEYS`. OpenRouter is the final fallback if keys are set. See [architecture.md → LLM providers & routing](architecture.md#llm-providers--routing).
+> **LLM**: free-tier cloud providers (`GROQ_API_KEYS`, `CEREBRAS_API_KEYS`) lead every route, with OpenRouter (`OPENROUTER_API_KEYS`) as the mid fallback and self-hosted Ollama (no API key; set `OLLAMA_BASE_URL` if it runs elsewhere, default `http://localhost:11434`) as the last resort. The LLM's job is narrower than it looks — entities, sentiment, Arabic translation, topic tagging, and event routing all run on local models instead. See [architecture.md → LLM providers & routing](architecture.md#llm-providers--routing).
 
 See [`../CLAUDE.md` → Dev Commands](../CLAUDE.md) for the full command list.
 </content>

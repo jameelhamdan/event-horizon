@@ -82,12 +82,16 @@
     <section class="ops-card">
       <h2>Upcoming runs</h2>
       <table class="ops-table">
-        <thead><tr><th>Task</th><th>Scheduled</th></tr></thead>
+        <thead><tr><th>Task</th><th>Schedule</th><th>Next run (UTC)</th></tr></thead>
         <tbody>
         {% for u in upcoming %}
-          <tr><td>{{ u.task }}</td><td class="ops-muted">{{ u.when|default:"—" }}</td></tr>
+          <tr>
+            <td>{{ u.task }}</td>
+            <td class="ops-mono">{{ u.cron }}</td>
+            <td class="ops-muted">{{ u.when|default:"—" }}</td>
+          </tr>
         {% empty %}
-          <tr><td colspan="2" class="ops-muted">No scheduled jobs visible.</td></tr>
+          <tr><td colspan="3" class="ops-muted">No scheduled jobs visible.</td></tr>
         {% endfor %}
         </tbody>
       </table>
@@ -108,6 +112,39 @@
       </table>
     </section>
   </div>
+
+  {# ── LLM provider status ─────────────────────────────────────────── #}
+  <section class="ops-card">
+    <h2>LLM providers</h2>
+    <table class="ops-table">
+      <thead><tr>
+        <th>Provider</th><th>OK</th><th>Errors</th><th>Avg ms</th>
+        <th>Debounced keys</th><th>Last success</th><th>Last error</th>
+      </tr></thead>
+      <tbody>
+      {% for p in llm_status %}
+        <tr>
+          <td>{{ p.provider }}</td>
+          <td>{{ p.ok }}</td>
+          <td class="{% if p.err %}ops-warn{% endif %}">{{ p.err }}</td>
+          <td class="ops-muted">{% if p.avg_ms %}{{ p.avg_ms }}{% else %}—{% endif %}</td>
+          <td class="{% if p.debounced %}ops-debounced{% endif %}">
+            {% if p.debounced %}
+              {{ p.debounced }} key{{ p.debounced|pluralize }}
+              {% if p.cooldown_s %}· clears in {{ p.cooldown_s }}s{% endif %}
+            {% else %}
+              <span class="ops-ok">&#10003; clear</span>
+            {% endif %}
+          </td>
+          <td class="ops-muted">{{ p.last_ok|default:"—" }}</td>
+          <td class="ops-muted">{{ p.last_err|default:"—" }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="7" class="ops-muted">No LLM stats yet (Redis unavailable or no calls made).</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
 
   {# ── Forecast model status ───────────────────────────────────────── #}
   <section class="ops-card">
@@ -143,6 +180,9 @@
 .ops-table th { color:#999; font-weight:600; }
 .ops-muted { color:#888; }
 .ops-warn { color:#e0a052; font-weight:600; }
+.ops-ok { color:#5cb85c; }
+.ops-debounced { color:#e05252; font-weight:600; }
+.ops-mono { font-family: monospace; font-size: 11px; color:#aaa; }
 .ops-grid { display:grid; grid-template-columns: 1fr 1fr; gap:18px; }
 @media (max-width: 800px){ .ops-grid { grid-template-columns: 1fr; } }
 </style>
