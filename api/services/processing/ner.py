@@ -23,14 +23,11 @@ _MIN_SCORE = 0.5
 
 def _build_pipeline():
     from transformers import pipeline
-    return pipeline(
-        'ner',
-        model=_MODEL_NAME,
-        aggregation_strategy='simple',
-        # transformers>=5.3's TokenClassificationPipeline no longer accepts
-        # truncation/max_length directly — they must go through tokenizer_kwargs.
-        tokenizer_kwargs={'truncation': True, 'max_length': 512},
-    )
+    # transformers>=5.3's TokenClassificationPipeline doesn't accept truncation/
+    # max_length kwargs at all — it truncates automatically using the model's
+    # own tokenizer.model_max_length (512 for BERT). _MAX_CHARS above is a
+    # cheap pre-clip so we don't tokenize huge inputs just to discard them.
+    return pipeline('ner', model=_MODEL_NAME, aggregation_strategy='simple')
 
 
 # Opt-out via NER_ENABLED (default on).

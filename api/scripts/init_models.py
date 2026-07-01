@@ -37,14 +37,10 @@ def download_models() -> None:
     AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-en-ar")
 
     print("Downloading dslim/bert-base-NER...")
-    # transformers>=5.3's TokenClassificationPipeline no longer accepts
-    # truncation/max_length directly — they must go through tokenizer_kwargs.
-    pipeline(
-        "ner",
-        model="dslim/bert-base-NER",
-        aggregation_strategy="simple",
-        tokenizer_kwargs={"truncation": True, "max_length": 512},
-    )
+    # transformers>=5.3's TokenClassificationPipeline doesn't accept truncation/
+    # max_length kwargs at all — it truncates automatically using the model's
+    # own tokenizer.model_max_length.
+    pipeline("ner", model="dslim/bert-base-NER", aggregation_strategy="simple")
 
     # VADER (services.processing.vader) is rule-based — ships with the
     # vaderSentiment package, no model weights to pre-fetch.
