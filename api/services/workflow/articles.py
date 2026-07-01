@@ -84,8 +84,8 @@ def process_articles(
     only_failed: bool = False,
     ids: list | None = None,
 ) -> int:
-    """LLM analyzer extracts category, location, entities, and sentiment; FinBERT adds
-    financial sentiment. Returns the number of articles processed.
+    """LLM analyzer extracts category and location; local NER/VADER add entities and
+    sentiment; FinBERT adds financial sentiment. Returns the number of articles processed.
 
     only_failed: re-run NLP on articles that were processed but ended up with no location.
     ids: when given, process exactly these article ids (bypasses normal selection).

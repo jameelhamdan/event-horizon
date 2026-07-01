@@ -5,7 +5,8 @@ TopicMatcher          — keyword-overlap matching (no LLM, fast, used for retro
 EmbeddingTopicMatcher — local sentence-transformer semantic matching (no LLM, used for the
                         regular tagging pipeline). Falls back to TopicMatcher if the model
                         can't be loaded.
-LLMTopicMatcher       — LLM-based batch matching (semantic, kept for comparison/manual use).
+LLMTopicMatcher       — LLM-based batch matching (semantic); an alternative to
+                        EmbeddingTopicMatcher, not used by the default tagging pipeline.
 """
 import json
 import logging
@@ -111,9 +112,7 @@ class EmbeddingTopicMatcher:
         event with zero keyword overlap against every topic essentially never matches
         semantically either, and skipping it keeps false-positive risk from the
         embedding threshold bounded to events that already show some lexical
-        relation to a topic — unlike the LLM version this isn't about call cost
-        (embeddings are local and cheap), it's about not silently loosening tagging
-        precision compared to the matcher this one replaced.
+        relation to a topic.
         """
         results: dict[str, dict[str, float]] = {str(e.pk): {} for e in events}
         sources: dict[str, str] = {str(e.pk): 'keyword' for e in events}

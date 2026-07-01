@@ -1,9 +1,8 @@
 """Local general-purpose sentiment (VADER).
 
-Restores the local VADER pass that used to run before sentiment was folded
-into the LLM analyzer call. VADER is rule-based (no model download, sub-ms per
-article) and English-tuned — a reasonable general-polarity signal alongside
-the domain-specific FinBERT score already computed in cleaner.py.
+VADER is rule-based (no model download, sub-ms per article) and English-tuned —
+a reasonable general-polarity signal alongside the domain-specific FinBERT
+score computed in cleaner.py.
 """
 
 import logging

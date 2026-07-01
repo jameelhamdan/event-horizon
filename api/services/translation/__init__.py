@@ -1,6 +1,6 @@
 """
-Local English→Arabic translation (MarianMT), replacing LLM-generated Arabic
-translations in ArticleAnalyzer.
+Local English→Arabic translation (MarianMT). Generates the 'ar' translation
+block that ArticleAnalyzer attaches to its LLM output.
 
 Helsinki-NLP/opus-mt-en-ar is a small dedicated seq2seq translation model — a much
 better fit for this narrow task than asking a general LLM to translate, and it runs

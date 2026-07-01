@@ -176,16 +176,14 @@ def route_events_chunk_task(event_ids: list, source: str | None = None) -> int:
     return route_events(events, source=src)
 
 
-def dispatch_route_events_task(hours: int = 168, source: str | None = None,
-                               limit: int | None = None) -> int:
+def dispatch_route_events_task(hours: int = 168, source: str | None = None, limit: int | None = None) -> int:
     """Select recent events and fan out routing in chunks of 10. Returns jobs enqueued."""
     from core import models as core_models
     from services.queue import enqueue, make_retry
 
     limit = limit or ROUTE_DISPATCH_LIMIT
     start = datetime.now(dt_timezone.utc) - timedelta(hours=hours)
-    ids = list(core_models.Event.objects.filter(started_at__gte=start)
-               .values_list('pk', flat=True)[:limit])
+    ids = list(core_models.Event.objects.filter(started_at__gte=start).values_list('pk', flat=True)[:limit])
     if not ids:
         return 0
     retry = make_retry()

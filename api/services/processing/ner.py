@@ -1,9 +1,8 @@
 """Local named-entity recognition (dslim/bert-base-NER).
 
-Restores the local NER pass that used to run before entities were folded into
-the LLM analyzer call. A dedicated 110M-param NER model is both cheaper and a
-better fit for this narrow task than asking a general LLM to extract entities.
-Loaded lazily and cached (mirrors services.processing.finbert).
+A dedicated 110M-param NER model is both cheaper and a better fit for this
+narrow task than asking a general LLM to extract entities. Loaded lazily and
+cached (mirrors services.processing.finbert).
 """
 
 import logging

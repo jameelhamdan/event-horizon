@@ -24,14 +24,11 @@ _SUB_CATEGORIES: dict[str, set[str]] = {
     'general':   {'other'},
 }
 
-# English-only schema. Two things are no longer requested from the LLM, each
-# handled by a purpose-built local model instead (see cleaner.py):
-#   - entities   → services.processing.ner   (dslim/bert-base-NER)
-#   - sentiment  → services.processing.vader (VADER, rule-based)
-# Arabic localization is likewise generated locally, by services.translation
-# (MarianMT), from the English fields below — see _add_arabic_translations.
-# What's left needs real judgment (taxonomy classification, geo naming,
-# severity rating), so it stays on the LLM.
+# English-only schema — covers only the fields that need real judgment (taxonomy
+# classification, geo naming, severity rating). Entities and sentiment are handled
+# locally (services.processing.ner, services.processing.vader — see cleaner.py);
+# Arabic is generated locally too, from the English fields below by
+# services.translation (MarianMT) — see _add_arabic_translations.
 _OBJECT_SCHEMA = """\
 {
   "category": conflict|disaster|economic|political|health|general,
@@ -183,10 +180,8 @@ class ArticleAnalyzer:
     def __init__(self) -> None:
         from services.llm import get_llm_service
         self._get_llm_service = get_llm_service
-        # Single route: the LLM only handles category/geo/intensity + EN
-        # translation now — entities/sentiment are local (NER/VADER, see
-        # cleaner.py) and Arabic is added locally afterward via
-        # services.translation. Resolved lazily and cached.
+        # Resolved lazily and cached — the LLM handles category/geo/intensity +
+        # EN translation; Arabic is added afterward via services.translation.
         self._llm = None
 
     def _service(self):
@@ -228,13 +223,12 @@ class ArticleAnalyzer:
         per input text, in order — failures fall back to _empty() per-item or per-chunk.
 
         The LLM call itself only ever produces English output (category, geo,
-        intensity, EN translation) — entities and sentiment never touch the LLM at
-        all (see cleaner.py: NER + VADER, local, on every document regardless of
-        this flag). translate=True additionally adds a locally-generated ('ar')
-        translation block via services.translation (MarianMT) — no extra LLM cost
-        either way. translate=False skips that local translation step entirely
-        (used for backfilled historical articles where Arabic localization isn't
-        needed).
+        intensity, EN translation) — entities and sentiment are handled separately
+        by NER + VADER in cleaner.py, on every document regardless of this flag.
+        translate=True additionally adds a locally-generated ('ar') translation
+        block via services.translation (MarianMT); translate=False skips that local
+        translation step (used for backfilled articles where Arabic localization
+        isn't needed).
 
         Batch size depends on which provider will actually serve the call: Ollama is
         a single local model server (one request at a time), so a route that

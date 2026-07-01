@@ -33,13 +33,12 @@ class ArticleCleaner:
         """Enrich many documents.
 
         ``lite_flags`` selects whether the local Arabic translation step runs per
-        document (or for all, if a single bool) — it no longer affects the LLM call
-        itself, which is always English-only regardless. category/sub_category/geo/
-        event_intensity come from one LLM call over the whole chunk (so a mixed
-        lite/full chunk still maps to exactly one batched call — see
-        ArticleAnalyzer.ANALYZE_BATCH_SIZE); entities (NER), sentiment (VADER), and
-        finbert_sentiment all run locally on every document, independent of the
-        LLM call.
+        document (or for all, if a single bool); the LLM call itself is always
+        English-only. category/sub_category/geo/event_intensity come from one LLM
+        call over the whole chunk (so a mixed lite/full chunk still maps to exactly
+        one batched call — see ArticleAnalyzer.ANALYZE_BATCH_SIZE); entities (NER),
+        sentiment (VADER), and finbert_sentiment all run locally on every document,
+        independent of the LLM call.
         """
         if not documents:
             return []

@@ -35,7 +35,7 @@ def _build_pipeline():
 # Opt-out via FINBERT_ENABLED (default on) — lets a lean deployment skip the ~500 MB
 # model download + its memory/CPU cost without removing transformers (still required
 # by core sentence-transformers clustering). When off, scores fall back to None and
-# the pipeline degrades gracefully — the LLM-extracted sentiment remains available.
+# the pipeline degrades gracefully — the VADER general-sentiment score remains available.
 _pipeline = lazy_loader('finbert', 'FINBERT_ENABLED', _build_pipeline)
 
 
