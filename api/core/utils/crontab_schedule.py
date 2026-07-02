@@ -10,7 +10,7 @@ _RUN_TASK_RE = re.compile(r'run_task\s+(\w+)')
 
 
 def crontab_path() -> str:
-    return os.path.join(settings.BASE_DIR, 'crontab')
+    return os.path.join(settings.BACKEND_DIR, 'crontab')
 
 
 def parse_entries() -> list[dict]:

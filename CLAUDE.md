@@ -106,11 +106,11 @@ api/                       PYTHONPATH root inside Docker (/app)
 
 ### Task execution model
 
-Tasks are plain functions in `services/tasks.py` and `newsletter/tasks.py`. The `enqueue()` helper in `services/queue.py` wraps django-rq; when `TASK_QUEUE_ENABLED=False` it calls the function directly.
+Tasks are Celery tasks (`@shared_task`) in `services/tasks.py` and `newsletter/tasks.py` — calling one directly as a plain function still runs it synchronously. The `enqueue()` helper in `services/queue.py` wraps Celery (Redis broker); when `TASK_QUEUE_ENABLED=False` it calls the function directly instead of `apply_async()`.
 
 Three queues:
 - `default` — light I/O (fetchers, stream collectors, fan-out dispatchers) — 4 workers
-- `heavy` — NLP/LLM work (processing, clustering, topic matching, newsletters) — 2 workers; `manage.py worker heavy` preloads ML models via copy-on-write before forking
+- `heavy` — NLP/LLM work (processing, clustering, topic matching, newsletters) — 2 workers (`celery -A app worker -Q heavy`); ML models load lazily per job, no preloading
 - `bulk` — long one-shot jobs (multi-year backfills, model training) — 1 worker
 
 The crontab (`api/crontab`, run by supercronic in the `api` container) dispatches everything via `manage.py run_task <task_name>`. To manually trigger any cron job locally: `python manage.py run_task <task_name> --sync`.
@@ -172,5 +172,4 @@ React 19 + Vite SPA at `ui/`. All files are `.tsx`/`.ts` — never `.jsx`/`.js`.
 
 ### Admin
 
-- Django admin at `/admin/`; custom operations dashboard at `/admin/dashboard/` (pipeline status, manual triggers).
-- RQ job inspector at `/admin/django-rq/`.
+- Django admin at `/admin/`; custom operations dashboard at `/admin/dashboard/` (pipeline status, manual triggers, in-flight/queue-depth tables backed by Celery's `app.control` API).

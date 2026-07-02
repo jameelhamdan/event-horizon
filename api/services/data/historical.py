@@ -459,7 +459,7 @@ class HistoricalBackfillService:
         from django.conf import settings
         import core.models as m
         from services.data import _filter_title_dupes
-        from services.queue import enqueue, make_retry
+        from services.queue import enqueue
         from services.tasks import backfill_save_article_task
 
         if not source_datums:
@@ -484,7 +484,6 @@ class HistoricalBackfillService:
             key = (datum.pop('_source_code'), datum.pop('_source_type'))
             by_source.setdefault(key, []).append(datum)
 
-        retry = make_retry()
         saved = 0
         for (source_code, source_type), source_batch in by_source.items():
             urls = [d['source_url'] for d in source_batch]
@@ -500,7 +499,7 @@ class HistoricalBackfillService:
                 enqueue(
                     backfill_save_article_task,
                     source_code, source_type, dict(datum), extra, self.fetch_body,
-                    queue='default', retry=retry,
+                    queue='default',
                 )
                 saved += 1
 

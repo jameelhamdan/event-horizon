@@ -175,7 +175,7 @@ class SourceAdmin(ImportExportModelAdmin):
             (
                 f'Backfill enqueued for "{source.name}" '
                 f'({start_date.date()} → {end_date.date()}, ~{days} days, top-{top_n}/day). '
-                f'Monitor progress at /admin/django-rq/.'
+                f'Monitor progress at /admin/dashboard/.'
             ),
             messages.SUCCESS,
         )
@@ -256,7 +256,10 @@ class ArticleAdmin(ImportExportModelAdmin):
         if action == "run_all":
             enqueue(dispatch_fetch_task, queue='default')
             enqueue(dispatch_process_articles_task, queue='default')
-            enqueue(aggregate_events_task, queue="heavy", job_timeout=-1)
+            # Bounded (was -1/no cap) — an uncapped job that deadlocks has no
+            # watchdog at all and can sit in "started" forever with nothing to
+            # show for it. 1h covers a full 168h backlog aggregation with margin.
+            enqueue(aggregate_events_task, queue="heavy", job_timeout=3600)
             self.message_user(
                 request,
                 "Pipeline dispatchers enqueued (fetch → process → aggregate).",

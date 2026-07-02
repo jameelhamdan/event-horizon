@@ -13,7 +13,7 @@ See [project.md](project.md) for full requirements and architecture. See [CLAUDE
 | Layer | Tech |
 | ----- | ---- |
 | Backend | Django 6 + DRF + django-mongodb-backend |
-| Task queue | Redis + RQ + django-rq |
+| Task queue | Redis + Celery |
 | Storage | MongoDB 8 |
 | Ingestion | feedparser (RSS) + requests |
 | NLP | LLM category/geo/intensity + local NER (entities) + VADER (sentiment) + sentence-transformers (clustering + topic matching) + FinBERT + MarianMT (Arabic translation) + geonamescache geocoding |
@@ -57,8 +57,8 @@ python manage.py migrate
 python manage.py runserver     # Django on :8000
 
 # Workers (separate terminals, from api/)
-python manage.py worker heavy --num-workers 2
-python manage.py rqworker-pool default --num-workers 4
+celery -A app worker -Q heavy --concurrency=2
+celery -A app worker -Q default --concurrency=4
 
 # Frontend (separate terminal)
 cd ui
@@ -79,7 +79,7 @@ See `api/.env.example` for the full annotated list. Key variables:
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URI |
 | `DOMAIN` | `localhost` | Public domain name |
 | `ENV_NAME` | `development` | Shown in `X-App-Version` header |
-| `TASK_QUEUE_ENABLED` | `false` | Enable RQ task enqueueing (set `true` in prod) |
+| `TASK_QUEUE_ENABLED` | `false` | Enable Celery task enqueueing (set `true` in prod) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server (default LLM backend) |
 | `GROQ_API_KEYS` | — | Groq API key(s), comma-separated (free cloud fallback) |
 | `CEREBRAS_API_KEYS` | — | Cerebras API key(s), comma-separated (free cloud fallback) |
@@ -148,9 +148,9 @@ api/
     email/       SES / SMTP email service
     llm/         LLM provider abstraction (Ollama, Groq, Cerebras, OpenRouter)
     workflow/    Pipeline orchestration (articles, events, topics)
-    tasks.py     RQ task definitions
+    tasks.py     Celery task definitions
     queue.py     Enqueue helpers + task run tracking
-  scripts/       One-off / startup scripts (init_models.py — preloads ML weights)
+  scripts/       One-off / startup scripts (init_models.py — downloads ML weights at build time)
   tests/         E2E and diagnostic commands (e2e_full, e2e_pipeline, test_llm, …)
   settings/      Django configuration
   templates/     Email + admin HTML templates

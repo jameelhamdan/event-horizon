@@ -2,6 +2,9 @@ import sys
 import subprocess
 from pathlib import Path
 
+from .celery import app as celery_app
+
+__all__ = ('celery_app',)
 
 __version__ = 'NONE'
 

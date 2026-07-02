@@ -42,10 +42,11 @@ is ready (eventually-consistent; idempotent upserts mean nothing is lost). The a
 `dispatch_process_articles_task`, and `aggregate_events_task` independently — eventual
 consistency; results appear as each stage completes.
 
-**Robustness.** Network/LLM workers are enqueued with RQ retries
-(`make_retry()` → backoff `[60, 300, 900]`). Saves are idempotent (`get_or_create`
-for articles, date-skip for prices), so a retried or resumed run fills only gaps. A
-low-frequency safety net re-dispatches processed-but-unlocated articles.
+**Robustness.** Network/LLM workers are Celery tasks declared with
+`autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={'max_retries': 3}`.
+Saves are idempotent (`get_or_create` for articles, date-skip for prices), so a
+retried or resumed run fills only gaps. A low-frequency safety net re-dispatches
+processed-but-unlocated articles.
 
 ## Per-record stage tracking
 
@@ -71,10 +72,8 @@ plus a sample error — the data behind the dashboard's coverage panel.
 - **In-flight** — currently `running` `TaskRun`s.
 - **Forecast model** — artifact mtimes, last forecast, live directional accuracy.
 - **Actions** — run full sync, backfill prices/articles, retrain forecast, re-run
-  bootstrap, and **cancel a job** by RQ `job_id`.
+  bootstrap, and **cancel a job** by Celery task id (`app.control.revoke`).
 
 Per-record reprocessing is also available from the `Article`/`Event` changelists: the
 **"pipeline gap"** filter narrows to records stuck at a stage, and bulk actions
 re-enqueue them (`Reprocess selected`, `Re-tag selected`, `Re-route selected`).
-
-Low-level queue detail remains at `/admin/django-rq/`.

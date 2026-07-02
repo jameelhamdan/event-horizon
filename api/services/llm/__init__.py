@@ -196,6 +196,13 @@ class OpenAICompatLLMService(BaseLLMService):
     Retry-After header overrides when present.
     """
 
+    # Hard cap on models tried per call, regardless of how many are available
+    # for the picked key (OpenRouter can surface up to OPENROUTER_MODELS_COUNT).
+    # Without this, a single call's worst case is len(models) × LLM_TIMEOUT_SECONDS
+    # — a provider that hangs (rather than fails fast) on every model can burn
+    # minutes on one FallbackLLMService leg before ever reaching the next provider.
+    MAX_MODELS_PER_CALL = 2
+
     def __init__(
         self,
         base_url: str,
@@ -259,6 +266,7 @@ class OpenAICompatLLMService(BaseLLMService):
                 f'All (key, model) combinations for {self._provider!r} are rate-limited (debounced)'
             )
         api_key, models = result
+        models = models[: self.MAX_MODELS_PER_CALL]
         client = OpenAI(base_url=self._base_url, api_key=api_key)
 
         last_error: Exception | None = None
@@ -379,12 +387,18 @@ class FallbackLLMService(BaseLLMService):
 
     def chat_with_usage(self, messages: list[dict], **kwargs) -> tuple[str, dict]:
         last_error: Exception | None = None
-        for name, backend in zip(self._names, self._backends):
+        for i, (name, backend) in enumerate(zip(self._names, self._backends)):
             try:
-                return backend.chat_with_usage(messages, **kwargs)
+                result = backend.chat_with_usage(messages, **kwargs)
             except LLMError as e:
                 last_error = e
                 logger.warning('LLM provider %r failed, trying next: %s', name, e)
+                continue
+            if i > 0:
+                # Only log when a fallback actually kicked in — the common
+                # case (first provider succeeds) doesn't need a log line.
+                logger.info('LLM provider %r succeeded after %d fallback(s)', name, i)
+            return result
         raise LLMError(f'All LLM providers failed ({", ".join(self._names)})') from last_error
 
 

@@ -6,7 +6,7 @@
 |-------|------------|
 | Backend | Django 6 + django-mongodb-backend |
 | Storage | MongoDB 8 |
-| Task queue | django-rq + Redis — three queues: `default` (light I/O), `heavy` (NLP/LLM), `bulk` (long one-shot jobs) |
+| Task queue | Celery + Redis — three queues: `default` (light I/O), `heavy` (NLP/LLM), `bulk` (long one-shot jobs) |
 | Scheduling | supercronic + `api/crontab` → `manage.py run_task` (runs in `api` container) |
 | Ingestion | feedparser (RSS) + requests |
 | NLP | LLM (category/sub-category · geo naming · intensity) · local NER (`dslim/bert-base-NER`, entities) · VADER (sentiment, rule-based) · sentence-transformers (clustering + topic matching) · **FinBERT** (financial sentiment) · MarianMT (Arabic translation) · geonamescache (geocode) |
@@ -26,10 +26,10 @@
 | `nginx` | reverse proxy (80/443) |
 | `cloudflared` | optional Cloudflare Tunnel |
 | `api` | uvicorn ASGI + supercronic (`api/crontab`) |
-| `worker-heavy` | `rqworker-pool heavy` — NLP / LLM tasks |
-| `worker-light` | `rqworker-pool default` — fast I/O tasks |
-| `worker-bulk` | `rqworker-pool bulk` — long one-shot jobs |
-| `redis` | RQ broker + cache + SSE pub/sub |
+| `worker-heavy` | `celery -A app worker -Q heavy` — NLP / LLM tasks |
+| `worker-light` | `celery -A app worker -Q default` — fast I/O tasks |
+| `worker-bulk` | `celery -A app worker -Q bulk` — long one-shot jobs |
+| `redis` | Celery broker + cache + SSE pub/sub |
 | `mongo` | database (27017) |
 | `static_data` | seeds static reference data (countries, airports, etc.) |
 

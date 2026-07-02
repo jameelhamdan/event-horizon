@@ -1,10 +1,16 @@
 """Task functions for the ingestion and aggregation pipeline.
 
-These are plain Python functions enqueued via django-rq (services.queue.enqueue).
+These are Celery tasks (@shared_task) enqueued via services.queue.enqueue.
+Calling one directly as a plain function (func(**kwargs)) still runs it
+synchronously in-process — used by run_task.py --sync and TASK_QUEUE_ENABLED=False.
 """
 
+import functools
 import logging
+import time
 from datetime import datetime, timedelta, timezone as dt_timezone
+
+from celery import shared_task
 
 from services.workflow import (
     fetch_articles,
@@ -18,6 +24,34 @@ from services.workflow import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _log_task(func):
+    """Log a task's start, duration, and outcome (result or exception).
+
+    RQ's own visibility stops at queued/started/finished — nothing in between,
+    so a job that's hung looks identical to one that's merely slow until the
+    job timeout finally kills it. This gives an operator tailing logs a
+    starting timestamp and a running duration to notice "this has been going
+    for way longer than usual" well before that.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        name = func.__name__
+        t0 = time.monotonic()
+        logger.info('[task] %s starting args=%r kwargs=%r', name, args, kwargs)
+        try:
+            result = func(*args, **kwargs)
+        except Exception:
+            logger.exception('[task] %s FAILED after %.1fs', name, time.monotonic() - t0)
+            raise
+        logger.info('[task] %s done in %.1fs -> %r', name, time.monotonic() - t0, result)
+        return result
+    return wrapper
+
+# Retry policy for tasks fanned out from a dispatcher (previously services.queue.make_retry()) —
+# declared on the task itself, matching Celery convention (call-site retry= is gone).
+_RETRY_KW = dict(autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={'max_retries': 3})
 
 DEFAULT_FETCH_MINUTES = 20          # look-back window for fetch tasks (2× interval)
 DEFAULT_PROCESS_LIMIT = 1000
@@ -39,6 +73,8 @@ BOOTSTRAP_ARTICLE_YEARS = 1
 
 # ── Text pipeline ─────────────────────────────────────────────────────────────
 
+@shared_task
+@_log_task
 def aggregate_events_task(
     hours: int = DEFAULT_AGGREGATE_HOURS,
     min_articles: int = DEFAULT_AGGREGATE_MIN_ARTICLES,
@@ -54,6 +90,8 @@ def aggregate_events_task(
 # job per record/chunk so the queue spreads work across all workers. Workers are
 # idempotent. Downstream steps run on their own schedule (eventually-consistent).
 
+@shared_task(**_RETRY_KW)
+@_log_task
 def fetch_source_task(source_code: str, start_date: datetime | None = None) -> int:
     """Fetch one source. Idempotent per source (RSS de-dupes on save)."""
     now = datetime.now(dt_timezone.utc)
@@ -62,35 +100,42 @@ def fetch_source_task(source_code: str, start_date: datetime | None = None) -> i
     return fetch_articles(source_code, start_date)
 
 
+@shared_task
+@_log_task
 def dispatch_fetch_task(start_date: datetime | None = None) -> int:
     """Enqueue one fetch_source_task per enabled source. Returns sources dispatched."""
     from core import models as core_models
-    from services.queue import enqueue, make_retry
+    from services.queue import enqueue
 
     now = datetime.now(dt_timezone.utc)
     if start_date is None:
         start_date = now - timedelta(minutes=DEFAULT_FETCH_MINUTES)
     codes = list(core_models.Source.objects.filter(is_enabled=True).values_list('code', flat=True))
-    retry = make_retry()
     for code in codes:
-        enqueue(fetch_source_task, code, start_date, queue='default', retry=retry)
+        enqueue(fetch_source_task, code, start_date, queue='default')
     return len(codes)
 
 
+@shared_task(**_RETRY_KW)
+@_log_task
 def process_articles_chunk_task(ids: list, only_failed: bool = False) -> int:
     """Process a chunk of articles by id (idempotent)."""
     return process_articles(ids=ids, only_failed=only_failed)
 
 
+@shared_task(**_RETRY_KW)
+@_log_task
 def process_article_task(article_id, only_failed: bool = False) -> int:
     """Process a single article by id (idempotent)."""
     return process_articles(ids=[article_id], only_failed=only_failed)
 
 
+@shared_task
+@_log_task
 def dispatch_process_articles_task(limit: int | None = None, only_failed: bool = False, chunk_size: int | None = None) -> int:
     """Select unprocessed (or un-located) articles and fan them out. Returns jobs enqueued."""
     from core import models as core_models
-    from services.queue import enqueue, make_retry
+    from services.queue import enqueue
 
     limit = limit or PROCESS_DISPATCH_LIMIT
     chunk_size = max(1, chunk_size or PROCESS_CHUNK_SIZE)
@@ -116,16 +161,15 @@ def dispatch_process_articles_task(limit: int | None = None, only_failed: bool =
         return 0
     if not only_failed:
         core_models.Article.objects.filter(id__in=ids).update(process_queued_at=now)
-    retry = make_retry()
     enq = 0
     enqueued_ids: set = set()
     try:
         for i in range(0, len(ids), chunk_size):
             chunk = ids[i:i + chunk_size]
             if len(chunk) == 1:
-                enqueue(process_article_task, chunk[0], only_failed, queue='heavy', retry=retry)
+                enqueue(process_article_task, chunk[0], only_failed, queue='heavy')
             else:
-                enqueue(process_articles_chunk_task, chunk, only_failed, queue='heavy', retry=retry)
+                enqueue(process_articles_chunk_task, chunk, only_failed, queue='heavy')
             enqueued_ids.update(chunk)
             enq += 1
     except Exception:
@@ -140,16 +184,20 @@ def dispatch_process_articles_task(limit: int | None = None, only_failed: bool =
     return enq
 
 
+@shared_task(**_RETRY_KW)
+@_log_task
 def tag_events_chunk_task(event_ids: list) -> int:
     """Tag a chunk of events by id (local embedding matcher, no LLM call). Idempotent."""
     return tag_events_by_ids(event_ids)
 
 
+@shared_task
+@_log_task
 def dispatch_tag_topics_task(hours: int = DEFAULT_AGGREGATE_HOURS, force_retag: bool = False,
                              limit: int | None = None) -> int:
     """Select events needing tags and fan them out in chunks of 10. Returns jobs enqueued."""
     from core import models as core_models
-    from services.queue import enqueue, make_retry
+    from services.queue import enqueue
     limit = limit or TAG_DISPATCH_LIMIT
     lookback = datetime.now(dt_timezone.utc) - timedelta(hours=hours)
     qs = core_models.Event.objects.filter(started_at__gte=lookback).only('pk', 'topics', 'topics_source')
@@ -160,14 +208,15 @@ def dispatch_tag_topics_task(hours: int = DEFAULT_AGGREGATE_HOURS, force_retag: 
         ids = list(qs.values_list('pk', flat=True)[:limit])
     if not ids:
         return 0
-    retry = make_retry()
     enq = 0
     for i in range(0, len(ids), TAG_CHUNK_SIZE):
-        enqueue(tag_events_chunk_task, ids[i:i + TAG_CHUNK_SIZE], queue='heavy', retry=retry)
+        enqueue(tag_events_chunk_task, ids[i:i + TAG_CHUNK_SIZE], queue='heavy')
         enq += 1
     return enq
 
 
+@shared_task(**_RETRY_KW)
+@_log_task
 def route_events_chunk_task(event_ids: list) -> int:
     """Route a chunk of events by id. Idempotent."""
     from core import models as core_models
@@ -177,26 +226,28 @@ def route_events_chunk_task(event_ids: list) -> int:
     return route_events(events)
 
 
+@shared_task
+@_log_task
 def dispatch_route_events_task(hours: int = 720, limit: int | None = None) -> int:
     """Select recent events and fan out routing in chunks of 10. Returns jobs enqueued."""
     from core import models as core_models
-    from services.queue import enqueue, make_retry
+    from services.queue import enqueue
 
     limit = limit or ROUTE_DISPATCH_LIMIT
     start = datetime.now(dt_timezone.utc) - timedelta(hours=hours)
     ids = list(core_models.Event.objects.filter(started_at__gte=start).values_list('pk', flat=True)[:limit])
     if not ids:
         return 0
-    retry = make_retry()
     enq = 0
     for i in range(0, len(ids), ROUTE_CHUNK_SIZE):
-        enqueue(route_events_chunk_task, ids[i:i + ROUTE_CHUNK_SIZE], queue='heavy', retry=retry)
+        enqueue(route_events_chunk_task, ids[i:i + ROUTE_CHUNK_SIZE], queue='heavy')
         enq += 1
     return enq
 
 
 # ── Configurationless first-load bootstrap (WA4) ─────────────────────────────────
 
+@shared_task
 def bootstrap_initial_data_task(force: bool = False) -> int:
     """One-time, idempotent first-load backfill so deployment is configurationless.
 
@@ -208,7 +259,7 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
     from django.conf import settings
     from core import models as core_models
     from services.cache import KEY_BOOTSTRAP_INITIAL_DATA_DONE, cache_get, cache_set
-    from services.queue import enqueue, make_retry
+    from services.queue import enqueue
 
     log = logging.getLogger(__name__)
     if not force:
@@ -218,17 +269,16 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
             cache_set(KEY_BOOTSTRAP_INITIAL_DATA_DONE, True, timeout=None)
             return 0
 
-    retry = make_retry()
     now = datetime.now(dt_timezone.utc)
     start = now - timedelta(days=365 * BOOTSTRAP_ARTICLE_YEARS)
 
     # Long one-shot seeds go on the bulk queue so they don't block the live pipeline.
-    enqueue(backfill_prices_task, years=10, queue='bulk', job_timeout=-1, retry=retry)
+    enqueue(backfill_prices_task, years=10, queue='bulk', job_timeout=-1)
     # source_code=None (all enabled RSS sources), top_n=None → each source's per-day
     # cap derives from its weight (2–6 by priority).
-    enqueue(backfill_history_task, start, now, None, queue='bulk', job_timeout=-1, retry=retry)
+    enqueue(backfill_history_task, start, now, None, queue='bulk', job_timeout=-1)
     if settings.FORECAST_ENABLED:
-        enqueue(train_forecast_model_task, queue='bulk', job_timeout=-1, retry=retry)
+        enqueue(train_forecast_model_task, queue='bulk', job_timeout=-1)
         enqueue(run_forecast_task, queue='bulk', job_timeout=-1)
 
     cache_set(KEY_BOOTSTRAP_INITIAL_DATA_DONE, True, timeout=None)
@@ -238,20 +288,27 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
 
 # ── Topic tasks ────────────────────────────────────────────────────────────────
 
+@shared_task
+@_log_task
 def refresh_topics_task() -> int:
     return refresh_topics()
 
 
+@shared_task
+@_log_task
 def retroactive_tag_topic_task(slug: str, lookback_hours: int = 72) -> int:
     return retroactive_tag_topic(slug=slug, lookback_hours=lookback_hours)
 
 
+@shared_task
+@_log_task
 def discover_topics_task(hours: int = 6) -> int:
     return discover_topics_from_events(hours=hours)
 
 
 # ── LLM maintenance ──────────────────────────────────────────────────────────────
 
+@shared_task
 def refresh_openrouter_models_task() -> dict:
     """Discover currently-available free OpenRouter models and cache the top picks.
 
@@ -269,6 +326,7 @@ def refresh_openrouter_models_task() -> dict:
 
 # ── Stream tasks ───────────────────────────────────────────────────────────────
 
+@shared_task
 def fetch_prices_task() -> int:
     from django.conf import settings
     if not settings.STREAM_PRICES_ENABLED:
@@ -277,6 +335,7 @@ def fetch_prices_task() -> int:
     return run_stream('prices')
 
 
+@shared_task
 def fetch_notams_task() -> int:
     from django.conf import settings
     if not settings.STREAM_NOTAM_ENABLED:
@@ -285,6 +344,7 @@ def fetch_notams_task() -> int:
     return run_stream('notam')
 
 
+@shared_task
 def fetch_earthquakes_task() -> int:
     from django.conf import settings
     if not settings.STREAM_EARTHQUAKE_ENABLED:
@@ -293,6 +353,7 @@ def fetch_earthquakes_task() -> int:
     return run_stream('earthquakes')
 
 
+@shared_task
 def fetch_forex_task() -> int:
     from django.conf import settings
     if not settings.STREAM_FOREX_ENABLED:
@@ -303,6 +364,7 @@ def fetch_forex_task() -> int:
 
 # ── Health monitoring (A1 / A5) ─────────────────────────────────────────────────
 
+@shared_task
 def pipeline_health_task() -> dict:
     """Warn when pipeline outputs go stale. Logs only — surfaced via Sentry / log alerts.
 
@@ -358,6 +420,7 @@ def _weighted_top_n(weight: float | None, lo: int = 2, hi: int = 6) -> int:
     return round(lo + (w - 0.1) / 1.9 * (hi - lo))
 
 
+@shared_task(**_RETRY_KW)
 def backfill_history_task(
     start_date: datetime,
     end_date: datetime,
@@ -442,6 +505,7 @@ def _parse_backfill_date(value) -> datetime:
     return d.replace(tzinfo=dt_timezone.utc)
 
 
+@shared_task(**_RETRY_KW)
 def backfill_save_article_task(
     source_code: str,
     source_type: str,
@@ -485,6 +549,7 @@ def backfill_save_article_task(
 
 # ── Forecasting tasks (event-fused symbol prediction) ────────────────────────────
 
+@shared_task(**_RETRY_KW)
 def backfill_prices_task(
     symbols: list[str] | None = None, years: int = 10, full: bool = False,
 ) -> int:
@@ -499,6 +564,7 @@ def backfill_prices_task(
     return sum(results.values())
 
 
+@shared_task(**_RETRY_KW)
 def train_forecast_model_task() -> int:
     """Train the LightGBM classifier + regressor for every configured horizon."""
     from django.conf import settings
@@ -524,6 +590,7 @@ def train_forecast_model_task() -> int:
     return trained
 
 
+@shared_task
 def run_forecast_task() -> int:
     """Write one Forecast row per (panel symbol, horizon) from the latest models."""
     from django.conf import settings
@@ -558,6 +625,7 @@ def run_forecast_task() -> int:
 
 # ── Article importance scoring ────────────────────────────────────────────────
 
+@shared_task
 def score_articles_task(hours: int = 2, article_ids: list | None = None) -> int:
     """
     LLM-score articles that have no importance_score.
@@ -571,6 +639,7 @@ def score_articles_task(hours: int = 2, article_ids: list | None = None) -> int:
     return score_unscored_articles(hours=hours, article_ids=article_ids)
 
 
+@shared_task
 def cleanup_low_importance_articles_task() -> int:
     """
     Delete unprocessed low-importance articles older than ARTICLE_CLEANUP_GRACE_HOURS.
@@ -593,6 +662,7 @@ def cleanup_low_importance_articles_task() -> int:
     return deleted
 
 
+@shared_task
 def prune_stale_articles_task() -> int:
     """
     Delete processed articles that could never contribute to an event:
@@ -619,6 +689,7 @@ def prune_stale_articles_task() -> int:
     return deleted
 
 
+@shared_task
 def adjust_source_weights_task() -> int:
     """
     Nudge Source.weight based on 30-day event yield rate.
@@ -680,6 +751,7 @@ def adjust_source_weights_task() -> int:
     return adjusted
 
 
+@shared_task
 def score_forecasts_task() -> int:
     """Fill realized outcomes for forecasts whose horizon has elapsed."""
     from core import models as core_models

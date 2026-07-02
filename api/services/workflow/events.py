@@ -288,7 +288,7 @@ def pipeline_coverage() -> list[dict]:
     out.append({
         'stage': 'process', 'model': 'article', 'label': 'Unprocessed articles',
         'need': Article.objects.filter(processed_on__isnull=True).count(),
-        'action': 'process', 'error_sample': None,
+        'action': 'process', 'error_sample': _err_sample(Article, 'process'),
     })
     try:
         unlocated = (

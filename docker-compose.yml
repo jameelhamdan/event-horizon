@@ -64,7 +64,12 @@ services:
   worker-heavy:
     <<: *api-build
     restart: always
-    command: sh -c "python manage.py worker heavy --num-workers 2"
+    command: sh -c "celery -A app worker -Q heavy --concurrency=2 --pool=prefork -O fair -n heavy@%h"
+    environment:
+      # Celery's prefork pool forks per-task worker processes — safety default
+      # in case anything ever loads an HF tokenizer in the parent (its background
+      # thread pool can deadlock a forked child otherwise).
+      - TOKENIZERS_PARALLELISM=false
     depends_on:
       mongo:
         condition: service_started
@@ -78,7 +83,7 @@ services:
   worker-light:
     <<: *api-build
     restart: always
-    command: sh -c "python manage.py rqworker-pool default --num-workers 4"
+    command: sh -c "celery -A app worker -Q default --concurrency=4 --pool=prefork -O fair -n light@%h"
     depends_on:
       - mongo
       - redis
@@ -91,7 +96,7 @@ services:
   worker-bulk:
     <<: *api-build
     restart: always
-    command: sh -c "python manage.py rqworker-pool bulk --num-workers 1"
+    command: sh -c "celery -A app worker -Q bulk --concurrency=1 --pool=prefork -O fair -n bulk@%h"
     depends_on:
       - mongo
       - redis

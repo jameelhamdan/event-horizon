@@ -1,20 +1,33 @@
 """Dependency-light self-tests for services/queue.py — the enqueue() wrapper
 every task call site goes through, and its dev-mode synchronous fallback.
 
-No database, Redis, or RQ worker required — the TASK_QUEUE_ENABLED=True path
-mocks django_rq.get_queue() instead of hitting a real broker.
+No database, Redis, or Celery worker required — the TASK_QUEUE_ENABLED=True
+path mocks a fake Celery task's apply_async() instead of hitting a real
+broker, and every test disables TASK_RUN_TRACKING_ENABLED so enqueue()
+doesn't try to write a TaskRun row to a Mongo instance that isn't there.
 
 Run standalone:
     DJANGO_SETTINGS_MODULE=settings.base python -m tests.tests_queue
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from tests._runner import bootstrap_django, run
 
 bootstrap_django()
 
 from django.test import override_settings  # noqa: E402
+
+
+def _fake_task(fn):
+    """Wrap a plain function so it's callable directly (sync mode) and also
+    exposes a mocked apply_async() (async mode) — mirrors a @shared_task."""
+    task = MagicMock(side_effect=fn, name=fn.__name__)
+    task.name = fn.__name__
+    fake_result = MagicMock()
+    fake_result.id = 'fake-job-id'
+    task.apply_async.return_value = fake_result
+    return task, fake_result
 
 
 def test_enqueue_sync_mode_calls_function_directly():
@@ -26,95 +39,86 @@ def test_enqueue_sync_mode_calls_function_directly():
         calls.append((a, b, keyword))
         return a + b
 
-    with override_settings(TASK_QUEUE_ENABLED=False):
-        result = enqueue(fn, 1, 2, keyword='x', queue='heavy')
+    task, _ = _fake_task(fn)
+
+    with override_settings(TASK_QUEUE_ENABLED=False, TASK_RUN_TRACKING_ENABLED=False):
+        result = enqueue(task, 1, 2, keyword='x', queue='heavy')
 
     assert result == 3
     assert calls == [(1, 2, 'x')]
+    task.apply_async.assert_not_called()
 
 
-def test_enqueue_sync_mode_ignores_queue_and_retry_kwargs():
+def test_enqueue_sync_mode_ignores_queue_and_job_timeout_kwargs():
     from services.queue import enqueue
 
     def fn():
         return 'ok'
 
-    with override_settings(TASK_QUEUE_ENABLED=False):
-        # queue/job_timeout/retry/depends_on are RQ-only concerns; sync mode must
-        # not choke on them or forward them into the plain function call.
-        result = enqueue(fn, queue='heavy', job_timeout=-1, retry=object(), depends_on=object())
+    task, _ = _fake_task(fn)
+
+    with override_settings(TASK_QUEUE_ENABLED=False, TASK_RUN_TRACKING_ENABLED=False):
+        # queue/job_timeout are Celery-only concerns; sync mode must not choke
+        # on them or forward them into the plain function call.
+        result = enqueue(task, queue='heavy', job_timeout=-1)
 
     assert result == 'ok'
 
 
-def test_enqueue_async_mode_delegates_to_rq_queue():
+def test_enqueue_async_mode_delegates_to_apply_async():
     from services.queue import enqueue
 
     def fn(x):
         return x
 
-    fake_queue = MagicMock()
-    fake_queue.enqueue.return_value = 'fake-job'
+    task, fake_result = _fake_task(fn)
 
-    with override_settings(TASK_QUEUE_ENABLED=True):
-        with patch('services.queue.django_rq.get_queue', return_value=fake_queue) as get_queue:
-            result = enqueue(fn, 42, queue='heavy', job_timeout=-1)
+    with override_settings(TASK_QUEUE_ENABLED=True, TASK_RUN_TRACKING_ENABLED=False):
+        result = enqueue(task, 42, queue='heavy', job_timeout=-1)
 
-    get_queue.assert_called_once_with('heavy')
-    fake_queue.enqueue.assert_called_once_with(fn, 42, job_timeout=-1)
-    assert result == 'fake-job'
+    _, kwargs = task.apply_async.call_args
+    assert kwargs['args'] == (42,)
+    assert kwargs['queue'] == 'heavy'
+    # job_timeout=-1 means no cap — no time_limit kwarg passed through.
+    assert 'time_limit' not in kwargs
+    assert result is fake_result
 
 
-def test_enqueue_async_mode_passes_retry_and_depends_on():
+def test_enqueue_async_mode_applies_job_timeout():
     from services.queue import enqueue
 
-    fake_queue = MagicMock()
-    retry_obj = object()
-    depends_obj = object()
+    task, _ = _fake_task(lambda: None)
 
-    with override_settings(TASK_QUEUE_ENABLED=True):
-        with patch('services.queue.django_rq.get_queue', return_value=fake_queue):
-            enqueue(lambda: None, queue='default', retry=retry_obj, depends_on=depends_obj)
+    with override_settings(TASK_QUEUE_ENABLED=True, TASK_RUN_TRACKING_ENABLED=False):
+        enqueue(task, queue='default', job_timeout=120)
 
-    _, kwargs = fake_queue.enqueue.call_args
-    assert kwargs['retry'] is retry_obj
-    assert kwargs['depends_on'] is depends_obj
+    _, kwargs = task.apply_async.call_args
+    assert kwargs['time_limit'] == 120
 
 
-def test_make_retry_sync_mode_returns_none():
-    from services.queue import make_retry
-    with override_settings(TASK_QUEUE_ENABLED=False):
-        assert make_retry() is None
+def test_enqueue_async_mode_falls_back_to_queue_default_timeout():
+    from services.queue import enqueue
 
+    task, _ = _fake_task(lambda: None)
 
-def test_make_retry_async_mode_builds_rq_retry():
-    from services.queue import make_retry
-    with override_settings(TASK_QUEUE_ENABLED=True):
-        retry = make_retry(max_attempts=5, intervals=[10, 20])
-    assert retry is not None
-    assert retry.max == 5
-    assert retry.intervals == [10, 20]
+    with override_settings(
+        TASK_QUEUE_ENABLED=True, TASK_RUN_TRACKING_ENABLED=False,
+        CELERY_QUEUE_TIME_LIMITS={'default': 600, 'heavy': 600, 'bulk': None},
+    ):
+        enqueue(task, queue='bulk')  # no job_timeout given — bulk's default is None (no cap)
 
-
-def test_make_retry_async_mode_default_intervals():
-    from services.queue import make_retry
-    with override_settings(TASK_QUEUE_ENABLED=True):
-        retry = make_retry()
-    assert retry is not None
-    assert retry.max == 3
-    assert retry.intervals == [60, 300, 900]
+    _, kwargs = task.apply_async.call_args
+    assert 'time_limit' not in kwargs
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 _TESTS = [
     test_enqueue_sync_mode_calls_function_directly,
-    test_enqueue_sync_mode_ignores_queue_and_retry_kwargs,
-    test_enqueue_async_mode_delegates_to_rq_queue,
-    test_enqueue_async_mode_passes_retry_and_depends_on,
-    test_make_retry_sync_mode_returns_none,
-    test_make_retry_async_mode_builds_rq_retry,
-    test_make_retry_async_mode_default_intervals,
+    test_enqueue_sync_mode_ignores_queue_and_job_timeout_kwargs,
+    test_enqueue_async_mode_delegates_to_apply_async,
+    test_enqueue_async_mode_applies_job_timeout,
+    test_enqueue_async_mode_falls_back_to_queue_default_timeout,
 ]
 
 

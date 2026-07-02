@@ -82,6 +82,7 @@ class ArticleAnalysis:
     llm_data: dict            # raw parsed LLM response for storage in extra_data
     translations: dict        # i18n subdocument: {"en": {...}, "ar": {...}}
     llm_usage: dict           # {provider, model, prompt_tokens, completion_tokens, total_tokens}
+    error: str | None = None  # set when analysis fell back to _empty() — surfaced via mark_stage
 
 
 @functools.lru_cache(maxsize=1)
@@ -190,13 +191,14 @@ class ArticleAnalyzer:
         return self._llm
 
     @staticmethod
-    def _empty() -> ArticleAnalysis:
+    def _empty(error: str | None = None) -> ArticleAnalysis:
         return ArticleAnalysis(
             category='general', sub_category=None,
             country=None, city=None,
             latitude=None, longitude=None,
             intensity=0.0,
             llm_data={}, translations={}, llm_usage={},
+            error=error,
         )
 
     @staticmethod
@@ -265,13 +267,15 @@ class ArticleAnalyzer:
             data = self._loads(raw)
             if not isinstance(data, list):
                 data = [data]  # tolerate a bare object for a batch of one
-        except Exception:
+        except Exception as exc:
             logger.exception('ArticleAnalyzer._analyze_chunk failed (%d article(s))', len(texts))
-            return [self._empty() for _ in texts]
+            err = f'LLM analysis failed: {exc}'[:300]
+            return [self._empty(error=err) for _ in texts]
 
         per_article_usage = self._split_usage(usage, len(texts))
         results = [
-            self._parse_obj(data[i], per_article_usage[i]) if i < len(data) and isinstance(data[i], dict) else self._empty()
+            self._parse_obj(data[i], per_article_usage[i]) if i < len(data) and isinstance(data[i], dict)
+            else self._empty(error='LLM response missing/malformed result object for this article')
             for i in range(len(texts))
         ]
         if translate:

@@ -60,7 +60,6 @@ INSTALLED_APPS = [
     'api',
     'services',
     'tests',
-    'django_rq',
 ]
 
 MIDDLEWARE = [
@@ -223,6 +222,12 @@ CACHES = {
 
 TASK_QUEUE_ENABLED = config('TASK_QUEUE_ENABLED', default=False, cast=bool)
 
+# Persist a TaskRun row (core.models.TaskRun) for every enqueue() call — task
+# history/duration/error queryable in /admin/core/taskrun/. Off by default in
+# dependency-light unit tests (tests/tests_queue.py) that don't have Mongo
+# available — see services/queue.py.
+TASK_RUN_TRACKING_ENABLED = config('TASK_RUN_TRACKING_ENABLED', default=True, cast=bool)
+
 # ── Feature flags — gates both scheduling (api/crontab) and the task function itself.
 NEWSLETTER_ENABLED = config('NEWSLETTER_ENABLED', default=True, cast=bool)
 STREAM_PRICES_ENABLED = config('STREAM_PRICES_ENABLED', default=True, cast=bool)
@@ -278,12 +283,18 @@ GROQ_MODEL = 'llama-3.1-8b-instant'
 CEREBRAS_API_KEYS = config('CEREBRAS_API_KEYS', default='')
 CEREBRAS_MODEL = 'gemma-4-31b'
 
-LLM_TIMEOUT_SECONDS = 300
+# Per-request LLM timeout. Cloud providers (Groq/Cerebras) are fast-inference
+# chips — a stuck/degraded request should fail and fall back quickly rather
+# than eat a large chunk of the RQ job's own timeout. Was 300s; a hung
+# provider combined with multi-model fallback (see OpenAICompatLLMService)
+# could burn 25+ minutes on a single call and get SIGKILLed by the job
+# timeout mid-request instead of failing cleanly.
+LLM_TIMEOUT_SECONDS = 45
 # Ollama is last-resort and requests aren't batched. Timeouts scale with model
 # size since bigger models generate slower on CPU; OLLAMA_TIMEOUT_SECONDS is the
 # fallback when a tier isn't listed in OLLAMA_TIMEOUTS.
-OLLAMA_TIMEOUT_SECONDS = 60
-OLLAMA_TIMEOUTS = {'small': 30, 'medium': 60, 'large': 120}
+OLLAMA_TIMEOUT_SECONDS = 20
+OLLAMA_TIMEOUTS = {'small': 15, 'medium': 25, 'large': 45}
 
 # Routing: role -> provider name OR ordered fallback list (tried in order on failure).
 # Unconfigured providers are silently skipped; unknown roles fall back to 'default'.
@@ -315,27 +326,37 @@ FORECAST_HORIZONS_DAYS = [1, 5]    # trading-day horizons trained + served
 FORECAST_TRAIN_WINDOW_DAYS = 540
 FORECAST_ROUTER = 'rules'          # deterministic event→symbol routing (no LLM calls); tagged onto Event/Forecast.router_source
 
-# ── RQ / django-rq ────────────────────────────────────────────────────────────
+# ── Celery ────────────────────────────────────────────────────────────────────
 _REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')
-_JOB_TIMEOUT = 1800
+# Was 1800s (30 min). A stuck job (e.g. a hung LLM provider) doesn't fail fast —
+# it sits until this ceiling kills it, and the whole queue backs up behind it in
+# that increment. With the tightened LLM timeouts above, a single chunk's worst
+# case is well under 5 min, so 600s still leaves a comfortable margin while
+# cutting the cost of any future stuck job by 3x.
+_JOB_TIMEOUT = 600
 
-RQ_QUEUES = {
-    # Light queue — fast I/O tasks (fetchers, stream collectors)
-    'default': {
-        'URL': _REDIS_URL,
-        'DEFAULT_TIMEOUT': _JOB_TIMEOUT,
-    },
-    # Heavy queue — steady NLP / LLM tasks (processing, clustering, topic matching)
-    'heavy': {
-        'URL': _REDIS_URL,
-        'DEFAULT_TIMEOUT': _JOB_TIMEOUT,
-    },
-    # Bulk queue — long one-shot jobs (multi-year backfills, model training). Kept
-    # off the heavy queue so a hours-long job never blocks the live NLP pipeline.
-    'bulk': {
-        'URL': _REDIS_URL,
-        'DEFAULT_TIMEOUT': -1,
-    },
+# Task queue names (default/heavy/bulk) are selected per-call via enqueue(queue=...)
+# and run_task.py's HEAVY_TASKS/BULK_TASKS maps — no static CELERY_TASK_ROUTES needed.
+CELERY_BROKER_URL = _REDIS_URL
+CELERY_RESULT_BACKEND = None  # core.models.TaskRun is the source of truth for task history/status
+# pickle (not Celery's JSON default) — task args include datetime objects (start_date/
+# end_date, etc.) and previously relied on RQ's pickle-by-default serialization.
+CELERY_TASK_SERIALIZER = 'pickle'
+CELERY_RESULT_SERIALIZER = 'pickle'
+CELERY_ACCEPT_CONTENT = ['pickle', 'json']
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_ACKS_LATE = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TIMEZONE = 'UTC'
+
+# Per-queue default time limit (seconds) applied by enqueue() when a call doesn't
+# pass job_timeout explicitly — mirrors the old RQ_QUEUES DEFAULT_TIMEOUT split.
+# 'bulk' has no default cap (long one-shot backfills/training) so a job blocks
+# there, not on the live 'heavy'/'default' pipeline queues.
+CELERY_QUEUE_TIME_LIMITS = {
+    'default': _JOB_TIMEOUT,
+    'heavy': _JOB_TIMEOUT,
+    'bulk': None,
 }
 
 # Email — provider selection: 'ses' (AWS SES) or 'smtp' (Django SMTP / console)

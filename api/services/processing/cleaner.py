@@ -79,5 +79,6 @@ class ArticleCleaner:
                 llm_data=analysis.llm_data,
                 translations=analysis.translations,
                 llm_usage=analysis.llm_usage,
+                llm_error=analysis.error,
             ))
         return results

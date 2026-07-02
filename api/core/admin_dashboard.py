@@ -1,15 +1,15 @@
 """Server-rendered admin operations dashboard.
 
 A single page under ``/admin/dashboard/`` summarizing pipeline operations and
-offering POST actions. Data sources: ``api/crontab`` (upcoming runs), RQ
-StartedJobRegistry (in-flight), ``pipeline_coverage()`` (per-stage
-gaps), and forecast artifacts/rows. Registered via a ``get_urls`` shim in
-``core/admin.py``.
+offering POST actions. Data sources: ``api/crontab`` (upcoming runs), Celery's
+control API (in-flight, via ``app.control.inspect().active()``),
+``pipeline_coverage()`` (per-stage gaps), and forecast artifacts/rows.
+Registered via a ``get_urls`` shim in ``core/admin.py``.
 """
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from django.contrib import admin, messages
 from django.shortcuts import redirect, render
@@ -28,7 +28,10 @@ def _handle_action(request):
         if action == 'run_pipeline':
             enqueue(T.dispatch_fetch_task, queue='default')
             enqueue(T.dispatch_process_articles_task, queue='default')
-            enqueue(T.aggregate_events_task, queue='heavy', job_timeout=-1)
+            # Bounded (was -1/no cap) — an uncapped job that deadlocks has no
+            # watchdog at all and can sit in "started" forever with nothing to
+            # show for it. 1h covers a full 168h backlog aggregation with margin.
+            enqueue(T.aggregate_events_task, queue='heavy', job_timeout=3600)
             _ok(request, 'Pipeline dispatchers enqueued (fetch → process → aggregate).')
         elif action == 'backfill_prices':
             enqueue(T.backfill_prices_task, years=10, queue='bulk', job_timeout=-1)
@@ -125,18 +128,10 @@ def _handle_cancel(request):
     if not job_id:
         messages.error(request, 'No job id provided.')
         return
-    import django_rq
-    from rq.command import send_stop_job_command
-    from rq.job import Job
-    conn = django_rq.get_connection('default')
+    from app.celery import app as celery_app
     cancelled = False
     try:
-        send_stop_job_command(conn, job_id)  # stop if currently executing
-        cancelled = True
-    except Exception:  # noqa: BLE001 — not running; try registry cancel
-        pass
-    try:
-        Job.fetch(job_id, connection=conn).cancel()
+        celery_app.control.revoke(job_id, terminate=True, signal='SIGTERM')
         cancelled = True
     except Exception:  # noqa: BLE001
         pass
@@ -153,16 +148,21 @@ def _ok(request, msg):
 # ── Data gathering ───────────────────────────────────────────────────────────
 
 def _throughput():
-    """Queue depth per queue — shown in the throughput table."""
+    """Queue depth per queue — shown in the throughput table.
+
+    Celery's default Redis transport stores pending (unclaimed) task messages
+    as a Redis list keyed by queue name, so a plain LLEN gives the queue depth
+    without needing a result backend or app.control round-trip.
+    """
     try:
-        import django_rq
-        from rq.queue import Queue
-        conn = django_rq.get_connection('default')
+        import redis
+        from django.conf import settings
+        conn = redis.Redis.from_url(settings.CELERY_BROKER_URL)
         stats = {}
         for qname in ('default', 'heavy', 'bulk'):
-            q = Queue(qname, connection=conn)
+            depth = conn.llen(qname)
             stats[qname] = {
-                'today_items': q.count, 'today_runs': q.count, 'today_failed': 0,
+                'today_items': depth, 'today_runs': depth, 'today_failed': 0,
                 'yest_items': 0, 'yest_runs': 0, 'yest_failed': 0,
                 'last_success': None, 'last_error': '',
             }
@@ -194,24 +194,26 @@ def _crontab_entries():
 
 
 def _in_flight():
-    """Currently executing jobs from the RQ StartedJobRegistry."""
+    """Currently executing tasks, via Celery's control API (app.control.inspect().active())."""
     try:
-        import django_rq
-        from rq.job import Job
-        from rq.registry import StartedJobRegistry
-        conn = django_rq.get_connection('default')
+        import time
+        from app.celery import app as celery_app
+        active = celery_app.control.inspect().active() or {}
+        # Request.time_start is a monotonic-clock reading, not wall-clock — convert using
+        # this process's monotonic/wall-clock offset (containers on the same Docker host
+        # share CLOCK_MONOTONIC, so this is accurate across the api/worker containers).
+        now_wall, now_mono = datetime.now(timezone.utc), time.monotonic()
         running = []
-        for qname in ('default', 'heavy', 'bulk'):
-            for job_id in StartedJobRegistry(qname, connection=conn).get_job_ids():
-                try:
-                    job = Job.fetch(job_id, connection=conn)
-                    running.append({
-                        'task_name': job.func_name.split('.')[-1],
-                        'started_at': job.started_at,
-                        'job_id': job.id,
-                    })
-                except Exception:  # noqa: BLE001
-                    pass
+        for worker_tasks in active.values():
+            for t in worker_tasks:
+                started_at = None
+                if t.get('time_start') is not None:
+                    started_at = now_wall - timedelta(seconds=now_mono - t['time_start'])
+                running.append({
+                    'task_name': (t.get('name') or '').split('.')[-1],
+                    'started_at': started_at,
+                    'job_id': t.get('id'),
+                })
         return sorted(running, key=lambda x: x['started_at'] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)[:25]
     except Exception as exc:  # noqa: BLE001
         logger.debug('[dashboard] in_flight unavailable: %s', exc)

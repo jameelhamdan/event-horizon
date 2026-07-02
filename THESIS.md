@@ -140,7 +140,7 @@ geospatial product and a leakage-disciplined forecasting study.
 The system is a two-tier application: a Python backend (Django 6 + Django REST Framework) with a
 document store (MongoDB) and an in-memory broker (Redis), and a single-page React 19 / Vite
 frontend rendering a Leaflet map and a markets dashboard. Asynchronous work is executed by a
-task queue (`django-rq`) split across a *light* queue (fast I/O) and a *heavy* queue (NLP/LLM),
+task queue (Celery) split across a *light* queue (fast I/O) and a *heavy* queue (NLP/LLM),
 scheduled by a cron daemon.
 
 ```

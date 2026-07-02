@@ -85,7 +85,7 @@ class Command(BaseCommand):
         parser.add_argument('--require-flag', default=None,
                             help='Skip the run unless this settings flag is truthy')
         parser.add_argument('--job-timeout', type=int, default=None,
-                            help='RQ job timeout in seconds (-1 for no cap)')
+                            help='Celery task time limit in seconds (-1 for no cap)')
         parser.add_argument('--sync', action='store_true',
                             help='Run inline instead of enqueueing (debugging)')
 

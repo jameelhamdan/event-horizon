@@ -710,5 +710,6 @@ class ArticleFeatures:
     llm_data: dict          # raw LLM response — stored in article.extra_data['llm']
     translations: dict      # i18n subdocument — stored in article.translations
     llm_usage: dict         # {provider, model, prompt_tokens, completion_tokens, total_tokens}
+    llm_error: str | None = None  # set when LLM analysis fell back to empty — see mark_stage('process')
 
 

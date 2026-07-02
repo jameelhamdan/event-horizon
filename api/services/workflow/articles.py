@@ -153,7 +153,12 @@ def process_articles(
         article.translations = features.translations
         article.llm_usage = features.llm_usage
 
-        mark_stage(article, 'process', ok=True)
+        # ok=True here previously regardless of whether the LLM call actually
+        # succeeded, so a fully-failed analysis (silently falling back to
+        # category='general'/no location) looked identical to a real success
+        # in stage_status. Surface the real outcome so it shows up in
+        # pipeline_coverage()'s error_sample instead of hiding degraded data.
+        mark_stage(article, 'process', ok=features.llm_error is None, error=features.llm_error)
         mark_stage(article, 'geocode', ok=bool(features.location),
                    error=None if features.location else 'no location resolved')
 
