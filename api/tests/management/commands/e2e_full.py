@@ -25,7 +25,7 @@ existence, title dedup) now live in the dependency-light api/tests/tests_*.py su
 only for checks that genuinely need live MongoDB/network/LLM.
 
 Fan-out runs synchronously (this command forces ``TASK_QUEUE_ENABLED=False``) so the
-dispatcher → per-record worker path is fully covered without live RQ workers.
+dispatcher → per-record worker path is fully covered without live Celery workers.
 
 Hard checks (must pass) are local/deterministic; soft checks (WARN) depend on live
 network/LLM and won't fail the run when an environment is offline.
@@ -465,8 +465,8 @@ class Command(BaseCommand):
             c.hard('dashboard.throughput', isinstance(tp, dict))
             fs = dash._forecast_status()
             c.hard('dashboard.forecast_status', isinstance(fs, dict) and 'artifacts' in fs)
-            inflight = dash._in_flight()
-            c.hard('dashboard.in_flight', isinstance(inflight, list))
+            qs = dash._queue_summary()
+            c.hard('dashboard.queue_summary', isinstance(qs, list))
             # _upcoming reads api/crontab — soft (file may be missing in some envs).
             up = dash._upcoming()
             c.soft('dashboard.upcoming', isinstance(up, list))

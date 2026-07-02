@@ -8,7 +8,7 @@ class Command(BaseTaskCommand):
         parser.add_argument('--hours', type=int, default=168,
                             help='Lookback window in hours (default: 168 = 7 days)')
         parser.add_argument('--background', action='store_true',
-                            help='Enqueue as a background RQ task instead of running directly')
+                            help='Enqueue as a background Celery task instead of running directly')
 
     def handle(self, *args, **kwargs):
         task_kwargs = dict(hours=kwargs['hours'])

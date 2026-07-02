@@ -15,7 +15,7 @@ def _bootstrap_on_migrate(sender, **kwargs):
 
     The task is idempotent (cache flag + PriceBar-presence check), so calling it
     on every migrate is safe — it exits immediately if data is already present.
-    Enqueued via RQ when TASK_QUEUE_ENABLED=True; runs synchronously in dev.
+    Enqueued via Celery when TASK_QUEUE_ENABLED=True; runs synchronously in dev.
     Any error is swallowed so a missing Redis or import failure never blocks migrate.
     """
     try:

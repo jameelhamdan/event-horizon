@@ -18,7 +18,7 @@
     <form method="post" class="ops-actions" style="margin-top:8px">
       {% csrf_token %}
       <input type="hidden" name="dashboard_action" value="cancel_job">
-      <input type="text" name="job_id" placeholder="RQ job id" style="width:22em">
+      <input type="text" name="job_id" placeholder="Celery task id" style="width:22em">
       <button class="button" type="submit">Cancel job</button>
     </form>
     <form method="post" class="ops-actions" style="margin-top:8px">
@@ -37,16 +37,16 @@
       <thead><tr><th>Stage</th><th>Need reprocessing</th><th>Last error</th><th></th></tr></thead>
       <tbody>
       {% for c in coverage %}
-        <tr>
+        <tr{% if c.need and not c.action %} class="ops-informational"{% endif %}>
           <td>{{ c.label }}</td>
-          <td class="{% if c.need %}ops-warn{% endif %}">{{ c.need }}</td>
+          <td class="{% if c.need and c.action %}ops-warn{% elif c.need %}ops-muted{% endif %}">{{ c.need }}</td>
           <td class="ops-muted">{{ c.error_sample|default:"—" }}</td>
           <td>
-            {% if c.need %}
+            {% if c.need and c.action %}
             <form method="post" style="display:inline">
               {% csrf_token %}
               <input type="hidden" name="dashboard_action" value="reprocess">
-              <input type="hidden" name="stage" value="{{ c.stage }}">
+              <input type="hidden" name="stage" value="{{ c.action }}">
               <button class="button" type="submit">Reprocess</button>
             </form>
             {% endif %}
@@ -84,25 +84,6 @@
     </table>
   </section>
 
-  {# ── Crontab ──────────────────────────────────────────────────────── #}
-  <section class="ops-card">
-    <h2>Crontab (api/crontab)</h2>
-    <table class="ops-table">
-      <thead><tr><th>Schedule</th><th>Task</th><th>Command</th></tr></thead>
-      <tbody>
-      {% for e in crontab_entries %}
-        <tr>
-          <td class="ops-mono">{{ e.cron }}</td>
-          <td>{{ e.task }}</td>
-          <td class="ops-mono ops-muted">{{ e.command }}</td>
-        </tr>
-      {% empty %}
-        <tr><td colspan="3" class="ops-muted">No crontab entries found.</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </section>
-
   <div class="ops-grid">
     {# ── Upcoming runs ─────────────────────────────────────────────── #}
     <section class="ops-card">
@@ -123,19 +104,28 @@
       </table>
     </section>
 
-    {# ── In-flight ─────────────────────────────────────────────────── #}
+    {# ── Task queues ───────────────────────────────────────────────── #}
     <section class="ops-card">
-      <h2>In-flight</h2>
+      <h2>Task queues</h2>
       <table class="ops-table">
-        <thead><tr><th>Task</th><th>Started</th><th>Job id</th></tr></thead>
+        <thead><tr><th>Queue</th><th>Queued</th><th>Running</th><th>Failed (24h)</th></tr></thead>
         <tbody>
-        {% for r in in_flight %}
-          <tr><td>{{ r.task_name }}</td><td class="ops-muted">{{ r.started_at }}</td><td class="ops-muted">{{ r.job_id|default:"(sync)" }}</td></tr>
+        {% for q in queue_summary %}
+          <tr>
+            <td><a href="{{ q.all_url }}">{{ q.queue }}</a></td>
+            <td><a href="{{ q.queued_url }}">{{ q.queued }}</a></td>
+            <td><a href="{{ q.running_url }}">{{ q.running }}</a></td>
+            <td class="{% if q.failed %}ops-warn{% endif %}"><a href="{{ q.failed_url }}">{{ q.failed }}</a></td>
+          </tr>
         {% empty %}
-          <tr><td colspan="3" class="ops-muted">Nothing running.</td></tr>
+          <tr><td colspan="4" class="ops-muted">No queue data.</td></tr>
         {% endfor %}
         </tbody>
       </table>
+      <p class="ops-muted" style="margin:8px 0 0">
+        Individual tasks — args, result, status, retries, error/traceback — at
+        <a href="/admin/core/taskrun/">/admin/core/taskrun/</a>.
+      </p>
     </section>
   </div>
 
@@ -207,6 +197,7 @@
 .ops-ok { color:#5cb85c; }
 .ops-debounced { color:#e05252; font-weight:600; }
 .ops-mono { font-family: monospace; font-size: 11px; color:#aaa; }
+.ops-informational { opacity: 0.7; font-style: italic; }
 .ops-grid { display:grid; grid-template-columns: 1fr 1fr; gap:18px; }
 @media (max-width: 800px){ .ops-grid { grid-template-columns: 1fr; } }
 </style>

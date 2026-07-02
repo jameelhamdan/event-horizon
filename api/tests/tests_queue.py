@@ -10,7 +10,7 @@ Run standalone:
     DJANGO_SETTINGS_MODULE=settings.base python -m tests.tests_queue
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from tests._runner import bootstrap_django, run
 
@@ -96,6 +96,33 @@ def test_enqueue_async_mode_applies_job_timeout():
     assert kwargs['time_limit'] == 120
 
 
+def test_enqueue_async_mode_creates_task_run_before_apply_async():
+    """The TaskRun row must exist before the task can possibly start executing —
+    otherwise a fast/local worker could fire task_prerun/task_success before the
+    row exists, and those signal handlers (which look the row up by job_id)
+    would silently no-op, leaving the row stuck 'queued' forever. Regression
+    test for that ordering: _create_task_run() must run, and its job_id must
+    match the task_id apply_async() is actually given, before apply_async fires."""
+    from services import queue as queue_mod
+
+    task, _ = _fake_task(lambda: None)
+    order = []
+    task.apply_async.side_effect = lambda *a, **k: order.append(('apply_async', k.get('task_id')))
+
+    captured = {}
+
+    def fake_create_task_run(func, args, kwargs, queue, job_id=''):
+        order.append(('create_task_run', job_id))
+        captured['job_id'] = job_id
+
+    with override_settings(TASK_QUEUE_ENABLED=True):
+        with patch.object(queue_mod, '_create_task_run', side_effect=fake_create_task_run):
+            queue_mod.enqueue(task, queue='default')
+
+    assert [step for step, _ in order] == ['create_task_run', 'apply_async']
+    assert order[0][1] == order[1][1] == captured['job_id']
+
+
 def test_enqueue_async_mode_falls_back_to_queue_default_timeout():
     from services.queue import enqueue
 
@@ -118,6 +145,7 @@ _TESTS = [
     test_enqueue_sync_mode_ignores_queue_and_job_timeout_kwargs,
     test_enqueue_async_mode_delegates_to_apply_async,
     test_enqueue_async_mode_applies_job_timeout,
+    test_enqueue_async_mode_creates_task_run_before_apply_async,
     test_enqueue_async_mode_falls_back_to_queue_default_timeout,
 ]
 

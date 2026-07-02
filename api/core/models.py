@@ -640,27 +640,35 @@ class MarketSymbol(models.Model):
 
 class TaskRun(models.Model):
     """One recorded execution of a pipeline/stream task — the data source for the
-    admin operations dashboard's throughput stats and in-flight view. Written
-    centrally by the @tracked wrapper in services/queue.py, so every run is
-    recorded with no per-task boilerplate.
+    admin operations dashboard's throughput stats and the task browser (the
+    Django admin change list at /admin/core/taskrun/ doubles as our RQ-admin /
+    Flower equivalent). Written centrally by services/queue.py — enqueue() creates
+    the row, Celery's task_prerun/task_success/task_failure/task_retry/task_revoked
+    signals update it from the worker process — so every run is tracked with no
+    per-task boilerplate.
     """
 
     class Status(models.TextChoices):
+        QUEUED    = 'queued',    _('Queued')
         RUNNING   = 'running',   _('Running')
         SUCCESS   = 'success',   _('Success')
         FAILED    = 'failed',    _('Failed')
         CANCELLED = 'cancelled', _('Cancelled')
 
-    task_name   = models.CharField(max_length=128)
-    queue       = models.CharField(max_length=16, default='default')
-    status      = models.CharField(max_length=16, choices=Status.choices, default=Status.RUNNING)
-    started_at  = models.DateTimeField()
-    finished_at = models.DateTimeField(null=True, blank=True)
-    duration_ms = models.IntegerField(null=True, blank=True)
-    items       = models.IntegerField(null=True, blank=True)   # result count where applicable
-    error       = models.TextField(blank=True)
-    params      = models.JSONField(default=dict, blank=True)
-    job_id      = models.CharField(max_length=64, blank=True)  # RQ id, blank in sync mode
+    task_name    = models.CharField(max_length=128)
+    queue        = models.CharField(max_length=16, default='default')
+    status       = models.CharField(max_length=16, choices=Status.choices, default=Status.QUEUED)
+    started_at   = models.DateTimeField()  # enqueue time (or call time in sync mode)
+    picked_up_at = models.DateTimeField(null=True, blank=True)  # task_prerun — worker actually started it
+    finished_at  = models.DateTimeField(null=True, blank=True)
+    duration_ms  = models.IntegerField(null=True, blank=True)
+    items        = models.IntegerField(null=True, blank=True)   # result count where applicable
+    result       = models.JSONField(default=None, null=True, blank=True)  # safe-truncated return value
+    retries      = models.IntegerField(default=0)
+    error        = models.TextField(blank=True)
+    traceback    = models.TextField(blank=True)
+    params       = models.JSONField(default=dict, blank=True)
+    job_id       = models.CharField(max_length=64, blank=True)  # Celery task id, blank in sync mode
 
     objects = MongoManager()
 

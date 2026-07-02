@@ -163,12 +163,7 @@ LOGGING = {
             'level': 'DEBUG',
             'propagate': False,
         },
-        'rq': {
-            'handlers': ['api_handler'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'rq.worker': {
+        'celery': {
             'handlers': ['api_handler'],
             'level': 'INFO',
             'propagate': False,
@@ -285,7 +280,7 @@ CEREBRAS_MODEL = 'gemma-4-31b'
 
 # Per-request LLM timeout. Cloud providers (Groq/Cerebras) are fast-inference
 # chips — a stuck/degraded request should fail and fall back quickly rather
-# than eat a large chunk of the RQ job's own timeout. Was 300s; a hung
+# than eat a large chunk of the task's own time limit. Was 300s; a hung
 # provider combined with multi-model fallback (see OpenAICompatLLMService)
 # could burn 25+ minutes on a single call and get SIGKILLed by the job
 # timeout mid-request instead of failing cleanly.
@@ -339,8 +334,8 @@ _JOB_TIMEOUT = 600
 # and run_task.py's HEAVY_TASKS/BULK_TASKS maps — no static CELERY_TASK_ROUTES needed.
 CELERY_BROKER_URL = _REDIS_URL
 CELERY_RESULT_BACKEND = None  # core.models.TaskRun is the source of truth for task history/status
-# pickle (not Celery's JSON default) — task args include datetime objects (start_date/
-# end_date, etc.) and previously relied on RQ's pickle-by-default serialization.
+# pickle (not Celery's JSON default) — task args include datetime objects
+# (start_date/end_date, etc.), which JSON can't serialize natively.
 CELERY_TASK_SERIALIZER = 'pickle'
 CELERY_RESULT_SERIALIZER = 'pickle'
 CELERY_ACCEPT_CONTENT = ['pickle', 'json']
@@ -350,9 +345,8 @@ CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_TIMEZONE = 'UTC'
 
 # Per-queue default time limit (seconds) applied by enqueue() when a call doesn't
-# pass job_timeout explicitly — mirrors the old RQ_QUEUES DEFAULT_TIMEOUT split.
-# 'bulk' has no default cap (long one-shot backfills/training) so a job blocks
-# there, not on the live 'heavy'/'default' pipeline queues.
+# pass job_timeout explicitly. 'bulk' has no default cap (long one-shot backfills/
+# training) so a job blocks there, not on the live 'heavy'/'default' pipeline queues.
 CELERY_QUEUE_TIME_LIMITS = {
     'default': _JOB_TIMEOUT,
     'heavy': _JOB_TIMEOUT,

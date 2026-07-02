@@ -1,10 +1,12 @@
 """Server-rendered admin operations dashboard.
 
 A single page under ``/admin/dashboard/`` summarizing pipeline operations and
-offering POST actions. Data sources: ``api/crontab`` (upcoming runs), Celery's
-control API (in-flight, via ``app.control.inspect().active()``),
-``pipeline_coverage()`` (per-stage gaps), and forecast artifacts/rows.
-Registered via a ``get_urls`` shim in ``core/admin.py``.
+offering POST actions. Data sources: ``api/crontab`` (upcoming runs),
+``core.models.TaskRun`` (per-queue queued/running/failed counts, linking into
+the task browser at ``/admin/core/taskrun/`` for individual task detail —
+that's our RQ-admin / Flower equivalent), ``pipeline_coverage()`` (per-stage
+gaps), and forecast artifacts/rows. Registered via a ``get_urls`` shim in
+``core/admin.py``.
 """
 
 import logging
@@ -39,8 +41,7 @@ def _handle_action(request):
         elif action == 'backfill_articles':
             from datetime import datetime, timedelta, timezone as dt_timezone
             now = datetime.now(dt_timezone.utc)
-            enqueue(T.backfill_history_task, now - timedelta(days=14), now, None,
-                    queue='bulk', job_timeout=-1)
+            enqueue(T.backfill_history_task, now - timedelta(days=14), now, None, queue='bulk')
             _ok(request, 'Article backfill enqueued (weighted per-source, all sources).')
         elif action == 'backfill_articles_until':
             _handle_backfill_until(request)
@@ -68,7 +69,17 @@ def _handle_reprocess(request):
     from services import tasks as T
 
     stage = request.POST.get('stage', '')
-    if stage == 'geocode':
+    if stage == 'score':
+        from services.workflow.articles import unscored_unprocessed_articles
+        ids = list(
+            unscored_unprocessed_articles().values_list('id', flat=True)[:T.PROCESS_DISPATCH_LIMIT]
+        )
+        if ids:
+            enqueue(T.score_articles_task, article_ids=ids, queue='heavy')
+            _ok(request, f'Scoring enqueued for {len(ids)} unscored article(s).')
+        else:
+            _ok(request, 'No unscored articles to score.')
+    elif stage == 'geocode':
         n = enqueue(T.dispatch_process_articles_task, only_failed=True, queue='default')
         _ok(request, 'Re-dispatched processed-but-unlocated articles.')
     elif stage == 'process':
@@ -115,11 +126,10 @@ def _handle_backfill_until(request):
         if not m.Source.objects.filter(code=source_code).exists():
             messages.error(request, f'Source "{source_code}" not found.')
             return
-        enqueue(T.backfill_history_task, start_date, end_date, source_code, queue='bulk', job_timeout=-1)
+        enqueue(T.backfill_history_task, start_date, end_date, source_code, queue='bulk')
         _ok(request, f'Article backfill enqueued for "{source_code}" back to {until}.')
     else:
-        enqueue(T.backfill_history_task, start_date, end_date, None,
-                queue='bulk', job_timeout=-1)
+        enqueue(T.backfill_history_task, start_date, end_date, None, queue='bulk')
         _ok(request, f'Article backfill enqueued (all sources) back to {until}.')
 
 
@@ -182,41 +192,37 @@ def _upcoming():
         return []
 
 
-def _crontab_entries():
-    """Raw api/crontab entries in file order, with full command line — distinct
-    from _upcoming() (which sorts by soonest next-fire time)."""
+def _queue_summary():
+    """Per-queue queued/running/failed-today counts, each linking into the task
+    browser (/admin/core/taskrun/) filtered to that queue+status — replaces the
+    old ad hoc in-flight table now that individual tasks live in TaskRun admin."""
     try:
-        from core.utils.crontab_schedule import parse_entries
-        return parse_entries()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug('[dashboard] crontab entries unavailable: %s', exc)
-        return []
+        from django.urls import reverse
+        from core.models import TaskRun
 
-
-def _in_flight():
-    """Currently executing tasks, via Celery's control API (app.control.inspect().active())."""
-    try:
-        import time
-        from app.celery import app as celery_app
-        active = celery_app.control.inspect().active() or {}
-        # Request.time_start is a monotonic-clock reading, not wall-clock — convert using
-        # this process's monotonic/wall-clock offset (containers on the same Docker host
-        # share CLOCK_MONOTONIC, so this is accurate across the api/worker containers).
-        now_wall, now_mono = datetime.now(timezone.utc), time.monotonic()
-        running = []
-        for worker_tasks in active.values():
-            for t in worker_tasks:
-                started_at = None
-                if t.get('time_start') is not None:
-                    started_at = now_wall - timedelta(seconds=now_mono - t['time_start'])
-                running.append({
-                    'task_name': (t.get('name') or '').split('.')[-1],
-                    'started_at': started_at,
-                    'job_id': t.get('id'),
-                })
-        return sorted(running, key=lambda x: x['started_at'] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)[:25]
+        base = reverse('admin:core_taskrun_changelist')
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        rows = []
+        for q in ('default', 'heavy', 'bulk'):
+            counts = {}
+            for status in (TaskRun.Status.QUEUED, TaskRun.Status.RUNNING):
+                counts[status] = TaskRun.objects.filter(queue=q, status=status).count()
+            counts['failed'] = TaskRun.objects.filter(
+                queue=q, status=TaskRun.Status.FAILED, started_at__gte=cutoff,
+            ).count()
+            rows.append({
+                'queue': q,
+                'queued': counts[TaskRun.Status.QUEUED],
+                'queued_url': f'{base}?queue={q}&status={TaskRun.Status.QUEUED}',
+                'running': counts[TaskRun.Status.RUNNING],
+                'running_url': f'{base}?queue={q}&status={TaskRun.Status.RUNNING}',
+                'failed': counts['failed'],
+                'failed_url': f'{base}?queue={q}&status={TaskRun.Status.FAILED}',
+                'all_url': f'{base}?queue={q}',
+            })
+        return rows
     except Exception as exc:  # noqa: BLE001
-        logger.debug('[dashboard] in_flight unavailable: %s', exc)
+        logger.debug('[dashboard] queue_summary unavailable: %s', exc)
         return []
 
 
@@ -318,8 +324,7 @@ def dashboard_view(request):
         'title': 'Operations Dashboard',
         'throughput': _throughput(),
         'upcoming': _upcoming(),
-        'crontab_entries': _crontab_entries(),
-        'in_flight': _in_flight(),
+        'queue_summary': _queue_summary(),
         'coverage': coverage,
         'forecast': _forecast_status(),
         'llm_status': _llm_status(),

@@ -22,7 +22,12 @@ bootstrap_django()
 def test_key_backfill_checkpoint_shape():
     from services.cache import key_backfill_checkpoint
     key = key_backfill_checkpoint('2024-01-01', '2024-06-01')
-    assert key == 'pipeline:backfill:2024-01-01:2024-06-01:done'
+    assert key == 'pipeline:backfill:v2:2024-01-01:2024-06-01:done'
+
+
+def test_key_backfill_source_block_shape():
+    from services.cache import key_backfill_source_block
+    assert key_backfill_source_block('my-rss-feed') == 'pipeline:backfill:blocked:my-rss-feed'
 
 
 def test_key_llm_cycle_shape():
@@ -63,13 +68,14 @@ def test_all_key_builders_are_collision_free_by_prefix():
     so pipeline:* and llm:* keys can never collide with each other."""
     from services.cache import (
         KEY_ARTICLE_TITLE_DEDUP, KEY_BOOTSTRAP_INITIAL_DATA_DONE,
-        key_backfill_checkpoint, key_llm_cycle, key_llm_debounce,
+        key_backfill_checkpoint, key_backfill_source_block, key_llm_cycle, key_llm_debounce,
         key_llm_debounce_scan_pattern, key_llm_req_stat, key_llm_req_prefix,
     )
     sample_keys = [
         KEY_ARTICLE_TITLE_DEDUP,
         KEY_BOOTSTRAP_INITIAL_DATA_DONE,
         key_backfill_checkpoint('s', 'e'),
+        key_backfill_source_block('src'),
         key_llm_cycle('p', 'keys'),
         key_llm_debounce('p', 'h'),
         key_llm_debounce_scan_pattern('p'),
@@ -99,6 +105,49 @@ def test_cache_set_and_get_use_redis_cache_backend():
     fake_backend.get.assert_called_once_with('some:key')
 
 
+def test_blocklist_uses_redis_when_available():
+    from services import cache as cache_mod
+
+    fake_backend = MagicMock()
+    fake_caches = {'redis-cache': fake_backend}
+    bl = cache_mod.Blocklist()
+
+    with patch('django.core.cache.caches', fake_caches):
+        bl.block('some:key', ttl=30)
+        fake_backend.set.assert_called_once_with('some:key', 1, timeout=30)
+
+        fake_backend.get.return_value = 1
+        assert bl.is_blocked('some:key') is True
+
+
+def test_blocklist_falls_back_to_local_dict_when_redis_unavailable():
+    from services import cache as cache_mod
+
+    bl = cache_mod.Blocklist()
+    broken_caches = MagicMock()
+    broken_caches.__getitem__.side_effect = RuntimeError('no redis')
+
+    with patch('django.core.cache.caches', broken_caches):
+        bl.block('some:key', ttl=30)
+        assert bl.is_blocked('some:key') is True
+    assert bl.is_blocked('never:blocked') is False
+
+
+def test_redis_set_add_and_members():
+    from services import cache as cache_mod
+
+    fake_client = MagicMock()
+    fake_client.smembers.return_value = {b'a', b'b'}
+
+    with patch.object(cache_mod, 'get_redis_client', return_value=fake_client):
+        cache_mod.redis_set_add('some:set', 'a', ttl=60)
+        fake_client.sadd.assert_called_once_with('some:set', 'a')
+        fake_client.expire.assert_called_once_with('some:set', 60)
+
+        members = cache_mod.redis_set_members('some:set')
+    assert members == {'a', 'b'}
+
+
 def test_get_redis_client_uses_write_flag():
     from services import cache as cache_mod
 
@@ -118,6 +167,7 @@ def test_get_redis_client_uses_write_flag():
 
 _TESTS = [
     test_key_backfill_checkpoint_shape,
+    test_key_backfill_source_block_shape,
     test_key_llm_cycle_shape,
     test_key_llm_debounce_shape,
     test_key_llm_debounce_scan_pattern_is_a_glob,
@@ -126,6 +176,9 @@ _TESTS = [
     test_static_keys_are_namespaced,
     test_all_key_builders_are_collision_free_by_prefix,
     test_cache_set_and_get_use_redis_cache_backend,
+    test_blocklist_uses_redis_when_available,
+    test_blocklist_falls_back_to_local_dict_when_redis_unavailable,
+    test_redis_set_add_and_members,
     test_get_redis_client_uses_write_flag,
 ]
 

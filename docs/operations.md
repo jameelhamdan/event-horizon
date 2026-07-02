@@ -12,8 +12,8 @@ which dispatches jobs via `manage.py run_task`. `bootstrap_initial_data_task` is
 `PriceBar`-presence heuristic) and, on a fresh deployment, enqueues:
 
 - `backfill_prices_task` — daily OHLC for every active symbol
-- `backfill_all_sources_task` — top-10/week articles for every enabled RSS source over
-  `BOOTSTRAP_ARTICLE_YEARS` (default 1y)
+- `backfill_history_task` — dispatches the article backfill (see the fan-out table
+  below) for every enabled RSS source over `BOOTSTRAP_ARTICLE_YEARS` (default 1y)
 - `train_forecast_model_task` + `run_forecast_task`
 
 To re-run it manually: the admin dashboard **Re-run bootstrap** button (forces past the
@@ -32,6 +32,7 @@ enqueues one worker job per record/chunk, runs on the `default` queue) and idemp
 | `dispatch_process_articles_task` | `process_article_task(id)` / `process_articles_chunk_task(ids)` |
 | `dispatch_tag_topics_task` | `tag_events_chunk_task(event_ids)` (chunks of 10) |
 | `dispatch_route_events_task` | `route_events_chunk_task(event_ids)` (chunks of 10) |
+| `backfill_history_task` | `backfill_day_chunk_task(day, source_codes)` (one day × `BACKFILL_CHUNK_SIZE` sources — fetches, saves, and NLP-processes inline; see `services/data/historical.py`) |
 
 Scale throughput by adding `worker-heavy` replicas in `docker-compose.yml` (no code
 change). Tuning env vars: `PROCESS_CHUNK_SIZE`, `PROCESS_DISPATCH_LIMIT`,
@@ -65,11 +66,12 @@ plus a sample error — the data behind the dashboard's coverage panel.
 
 - **Throughput** — per-task item/run counts for today/yesterday from `TaskRun`, last
   success time, last error. Every run (scheduled, dispatched, or per-record) is recorded
-  by the `_execute_tracked` wrapper in `services/queue.py`.
+  by `enqueue()` + Celery signal handlers in `services/queue.py`.
 - **Pipeline coverage** — per-stage "N need reprocessing" + last error, each with a
   **Reprocess** button that re-dispatches only the stuck records.
 - **Upcoming runs** — next scheduled time per task (from `api/crontab`).
-- **In-flight** — currently `running` `TaskRun`s.
+- **Task queues** — per-queue queued/running/failed-today counts, linking into the
+  task browser.
 - **Forecast model** — artifact mtimes, last forecast, live directional accuracy.
 - **Actions** — run full sync, backfill prices/articles, retrain forecast, re-run
   bootstrap, and **cancel a job** by Celery task id (`app.control.revoke`).
@@ -77,3 +79,13 @@ plus a sample error — the data behind the dashboard's coverage panel.
 Per-record reprocessing is also available from the `Article`/`Event` changelists: the
 **"pipeline gap"** filter narrows to records stuck at a stage, and bulk actions
 re-enqueue them (`Reprocess selected`, `Re-tag selected`, `Re-route selected`).
+
+## Task browser (RQ-admin / Flower equivalent)
+
+`/admin/core/taskrun/` — every enqueued task (queued, running, succeeded, failed,
+cancelled), with args/kwargs (`params`), return value (`result`), retry count,
+and error/traceback. Filter by status/queue/task name; the **"Cancel selected"**
+admin action revokes queued or running tasks. `TaskRun` rows are created by
+`enqueue()` at dispatch time and updated by Celery's `task_prerun`/`task_success`/
+`task_failure`/`task_retry`/`task_revoked` signal handlers in `services/queue.py`
+as the task moves through its lifecycle.

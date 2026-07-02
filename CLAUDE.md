@@ -111,7 +111,7 @@ Tasks are Celery tasks (`@shared_task`) in `services/tasks.py` and `newsletter/t
 Three queues:
 - `default` — light I/O (fetchers, stream collectors, fan-out dispatchers) — 4 workers
 - `heavy` — NLP/LLM work (processing, clustering, topic matching, newsletters) — 2 workers (`celery -A app worker -Q heavy`); ML models load lazily per job, no preloading
-- `bulk` — long one-shot jobs (multi-year backfills, model training) — 1 worker
+- `bulk` — long one-shot jobs and pure dispatchers (price backfills, model training, the historical-article backfill dispatcher — its actual per-day-chunk fetch/save/process work runs on `heavy`, bounded to ~10min per chunk) — 1 worker
 
 The crontab (`api/crontab`, run by supercronic in the `api` container) dispatches everything via `manage.py run_task <task_name>`. To manually trigger any cron job locally: `python manage.py run_task <task_name> --sync`.
 
@@ -172,4 +172,4 @@ React 19 + Vite SPA at `ui/`. All files are `.tsx`/`.ts` — never `.jsx`/`.js`.
 
 ### Admin
 
-- Django admin at `/admin/`; custom operations dashboard at `/admin/dashboard/` (pipeline status, manual triggers, in-flight/queue-depth tables backed by Celery's `app.control` API).
+- Django admin at `/admin/`; custom operations dashboard at `/admin/dashboard/` (pipeline status, manual triggers, per-queue queued/running/failed counts from `TaskRun`). Individual tasks — args, result, status, retries, error/traceback — are browsable at `/admin/core/taskrun/`.

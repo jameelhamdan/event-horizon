@@ -1,12 +1,15 @@
 """
 Backfill top-N historical articles per day window, across one or all RSS sources.
 
-Each day window is fetched for every requested source via the sitemap-based
-RSSHistoricalService, capped per-source by recency, merged, cross-source
-title-deduped, and saved via Article.objects.get_or_create — fully idempotent.
-Saved articles are NOT pre-scored or NLP-processed here; they land exactly
-like live-fetched articles (importance_score left NULL) so the normal
-score_articles_task / dispatch_process_articles_task cron jobs pick them up.
+This command's ``backfill_history_task`` dispatches one ``backfill_day_chunk_task``
+per (day, source-chunk) pair — each fetches its sources' sitemaps for that single
+day via RSSHistoricalService, cross-source title-dedups within its chunk, saves via
+Article.objects.get_or_create (idempotent), and then immediately runs NLP
+processing (services.workflow.articles.process_articles) on the newly-saved
+articles — see services/data/historical.py's module docstring for the full
+fetch→save→process chain and its chunking trade-offs. Importance *scoring* is
+still picked up by the normal score_articles_task cron (via created_on), same as
+live-fetched articles.
 
 Examples:
 
@@ -19,22 +22,20 @@ Examples:
         --start-date 2023-06-01 --end-date 2023-12-31 \\
         --top-n 3 --dry-run
 
-    # Resume an interrupted run (checkpoint stored in Django cache)
+    # Resume an interrupted run (checkpoint stored in Redis, keyed by date range)
     python manage.py backfill_history \\
         --start-date 2022-01-01 --end-date 2025-01-01 --resume
 
     # Backfill from today backward until a specific date (no --end-date needed)
     python manage.py backfill_history my_rss_feed --until 2022-01-01
 
-    # Enqueue as a background RQ job (heavy queue, no timeout) — for long runs
+    # Enqueue as a background Celery job — for long runs
     python manage.py backfill_history \\
         --start-date 2022-01-01 --end-date 2025-01-01 --background
 
-After a backfill, articles are picked up automatically by the normal cron
-schedule (score_articles_task, dispatch_process_articles_task). To force it
-immediately:
+After a backfill, articles already have NLP processing done; importance scoring
+still happens on the normal score_articles_task cron. To force it immediately:
     python manage.py run_task score_articles_task --sync
-    python manage.py process_articles --limit <N>
 """
 import datetime
 
@@ -100,12 +101,11 @@ class Command(BaseTaskCommand):
         parser.add_argument(
             '--resume',
             action='store_true',
-            help='Skip days already completed; checkpoint stored in Django cache',
+            help='Skip (day, source-chunk) pairs already completed; checkpoint stored in Redis',
         )
         parser.add_argument(
             '--background', action='store_true',
-            help='Enqueue as a background RQ task (heavy queue, no timeout) instead '
-                 'of running directly',
+            help='Enqueue the dispatcher as a background Celery task instead of running directly',
         )
 
     def handle(self, *args, **kwargs):
@@ -157,19 +157,19 @@ class Command(BaseTaskCommand):
                 self.stderr.write(self.style.ERROR(f'Source "{source_code}" not found.'))
                 return
 
-        # ── Background: enqueue and return ────────────────────────────────────
+        # ── Background: enqueue the dispatcher and return ───────────────────────
         if kwargs['background']:
             if dry_run:
                 self.stderr.write(self.style.ERROR('--dry-run cannot be combined with --background.'))
                 return
             from services.queue import enqueue
-            # bulk queue + no timeout (-1): multi-year / multi-source backfills outlast
-            # the 30-min cap and must not block the live NLP pipeline on the heavy queue.
+            # backfill_history_task is a pure dispatcher (fans out bounded per-day-chunk
+            # workers on the heavy queue) — cheap enough not to need job_timeout=-1.
             enqueue(
                 backfill_history_task,
                 start_date, end_date, source_code,
                 top_n=top_n, delay_seconds=delay, resume=resume,
-                queue='bulk', job_timeout=-1,
+                queue='bulk',
             )
             label = f'all enabled RSS sources ({count})' if all_sources else f'"{source_code}"'
             self.stdout.write(self.style.SUCCESS(
@@ -206,15 +206,27 @@ class Command(BaseTaskCommand):
         )
         self.stdout.write('')
 
-        def progress(result):
+        # Foreground = TASK_QUEUE_ENABLED=False, so every backfill_day_chunk_task the
+        # dispatcher enqueues actually runs synchronously right there and its result
+        # dict flows back through enqueue() to this callback — one line per (day,
+        # source-chunk), the real unit of work now (was one line per day).
+        totals = {'fetched': 0, 'saved': 0, 'processed': 0, 'chunks': 0}
+
+        def progress(result: dict):
+            totals['fetched'] += result['fetched']
+            totals['saved'] += result['saved']
+            totals['processed'] += result['processed']
+            totals['chunks'] += 1
+            sources_label = ','.join(result['sources'])
             line = (
-                f'  {result.day.date()}  '
-                f'candidates={result.fetched:>4}  '
-                f'saved={result.saved:>3}'
+                f'  {result["day"]}  [{sources_label}]  '
+                f'candidates={result["fetched"]:>4}  '
+                f'saved={result["saved"]:>3}  '
+                f'processed={result["processed"]:>3}'
             )
-            if result.fetched == 0:
+            if result['fetched'] == 0:
                 self.stdout.write(self.style.WARNING(line + '  (no candidates)'))
-            elif result.saved == 0 and not dry_run:
+            elif result['saved'] == 0 and not dry_run:
                 self.stdout.write(self.style.WARNING(line + '  (all already imported)'))
             else:
                 self.stdout.write(line)
@@ -228,18 +240,18 @@ class Command(BaseTaskCommand):
         self.stdout.write('')
         line = (
             f'Done.  {summary["sources"]} source(s) | {summary["days"]} days | '
-            f'{summary["fetched"]} candidates | {summary["saved"]} articles saved'
+            f'{totals["chunks"]} chunk(s) | {totals["fetched"]} candidates | '
+            f'{totals["saved"]} articles saved | {totals["processed"]} processed'
         )
         if dry_run:
             line += '  (dry run — nothing written)'
         self.stdout.write(self.style.SUCCESS(line))
 
-        if not dry_run and summary['saved'] > 0:
+        if not dry_run and totals['saved'] > 0:
             self.stdout.write(
-                '\n  New articles are picked up automatically by the normal cron '
-                'schedule (scoring, then NLP processing). To force it now:\n'
-                '  python manage.py run_task score_articles_task --sync\n'
-                f'  python manage.py process_articles --limit {summary["saved"] + 200}'
+                '\n  Articles are saved and NLP-processed already. Importance scoring '
+                'still runs on the normal cron. To force it now:\n'
+                '  python manage.py run_task score_articles_task --sync'
             )
 
 

@@ -268,9 +268,13 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
 def pipeline_coverage() -> list[dict]:
     """Per-stage count of records stuck at a step + a sample error.
 
-    Returns one dict per stage: {stage, model, label, need, action, error_sample}
-    where need is the number of records that reached the previous stage but not
-    this one, and action is the dashboard Reprocess button's action key.
+    Returns one dict per row: {stage, model, label, need, action, error_sample}.
+    ``stage`` identifies the row; ``action`` is the value posted to
+    admin_dashboard._handle_reprocess's ``stage`` param when the Reprocess
+    button is clicked, or None for an informational row with no button (e.g.
+    "unprocessed because of a deliberate importance-score cutoff" — clicking
+    Reprocess there wouldn't do anything, since the same filter excludes them
+    from the normal dispatcher too).
     """
     from core.models import Article, Event
 
@@ -285,10 +289,37 @@ def pipeline_coverage() -> list[dict]:
 
     out: list[dict] = []
 
+    # "Unprocessed" conflates three different situations, only one of which the
+    # 'process' action actually fixes — dispatch_process_articles_task's own
+    # selection query excludes scored-but-below-threshold articles (via
+    # _apply_min_score_filter) but lets unscored ones through once they're
+    # scored. Split so the count and the button's effect match:
+    from django.conf import settings
+    from services.workflow.articles import unscored_unprocessed_articles
+    unprocessed = Article.objects.filter(processed_on__isnull=True)
+    unscored_count = unscored_unprocessed_articles().count()
+    min_score = getattr(settings, 'ARTICLE_MIN_IMPORTANCE_TO_PROCESS', 0)
+    low_score_count = (
+        unprocessed.filter(importance_score__isnull=False, importance_score__lt=min_score).count()
+        if min_score > 0 else 0
+    )
+    process_error = _err_sample(Article, 'process')
+
     out.append({
-        'stage': 'process', 'model': 'article', 'label': 'Unprocessed articles',
-        'need': Article.objects.filter(processed_on__isnull=True).count(),
-        'action': 'process', 'error_sample': _err_sample(Article, 'process'),
+        'stage': 'unscored', 'model': 'article', 'label': 'Unprocessed & unscored',
+        'need': unscored_count, 'action': 'score', 'error_sample': None,
+    })
+    out.append({
+        'stage': 'low_score', 'model': 'article',
+        'label': 'Unprocessed, below importance threshold (by design)',
+        # No action — these are permanently excluded from the normal dispatcher
+        # by the same filter it uses, so "Reprocess" would be a no-op here.
+        'need': low_score_count, 'action': None, 'error_sample': None,
+    })
+    out.append({
+        'stage': 'process', 'model': 'article', 'label': 'Unprocessed & eligible (awaiting dispatch)',
+        'need': unprocessed.count() - unscored_count - low_score_count,
+        'action': 'process', 'error_sample': process_error,
     })
     try:
         unlocated = (
@@ -299,7 +330,11 @@ def pipeline_coverage() -> list[dict]:
         unlocated = Article.objects.filter(processed_on__isnull=False, location__isnull=True).count()
     out.append({
         'stage': 'geocode', 'model': 'article', 'label': 'Processed but un-located',
-        'need': unlocated, 'action': 'reprocess_unlocated',
+        # action == 'geocode', matching admin_dashboard._handle_reprocess's stage key
+        # (not the row's own 'stage' identity) — previously this said 'reprocess_unlocated',
+        # which _handle_reprocess never checked for; the template posted c.stage, not
+        # c.action, so it worked by accident. Now the template posts c.action directly.
+        'need': unlocated, 'action': 'geocode',
         'error_sample': _err_sample(Article, 'geocode'),
     })
     try:

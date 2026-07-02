@@ -5,11 +5,13 @@ docker-compose.yml). ``on_after_finalize`` fires once, at worker startup
 (accessing ``app.tasks`` auto-finalizes), before any task is consumed —
 importing services.tasks/newsletter.tasks here registers every
 ``@shared_task``. Critically, it also imports ``services.queue``: that
-module's ``task_success``/``task_failure`` signal handlers (which finalize
-TaskRun rows) must be registered *before* the first task completes in this
-process. Many leaf tasks (no fan-out) never import services.queue themselves,
-so relying on a lazy in-task import would leave TaskRun rows stuck 'running'
-for those tasks in a fresh worker process.
+module's task lifecycle signal handlers (task_prerun/task_success/
+task_failure/task_retry/task_revoked, which drive TaskRun's status —
+queued/running/success/failed/cancelled) must be registered *before* the
+first task runs in this process. Many leaf tasks (no fan-out) never import
+services.queue themselves, so relying on a lazy in-task import would leave
+TaskRun rows stuck 'queued'/'running' for those tasks in a fresh worker
+process.
 """
 import os
 

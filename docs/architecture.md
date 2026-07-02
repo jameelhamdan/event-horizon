@@ -71,9 +71,11 @@ Work is split by cost, not by feature:
 - **`heavy`** — anything CPU- or LLM-bound: `process_articles` (LLM + local NER/VADER/
   FinBERT/translation), `aggregate_events`, topic tagging (local embeddings) /
   discovery (LLM), `run_forecast`, `score_forecasts`, `train_forecaster`, newsletter
-  generation (LLM).
-- **`bulk`** — long one-shot jobs: `backfill_all_sources_task`, `backfill_prices_task`,
-  `bootstrap_initial_data_task`.
+  generation (LLM), `backfill_day_chunk_task` (one day × a few sources — fetch, save,
+  process, bounded to the queue's ~10min default time limit).
+- **`bulk`** — long one-shot jobs / pure dispatchers: `backfill_history_task`
+  (dispatches `backfill_day_chunk_task` onto `heavy`, does no fetching itself),
+  `backfill_prices_task`, `bootstrap_initial_data_task`.
 
 `enqueue(fn, queue='heavy', ...)` selects the queue. When `TASK_QUEUE_ENABLED=False`
 (dev default) `enqueue()` calls the function **synchronously** — no Redis or worker
@@ -89,9 +91,10 @@ flowchart TB
         H1[process_articles<br/>+ FinBERT] --- H2[aggregate_events]
         H3[tag_topics / discover_topics] --- H4[run_forecast / score_forecasts]
         H5[train_forecaster] --- H6[generate_newsletter]
+        H7[backfill_day_chunk_task]
     end
-    subgraph BULK["bulk queue · worker-bulk · long one-shot jobs"]
-        B1[backfill_all_sources_task] --- B2[backfill_prices_task]
+    subgraph BULK["bulk queue · worker-bulk · long one-shot jobs / dispatchers"]
+        B1[backfill_history_task<br/>dispatcher only] --- B2[backfill_prices_task]
         B3[bootstrap_initial_data_task]
     end
 ```

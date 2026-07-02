@@ -1,4 +1,5 @@
 import datetime
+import logging
 
 from django.contrib import admin, messages
 from django.shortcuts import redirect
@@ -6,6 +7,8 @@ from import_export import resources
 from import_export.admin import ImportExportModelAdmin
 
 from . import models
+
+logger = logging.getLogger(__name__)
 
 
 class ImportanceFilter(admin.SimpleListFilter):
@@ -160,7 +163,8 @@ class SourceAdmin(ImportExportModelAdmin):
 
         days = (end_date - start_date).days
 
-        # Backfills can run for hours on multi-year ranges — use unlimited timeout.
+        # backfill_history_task is a pure dispatcher (fans out bounded per-day-chunk
+        # workers on the heavy queue) — cheap enough not to need job_timeout=-1.
         enqueue(
             backfill_history_task,
             start_date,
@@ -168,7 +172,6 @@ class SourceAdmin(ImportExportModelAdmin):
             source_code,
             top_n,
             queue="bulk",
-            job_timeout=-1,
         )
         self.message_user(
             request,
@@ -495,19 +498,52 @@ class MarketSymbolAdmin(ImportExportModelAdmin):
 
 @admin.register(models.TaskRun)
 class TaskRunAdmin(admin.ModelAdmin):
+    """The task browser — individual tasks with args/kwargs, result, status,
+    retries, and error/traceback. Our RQ-admin / Flower equivalent, backed by
+    TaskRun rows that services/queue.py's enqueue() + Celery signal handlers
+    keep up to date (see core/models.py::TaskRun and services/queue.py)."""
+
     list_display = [
-        "task_name", "queue", "status", "items", "duration_ms",
-        "started_at", "finished_at", "job_id",
+        "task_name", "queue", "status", "retries", "result_preview", "duration_ms",
+        "started_at", "picked_up_at", "finished_at", "job_id",
     ]
     list_filter = ["status", "queue", "task_name"]
     search_fields = ["task_name", "job_id", "error"]
     readonly_fields = [
-        "task_name", "queue", "status", "started_at", "finished_at",
-        "duration_ms", "items", "error", "params", "job_id",
+        "task_name", "queue", "status", "started_at", "picked_up_at", "finished_at",
+        "duration_ms", "items", "result", "retries", "error", "traceback", "params", "job_id",
     ]
+    actions = ["cancel_selected"]
+    ordering = ["-started_at"]
 
     def has_add_permission(self, request):
         return False
+
+    @admin.display(description="Result")
+    def result_preview(self, obj):
+        if obj.result is None:
+            return "—"
+        text = str(obj.result)
+        return text if len(text) <= 60 else text[:60] + "…"
+
+    @admin.action(description="Cancel selected (queued/running)")
+    def cancel_selected(self, request, queryset):
+        from app.celery import app as celery_app
+
+        targets = queryset.filter(status__in=[models.TaskRun.Status.QUEUED, models.TaskRun.Status.RUNNING])
+        job_ids = [run.job_id for run in targets if run.job_id]
+        if not job_ids:
+            self.message_user(request, "Cancel requested for 0 task(s).")
+            return
+        try:
+            # revoke() accepts a list — one control-bus broadcast for the whole
+            # selection instead of one round trip per row.
+            celery_app.control.revoke(job_ids, terminate=True, signal="SIGTERM")
+            cancelled = len(job_ids)
+        except Exception:  # noqa: BLE001
+            logger.exception("[admin] failed to revoke tasks %s", job_ids)
+            cancelled = 0
+        self.message_user(request, f"Cancel requested for {cancelled} task(s).")
 
 
 @admin.register(models.StaticPoint)

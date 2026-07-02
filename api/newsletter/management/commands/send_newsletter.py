@@ -16,7 +16,7 @@ class Command(BaseCommand):
         parser.add_argument(
             '--background',
             action='store_true',
-            help='Enqueue as a background RQ task instead of running in the foreground.',
+            help='Enqueue as a background Celery task instead of running in the foreground.',
         )
 
     def handle(self, *args, **options):

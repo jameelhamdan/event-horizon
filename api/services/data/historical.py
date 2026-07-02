@@ -1,5 +1,6 @@
 """
-Historical backfill — fetch top-N articles per day window across sources.
+Historical backfill — fetch top-N articles for a single day window across a
+(usually small) set of sources.
 
 Strategy (per source type):
 
@@ -11,14 +12,38 @@ Strategy (per source type):
     available, otherwise inferred from the URL slug.
 
 Candidates are capped per source by recency (no LLM scoring at discovery
-time — that's deferred to the normal live-pipeline scoring/processing
-tasks). HistoricalBackfillService iterates day windows, fetches every
-requested source within each window, de-dupes across sources using the
-same title-similarity filter as the live fetch path, and saves via
-Article.objects.get_or_create — fully idempotent. Saved articles are
-indistinguishable from live ones except for extra_data['backfill_day'];
-score_articles_task and dispatch_process_articles_task pick them up on
-their normal schedule.
+time). HistoricalBackfillService.fetch_and_save_day() fetches every requested
+source for ONE day window, de-dupes across those sources using the same
+title-similarity filter the live fetch path uses, fetches each new article's
+body inline, and saves via Article.objects.get_or_create — fully idempotent.
+Saved articles are indistinguishable from live ones except for
+extra_data['backfill_day'].
+
+Multi-day iteration and NLP processing are NOT this module's job — they live
+in services.tasks.backfill_history_task (dispatcher: enumerates day windows ×
+source chunks) and backfill_day_chunk_task (worker: calls fetch_and_save_day
+then services.workflow.articles.process_articles on the new ids), so that
+each Celery task stays bounded to one day × a handful of sources instead of a
+whole multi-year range.
+
+Two trade-offs from that chunking, accepted deliberately rather than solved:
+  - Cross-source title-dedup only sees the sources in one chunk (a source's
+    caller decides chunk membership), not every source for that day — a
+    near-duplicate story from two sources in *different* chunks on the same
+    day won't be caught. URL-level idempotency (get_or_create) still prevents
+    literal duplicate saves.
+  - Per-article body-fetch parallelism (previously one Celery job per
+    article, fanned out across worker-light) is now inline within each day
+    window's fetch — parallelism instead comes from many day-window tasks
+    running concurrently across the heavy queue.
+
+Source timeout handling: a source that times out (robots.txt, sitemap, or
+article-body fetch) is blocklisted for _SOURCE_BLOCK_TTL_SECONDS via the
+shared services.cache.Blocklist (same mechanism services.llm's 429 debounce
+uses) — see _is_source_blocked/_block_source below. Blocked sources are
+skipped with zero further HTTP calls until the block expires, including
+mid-recursion through a sitemap index, so one dead source can't burn the
+whole task's time budget one candidate URL at a time.
 """
 import datetime
 import html as _html
@@ -26,18 +51,35 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterator, TYPE_CHECKING
 from urllib.parse import urlparse
 
 import requests
 
+from services.cache import Blocklist, key_backfill_source_block
 from services.data.base import ArticleDatum, ClientServiceException
 
 if TYPE_CHECKING:
     import core.models
 
 logger = logging.getLogger(__name__)
+
+# ── Source timeout blocklist ──────────────────────────────────────────────────
+_SOURCE_BLOCK_TTL_SECONDS = 1800  # 30 min "temp blocked" cooldown after a timeout
+_source_blocklist = Blocklist()
+
+
+def _is_source_blocked(source_code: str) -> bool:
+    return _source_blocklist.is_blocked(key_backfill_source_block(source_code))
+
+
+def _block_source(source_code: str, reason: str) -> None:
+    logger.warning(
+        'Backfill source %r timed out (%s) — blocking for %ds',
+        source_code, reason, _SOURCE_BLOCK_TTL_SECONDS,
+    )
+    _source_blocklist.block(key_backfill_source_block(source_code), _SOURCE_BLOCK_TTL_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -47,8 +89,12 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DayResult:
     day: datetime.datetime
-    fetched: int   # total candidates collected across all sources for this day
-    saved: int     # backfill_save_article_task jobs enqueued (≈ new Articles)
+    fetched: int                      # total candidates collected across the given sources
+    saved_ids: list = field(default_factory=list)  # newly-created Article ids (for process_articles)
+
+    @property
+    def saved(self) -> int:
+        return len(self.saved_ids)
 
 
 class HistoricalServiceError(ClientServiceException):
@@ -142,12 +188,25 @@ class RSSHistoricalService:
         parsed = urlparse(source.url)
         netloc = _strip_feed_subdomain(parsed.netloc)
         self._base_url = f'{parsed.scheme}://{netloc}'
+        self._deadline: datetime.datetime | None = None  # set per fetch_day() call
 
     def fetch_day(
         self,
         day_start: datetime.datetime,
         day_end: datetime.datetime,
+        deadline: datetime.datetime | None = None,
     ) -> list[ArticleDatum]:
+        """deadline: wall-clock cutoff (see HistoricalBackfillService.fetch_and_save_day)
+        — checked between sitemap candidates and sub-sitemap fetches so a slow-but-not-
+        technically-timing-out source can't alone consume the caller's whole time budget."""
+        if _is_source_blocked(self._source.code):
+            logger.info(
+                'RSSHistorical source=%r day=%s: skipped (temporarily blocked)',
+                self._source.code, day_start.date(),
+            )
+            return []
+
+        self._deadline = deadline
         entries = self._discover_entries(day_start, day_end)
         if not entries:
             logger.info(
@@ -184,6 +243,8 @@ class RSSHistoricalService:
         seen_urls: set[str] = set()
         merged: list[dict] = []
         for sm_url in self._candidate_sitemap_urls():
+            if self._deadline_passed():
+                break
             for entry in self._parse_sitemap(sm_url, day_start, day_end):
                 if entry['url'] not in seen_urls:
                     seen_urls.add(entry['url'])
@@ -210,6 +271,8 @@ class RSSHistoricalService:
                         url = line.split(':', 1)[1].strip()
                         if url:
                             candidates.append(url)
+        except requests.Timeout:
+            _block_source(self._source.code, 'robots.txt timeout')
         except requests.RequestException:
             pass
 
@@ -227,9 +290,14 @@ class RSSHistoricalService:
         day_end: datetime.datetime,
     ) -> list[dict]:
         """Parse a sitemap URL; recurses into sitemap indexes (one level)."""
+        if _is_source_blocked(self._source.code):
+            return []
         try:
             resp = requests.get(url, headers=_HTTP_HEADERS, timeout=_HTTP_TIMEOUT)
             resp.raise_for_status()
+        except requests.Timeout:
+            _block_source(self._source.code, f'sitemap timeout: {url}')
+            return []
         except requests.RequestException as exc:
             logger.debug('Sitemap fetch failed url=%r: %s', url, exc)
             return []
@@ -296,8 +364,17 @@ class RSSHistoricalService:
 
         entries: list[dict] = []
         for _, sub_url in candidates[: self._MAX_SUBSITEMAPS_PER_INDEX]:
+            if self._deadline_passed():
+                logger.info(
+                    'RSSHistorical source=%r: deadline reached mid sub-sitemap recursion — stopping',
+                    self._source.code,
+                )
+                break
             entries.extend(self._parse_sitemap(sub_url, day_start, day_end))
         return entries
+
+    def _deadline_passed(self) -> bool:
+        return self._deadline is not None and datetime.datetime.now(datetime.timezone.utc) >= self._deadline
 
     def _extract_urlset_entries(
         self,
@@ -340,20 +417,24 @@ class RSSHistoricalService:
 
 class HistoricalBackfillService:
     """
-    Orchestrates day-by-day historical backfill across one or more sources.
+    Fetches + saves historical articles for ONE day window across a set of
+    sources (usually a small chunk — see module docstring for why multi-day
+    iteration and chunking live in services.tasks, not here).
 
     Usage:
-        service = HistoricalBackfillService(sources, start_date, end_date, top_n=5)
-        for result in service.run():
-            print(result.day.date(), result.fetched, result.saved)
+        service = HistoricalBackfillService(sources, top_n=5)
+        result = service.fetch_and_save_day(day_start, day_end, deadline=...)
+        print(result.day.date(), result.fetched, result.saved, result.saved_ids)
 
-    Each day, every source is fetched (capped to top_n candidates by recency),
-    candidates are merged and passed through the same title-dedup filter the
-    live fetch path uses, then saved via Article.objects.get_or_create() keyed
-    on (source_code, source_type, source_url) — fully idempotent. Scoring and
-    NLP processing are NOT done here; saved articles have importance_score
-    left NULL, exactly like live-fetched ones, so score_articles_task and
-    dispatch_process_articles_task pick them up on their normal schedule.
+    Every source in ``sources`` is fetched (capped to top_n candidates by
+    recency), candidates are merged and passed through the same title-dedup
+    filter the live fetch path uses, article bodies are fetched inline, then
+    saved via Article.objects.get_or_create() keyed on (source_code,
+    source_type, source_url) — fully idempotent. NLP processing is the
+    caller's job (services.tasks.backfill_day_chunk_task calls
+    services.workflow.articles.process_articles on ``result.saved_ids``);
+    importance *scoring* is untouched — score_articles_task's normal cron
+    still picks these up via created_on.
 
     Backfill metadata is stored in Article.extra_data under key:
       backfill_day — ISO date string of the day window the article was found in
@@ -362,16 +443,12 @@ class HistoricalBackfillService:
     def __init__(
         self,
         sources: list,
-        start_date: datetime.datetime,
-        end_date: datetime.datetime,
         top_n: int | None = None,
         delay_seconds: float = 0.5,
         fetch_body: bool = True,
         candidate_factor: int = 4,
     ) -> None:
         self.sources = sources
-        self.start_date = start_date
-        self.end_date = end_date
         self.top_n = top_n
         self.delay_seconds = delay_seconds
         self.fetch_body = fetch_body
@@ -396,74 +473,74 @@ class HistoricalBackfillService:
         max_candidates = top_n * self.candidate_factor if self.candidate_factor else None
         return RSSHistoricalService(source, max_candidates=max_candidates)
 
-    def run(
+    def fetch_and_save_day(
         self,
-        resume_days: set[str] | None = None,
+        day_start: datetime.datetime,
+        day_end: datetime.datetime,
         dry_run: bool = False,
-    ) -> Iterator[DayResult]:
+        deadline: datetime.datetime | None = None,
+    ) -> DayResult:
         """
-        Yield a DayResult for each calendar day in [start_date, end_date).
+        Fetch + save this instance's sources for one calendar day.
 
-        resume_days — set of day.date().isoformat() strings to skip.
-        dry_run     — discover but do not write to the database.
+        dry_run  — discover but do not write to the database.
+        deadline — wall-clock cutoff; stops fetching further sources once passed
+                   (mirrors services.workflow.articles.fetch_articles's ``deadline``
+                   param) so a chunk task exits cleanly with partial results
+                   instead of relying solely on Celery's hard task time limit.
         """
-        for day_start, day_end in iter_days(self.start_date, self.end_date):
-            day_key = day_start.date().isoformat()
-            if resume_days and day_key in resume_days:
-                logger.debug('Skipping day %s (checkpoint)', day_start.date())
-                continue
+        source_datums: list[tuple['core.models.Source', ArticleDatum]] = []
+        fetched_total = 0
+        for source in self.sources:
+            if deadline is not None and datetime.datetime.now(datetime.timezone.utc) >= deadline:
+                logger.warning('[backfill] deadline reached — stopping mid source list for day=%s', day_start.date())
+                break
+            top_n = self._resolve_top_n(source)
+            if top_n == 0:
+                continue  # weight=0 — suppressed
+            try:
+                candidates = self._strategies[source.code].fetch_day(day_start, day_end, deadline=deadline)
+            except HistoricalServiceError as exc:
+                logger.error('fetch_day failed source=%s day=%s: %s', source.code, day_start.date(), exc)
+                candidates = []
+            fetched_total += len(candidates)
+            candidates.sort(
+                key=lambda d: d.get('published_on') or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+                reverse=True,
+            )
+            for datum in candidates[:top_n]:
+                source_datums.append((source, datum))
+            if self.delay_seconds > 0:
+                time.sleep(self.delay_seconds)
 
-            source_datums: list[tuple['core.models.Source', ArticleDatum]] = []
-            fetched_total = 0
-            for source in self.sources:
-                top_n = self._resolve_top_n(source)
-                if top_n == 0:
-                    continue  # weight=0 — suppressed
-                try:
-                    candidates = self._strategies[source.code].fetch_day(day_start, day_end)
-                except HistoricalServiceError as exc:
-                    logger.error('fetch_day failed source=%s day=%s: %s', source.code, day_start.date(), exc)
-                    candidates = []
-                fetched_total += len(candidates)
-                candidates.sort(
-                    key=lambda d: d.get('published_on') or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
-                    reverse=True,
-                )
-                for datum in candidates[:top_n]:
-                    source_datums.append((source, datum))
-                if self.delay_seconds > 0:
-                    time.sleep(self.delay_seconds)
-
-            saved = 0 if dry_run else self._save_day_batch(source_datums, day_start)
-
-            yield DayResult(day=day_start, fetched=fetched_total, saved=saved)
-
-            if resume_days is not None and not dry_run:
-                resume_days.add(day_key)
+        saved_ids = [] if dry_run else self._save_day_batch(source_datums, day_start, deadline=deadline)
+        return DayResult(day=day_start, fetched=fetched_total, saved_ids=saved_ids)
 
     def _save_day_batch(
         self,
         source_datums: list[tuple['core.models.Source', ArticleDatum]],
         day_start: datetime.datetime,
-    ) -> int:
-        """Cross-source title-dedup, then fan out one body-fetch+save job per new
-        article onto the worker pool — same enqueue pattern as before, just fed by
-        a merged/deduped cross-source batch instead of a single source's ranking.
+        deadline: datetime.datetime | None = None,
+    ) -> list:
+        """Cross-source title-dedup (within this instance's source chunk — see
+        module docstring's trade-off note), then fetch each new article's body
+        and save it, inline (no further Celery fan-out — see module docstring).
+        Returns the list of newly-created Article ids.
 
-        Parallelism for the (network-bound) body fetch comes from the worker pool —
-        not in-process threads — so it scales with ``worker-light`` replicas. Returns
-        the number of jobs dispatched (≈ new articles; a job can still no-op if the
-        URL was saved concurrently). When ``TASK_QUEUE_ENABLED`` is off (dev), each
-        ``enqueue`` runs synchronously, so the save still happens inline.
+        deadline — same wall-clock cutoff as fetch_and_save_day's discovery loop.
+        Body-fetch is a per-article blocking HTTP call, so a chunk that used most
+        of its budget on discovery could otherwise blow through the remaining
+        budget here with no check at all; past the deadline, remaining articles
+        are still saved (title-only, no get_or_create is skipped) but without a
+        body fetch, so the task still returns cleanly instead of risking Celery's
+        hard kill mid-save (which would also skip the checkpoint mark entirely).
         """
-        from django.conf import settings
         import core.models as m
+        from django.conf import settings
         from services.data import _filter_title_dupes
-        from services.queue import enqueue
-        from services.tasks import backfill_save_article_task
 
         if not source_datums:
-            return 0
+            return []
 
         datums = []
         for source, datum in source_datums:
@@ -484,7 +561,7 @@ class HistoricalBackfillService:
             key = (datum.pop('_source_code'), datum.pop('_source_type'))
             by_source.setdefault(key, []).append(datum)
 
-        saved = 0
+        saved_ids = []
         for (source_code, source_type), source_batch in by_source.items():
             urls = [d['source_url'] for d in source_batch]
             existing = set(
@@ -495,15 +572,23 @@ class HistoricalBackfillService:
             for datum in source_batch:
                 if datum['source_url'] in existing:
                     continue
-                extra = {**datum.get('extra_data', {}), 'backfill_day': day_start.date().isoformat()}
-                enqueue(
-                    backfill_save_article_task,
-                    source_code, source_type, dict(datum), extra, self.fetch_body,
-                    queue='default',
+                fields = dict(datum)
+                past_deadline = deadline is not None and datetime.datetime.now(datetime.timezone.utc) >= deadline
+                if self.fetch_body and not past_deadline:
+                    body = fetch_article_body(datum['source_url'], source_code=source_code)
+                    if body:
+                        fields['content'] = body
+                fields['extra_data'] = {
+                    **datum.get('extra_data', {}), 'backfill_day': day_start.date().isoformat(),
+                }
+                article, created = m.Article.objects.get_or_create(
+                    source_code=source_code, source_type=source_type,
+                    source_url=datum['source_url'], defaults=fields,
                 )
-                saved += 1
+                if created:
+                    saved_ids.append(article.id)
 
-        return saved
+        return saved_ids
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +641,7 @@ _PARAGRAPH_RE = re.compile(r'(?is)<p[^>]*>(.*?)</p>')
 _TAG_RE = re.compile(r'(?s)<[^>]+>')
 
 
-def fetch_article_body(url: str, timeout: int = _HTTP_TIMEOUT) -> str | None:
+def fetch_article_body(url: str, source_code: str | None = None, timeout: int = _HTTP_TIMEOUT) -> str | None:
     """Best-effort plain-text body for a historical article URL.
 
     Backfill candidates come from sitemaps/CDX as title-only; without body text the
@@ -565,12 +650,22 @@ def fetch_article_body(url: str, timeout: int = _HTTP_TIMEOUT) -> str | None:
     geocoding + category. Returns None on any failure (caller falls back to the
     title).
 
-    Called from the per-article ``backfill_save_article_task`` worker, so parallelism
-    comes from the worker pool — no in-process threads here.
+    source_code: when given, participates in the same timeout blocklist as sitemap
+    discovery (skipped if already blocked; a Timeout here blocks it too) — a source
+    whose article pages are timing out is treated the same as one whose sitemap is.
+
+    Called inline from HistoricalBackfillService._save_day_batch (one day-window's
+    worth of articles at a time, not fanned out further — see module docstring).
     """
+    if source_code and _is_source_blocked(source_code):
+        return None
     try:
         resp = requests.get(url, headers=_HTTP_HEADERS, timeout=timeout)
         resp.raise_for_status()
+    except requests.Timeout:
+        if source_code:
+            _block_source(source_code, f'article body timeout: {url}')
+        return None
     except requests.RequestException as exc:
         logger.debug('body fetch failed url=%r: %s', url, exc)
         return None

@@ -18,6 +18,14 @@ def _apply_min_score_filter(qs, min_score: float):
     return qs
 
 
+def unscored_unprocessed_articles():
+    """Articles stuck before scoring even ran — shared by pipeline_coverage()'s
+    'unscored' row and admin_dashboard._handle_reprocess's 'score' action, so the
+    displayed count and what the action actually selects can't drift apart."""
+    from core.models import Article
+    return Article.objects.filter(processed_on__isnull=True, importance_score__isnull=True)
+
+
 def fetch_articles(
     source_code: str | None,
     start_date: datetime,
@@ -27,7 +35,7 @@ def fetch_articles(
     Returns the number of newly created articles.
 
     deadline: if provided, stops between sources once the current time exceeds it
-    so the task exits cleanly before the RQ hard-kill fires.
+    so the task exits cleanly before Celery's task time limit fires.
     """
     from services.data import DataService
     from core.models import Source

@@ -66,12 +66,12 @@ class _Cycle:
 
 
 # ── 429 debounce ─────────────────────────────────────────────────────────────
+# Policy (credential hashing, per-provider TTLs, logging) lives here; the actual
+# Redis-backed-with-local-fallback flag is the shared services.cache.Blocklist
+# mechanism (also used by services.data.historical's source timeout blocklist).
 
 class _Debounce:
-    """
-    Redis-backed per-credential cooldown tracker; falls back to an in-process
-    dict when Redis is unavailable (e.g. local dev without a running Redis).
-    """
+    """Per-credential 429 cooldown tracker, keyed by (provider, credential)."""
 
     TTLS: dict[str, int] = {
         'openrouter': 86400,   # daily free-tier quota per key
@@ -81,8 +81,8 @@ class _Debounce:
     DEFAULT_TTL = 60
 
     def __init__(self) -> None:
-        self._local: dict[str, float] = {}
-        self._lock = threading.Lock()
+        from services.cache import Blocklist
+        self._store = Blocklist()
 
     @staticmethod
     def _rkey(provider: str, credential: str) -> str:
@@ -91,25 +91,13 @@ class _Debounce:
         return key_llm_debounce(provider, h)
 
     def is_active(self, provider: str, credential: str) -> bool:
-        k = self._rkey(provider, credential)
-        try:
-            from services.cache import cache_get
-            return bool(cache_get(k))
-        except Exception:
-            with self._lock:
-                return self._local.get(k, 0.0) > _time.monotonic()
+        return self._store.is_blocked(self._rkey(provider, credential))
 
     def mark(self, provider: str, credential: str, ttl: int | None = None) -> None:
         ttl = ttl or self.TTLS.get(provider, self.DEFAULT_TTL)
-        k = self._rkey(provider, credential)
         tail = credential[-8:] if len(credential) > 8 else '***'
         logger.info('LLM 429 debounce: provider=%r ...%s cooling for %ds', provider, tail, ttl)
-        try:
-            from services.cache import cache_set
-            cache_set(k, 1, timeout=ttl)
-        except Exception:
-            with self._lock:
-                self._local[k] = _time.monotonic() + ttl
+        self._store.block(self._rkey(provider, credential), ttl)
 
 
 _debounce = _Debounce()

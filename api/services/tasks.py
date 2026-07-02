@@ -29,11 +29,10 @@ logger = logging.getLogger(__name__)
 def _log_task(func):
     """Log a task's start, duration, and outcome (result or exception).
 
-    RQ's own visibility stops at queued/started/finished — nothing in between,
-    so a job that's hung looks identical to one that's merely slow until the
-    job timeout finally kills it. This gives an operator tailing logs a
-    starting timestamp and a running duration to notice "this has been going
-    for way longer than usual" well before that.
+    TaskRun (core.models, updated by services/queue.py's Celery signal handlers)
+    already tracks queued/running/success/failed in the DB, but a log line gives
+    an operator tailing logs a starting timestamp and a running duration to
+    notice "this has been going for way longer than usual" well before that.
     """
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -49,8 +48,8 @@ def _log_task(func):
         return result
     return wrapper
 
-# Retry policy for tasks fanned out from a dispatcher (previously services.queue.make_retry()) —
-# declared on the task itself, matching Celery convention (call-site retry= is gone).
+# Retry policy for tasks fanned out from a dispatcher — declared on the task
+# itself (Celery convention), not passed in at the enqueue() call site.
 _RETRY_KW = dict(autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={'max_retries': 3})
 
 DEFAULT_FETCH_MINUTES = 20          # look-back window for fetch tasks (2× interval)
@@ -69,6 +68,21 @@ ROUTE_DISPATCH_LIMIT = 500
 TAG_CHUNK_SIZE = 10     # events per chunk (EmbeddingTopicMatcher batch, local — no LLM call)
 ROUTE_CHUNK_SIZE = 10
 BOOTSTRAP_ARTICLE_YEARS = 1
+
+# One backfill_day_chunk_task covers one day × this many sources. Sized so the
+# worst case (sitemap discovery for each source + body-fetch + NLP processing
+# for up to BACKFILL_CHUNK_SIZE × top_n articles) stays comfortably inside the
+# heavy queue's existing 600s/10min default time limit (CELERY_QUEUE_TIME_LIMITS)
+# — no per-call job_timeout override needed. BACKFILL_CHUNK_DEADLINE_SECONDS is
+# a wall-clock cutoff passed into HistoricalBackfillService well inside that hard
+# limit, so the task can exit cleanly with partial results instead of relying
+# solely on Celery's SIGKILL.
+BACKFILL_CHUNK_SIZE = 3
+BACKFILL_CHUNK_DEADLINE_SECONDS = 480
+# Backfill resume checkpoints (Redis SET) expire after this long — an abandoned
+# backfill's checkpoint shouldn't live in Redis forever (mirrors the source
+# timeout blocklist and LLM debounce keys, which also always carry a TTL).
+BACKFILL_CHECKPOINT_TTL_SECONDS = 30 * 24 * 3600
 
 
 # ── Text pipeline ─────────────────────────────────────────────────────────────
@@ -275,8 +289,9 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
     # Long one-shot seeds go on the bulk queue so they don't block the live pipeline.
     enqueue(backfill_prices_task, years=10, queue='bulk', job_timeout=-1)
     # source_code=None (all enabled RSS sources), top_n=None → each source's per-day
-    # cap derives from its weight (2–6 by priority).
-    enqueue(backfill_history_task, start, now, None, queue='bulk', job_timeout=-1)
+    # cap derives from its weight (2–6 by priority). backfill_history_task is a pure
+    # dispatcher (see its docstring) — cheap enough that it doesn't need job_timeout=-1.
+    enqueue(backfill_history_task, start, now, None, queue='bulk')
     if settings.FORECAST_ENABLED:
         enqueue(train_forecast_model_task, queue='bulk', job_timeout=-1)
         enqueue(run_forecast_task, queue='bulk', job_timeout=-1)
@@ -420,7 +435,7 @@ def _weighted_top_n(weight: float | None, lo: int = 2, hi: int = 6) -> int:
     return round(lo + (w - 0.1) / 1.9 * (hi - lo))
 
 
-@shared_task(**_RETRY_KW)
+@shared_task
 def backfill_history_task(
     start_date: datetime,
     end_date: datetime,
@@ -432,34 +447,30 @@ def backfill_history_task(
     progress=None,
 ) -> dict:
     """
-    Backfill top-N articles per day window, across one or all enabled RSS sources.
-
-    Enqueue with job_timeout=-1 (no cap) since multi-month/year backtracks can take
-    longer than the standard 30-minute task timeout.
+    Dispatcher: enumerate every (day, source-chunk) pair covering
+    [start_date, end_date) across one or all enabled RSS sources, and enqueue
+    one backfill_day_chunk_task per pair. Does no fetching/saving/processing
+    itself — see services/data/historical.py's module docstring for why that
+    work is chunked onto bounded heavy-queue workers instead.
 
     ``start_date`` / ``end_date`` accept either ``datetime`` objects or
     ``YYYY-MM-DD`` strings (the latter so the task is trivially enqueueable).
-    ``source_code=None`` backfills every enabled RSS source (each day window fetches
-    ALL of them before saving); pass a code to restrict to one source.
-    ``top_n=None`` derives the per-source-per-day cap from each source's ``weight``
-    (2–6 by priority); pass an int to override for all sources.
-    ``resume`` skips days already recorded in the Django cache checkpoint;
-    ``progress`` is an optional ``callable(DayResult)`` invoked per day (the
-    management command passes one to echo per-day lines to stdout).
+    ``source_code=None`` backfills every enabled RSS source; pass a code to
+    restrict to one source. ``top_n=None`` derives the per-source-per-day cap
+    from each source's ``weight`` (2–6 by priority); pass an int to override.
+    ``resume`` skips (day, chunk) pairs already recorded in the Redis
+    checkpoint set (see services.cache.key_backfill_checkpoint).
+    ``progress`` is an optional ``callable(dict)`` — only invoked when a chunk
+    actually runs synchronously in this same call (TASK_QUEUE_ENABLED=False,
+    where enqueue() returns the chunk task's result directly); skipped when a
+    chunk is genuinely queued, since its outcome isn't known yet.
 
-    Saved articles are indistinguishable from live-fetched ones (importance_score
-    left NULL) — score_articles_task and dispatch_process_articles_task pick them
-    up on their normal schedule; this task does not score or process anything.
-
-    Returns {'days': int, 'sources': int, 'fetched': int, 'saved': int}.
+    Returns {'days': int, 'sources': int, 'chunks_dispatched': int}.
     """
-    import logging
-
     import core.models as m
-    from services.cache import cache_get, cache_set, key_backfill_checkpoint
-    from services.data.historical import HistoricalBackfillService
-
-    logger = logging.getLogger(__name__)
+    from services.cache import key_backfill_checkpoint, redis_set_members
+    from services.data.historical import iter_days
+    from services.queue import enqueue
 
     start_date = _parse_backfill_date(start_date)
     end_date = _parse_backfill_date(end_date)
@@ -470,31 +481,92 @@ def backfill_history_task(
         sources = list(
             m.Source.objects.filter(type=m.SourceType.RSS, is_enabled=True).order_by('code')
         )
-
-    service = HistoricalBackfillService(
-        sources=sources,
-        start_date=start_date,
-        end_date=end_date,
-        top_n=top_n,
-        delay_seconds=delay_seconds,
-    )
+    source_codes = [s.code for s in sources]
 
     checkpoint_key = key_backfill_checkpoint(str(start_date.date()), str(end_date.date()))
-    resume_days: set[str] = (cache_get(checkpoint_key) or set()) if resume else set()
+    done: set[str] = set()
+    if resume:
+        try:
+            done = redis_set_members(checkpoint_key)
+        except Exception:
+            logger.exception('[backfill] failed to read resume checkpoint — dispatching everything')
 
-    total_days = total_fetched = total_saved = 0
-    for result in service.run(resume_days=resume_days, dry_run=dry_run):
+    total_days = dispatched = 0
+    for day_start, day_end in iter_days(start_date, end_date):
         total_days += 1
-        total_fetched += result.fetched
-        total_saved += result.saved
-        if progress is not None:
-            progress(result)
-        if resume and not dry_run:
-            cache_set(checkpoint_key, resume_days, timeout=None)
+        day_iso = day_start.date().isoformat()
+        for chunk_start in range(0, len(source_codes), BACKFILL_CHUNK_SIZE):
+            chunk = source_codes[chunk_start:chunk_start + BACKFILL_CHUNK_SIZE]
+            # Content-addressed, not index-based: if the enabled-source set changes
+            # between an interrupted run and a --resume rerun, an index-based key
+            # (f'{day}:{chunk_index}') would silently point at a *different* set of
+            # sources than the original run covered, and --resume would skip them
+            # without ever actually backfilling that day for the new source set.
+            chunk_key = f"{day_iso}:{'-'.join(chunk)}"
+            if resume and chunk_key in done:
+                continue
+            result = enqueue(
+                backfill_day_chunk_task, day_start, day_end, chunk, top_n, dry_run,
+                checkpoint_key if resume else None, chunk_key, delay_seconds,
+                queue='heavy',
+            )
+            dispatched += 1
+            if progress is not None and isinstance(result, dict):
+                progress(result)
 
-    summary = {'days': total_days, 'sources': len(sources), 'fetched': total_fetched, 'saved': total_saved}
-    logger.info('backfill_history_task done: %s', summary)
+    summary = {'days': total_days, 'sources': len(sources), 'chunks_dispatched': dispatched}
+    logger.info('backfill_history_task dispatched: %s', summary)
     return summary
+
+
+@shared_task(**_RETRY_KW)
+def backfill_day_chunk_task(
+    day_start: datetime,
+    day_end: datetime,
+    source_codes: list,
+    top_n: int | None,
+    dry_run: bool,
+    checkpoint_key: str | None,
+    chunk_key: str,
+    delay_seconds: float = 0.5,
+) -> dict:
+    """
+    Worker half of the backfill dispatcher: fetch + save + (unless dry_run)
+    NLP-process one day window across a small chunk of sources.
+
+    Relies on the heavy queue's default ~10min time limit (no per-call
+    job_timeout override) plus an internal wall-clock deadline
+    (BACKFILL_CHUNK_DEADLINE_SECONDS, threaded into HistoricalBackfillService)
+    so it exits cleanly with partial results instead of only relying on
+    Celery's hard kill. See services/data/historical.py's module docstring for
+    fetch/save/dedup details and the trade-offs this chunking makes.
+
+    Returns {'day': ISO date str, 'sources': [...], 'fetched', 'saved', 'processed'}.
+    """
+    import core.models as m
+    from services.cache import redis_set_add
+    from services.data.historical import HistoricalBackfillService
+
+    deadline = datetime.now(dt_timezone.utc) + timedelta(seconds=BACKFILL_CHUNK_DEADLINE_SECONDS)
+
+    sources = list(m.Source.objects.filter(code__in=source_codes))
+    service = HistoricalBackfillService(sources=sources, top_n=top_n, delay_seconds=delay_seconds)
+    result = service.fetch_and_save_day(day_start, day_end, dry_run=dry_run, deadline=deadline)
+
+    processed = 0
+    if not dry_run and result.saved_ids:
+        processed = process_articles(ids=result.saved_ids)
+
+    if checkpoint_key and not dry_run:
+        try:
+            redis_set_add(checkpoint_key, chunk_key, ttl=BACKFILL_CHECKPOINT_TTL_SECONDS)
+        except Exception:
+            logger.exception('[backfill] failed to mark checkpoint %s/%s', checkpoint_key, chunk_key)
+
+    return {
+        'day': day_start.date().isoformat(), 'sources': source_codes,
+        'fetched': result.fetched, 'saved': result.saved, 'processed': processed,
+    }
 
 
 def _parse_backfill_date(value) -> datetime:
@@ -503,48 +575,6 @@ def _parse_backfill_date(value) -> datetime:
         return value
     d = datetime.strptime(value, '%Y-%m-%d')
     return d.replace(tzinfo=dt_timezone.utc)
-
-
-@shared_task(**_RETRY_KW)
-def backfill_save_article_task(
-    source_code: str,
-    source_type: str,
-    datum: dict,
-    extra_data: dict,
-    fetch_body: bool = True,
-) -> int:
-    """Per-article backfill worker: fetch the body (so the article geocodes + renders
-    on the map) and save one Article. Idempotent via get_or_create on source_url.
-
-    importance_score is left unset, exactly like a live-fetched article — the normal
-    score_articles_task (LLM scoring, hourly cron) picks it up on its next tick,
-    keyed on created_on (stamped now, regardless of the article's old published_on).
-
-    Fanned out one-per-article from the backfill onto the light queue, so the worker
-    pool provides the concurrency for the network-bound body fetch — no in-process
-    threads. Returns 1 if a new Article was created, else 0.
-    """
-    import core.models as m
-    from services.data.historical import fetch_article_body
-
-    if m.Article.objects.filter(
-        source_code=source_code, source_type=source_type, source_url=datum['source_url'],
-    ).exists():
-        return 0
-
-    fields = {**datum}
-    if fetch_body:
-        body = fetch_article_body(datum['source_url'])
-        if body:
-            fields['content'] = body
-    fields['extra_data'] = extra_data
-    _, created = m.Article.objects.get_or_create(
-        source_code=source_code,
-        source_type=source_type,
-        source_url=datum['source_url'],
-        defaults=fields,
-    )
-    return 1 if created else 0
 
 
 # ── Forecasting tasks (event-fused symbol prediction) ────────────────────────────
