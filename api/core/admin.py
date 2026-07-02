@@ -210,19 +210,19 @@ class ArticleAdmin(ImportExportModelAdmin):
     @admin.action(description="Reprocess selected (NLP / geocode)")
     def reprocess_selected(self, request, queryset):
         from services.queue import enqueue
-        from services.tasks import process_articles_chunk_task
+        from services.tasks import run_stage_chunk_task
         ids = [a.id for a in queryset]
         if ids:
-            enqueue(process_articles_chunk_task, ids, True, queue="heavy")
+            enqueue(run_stage_chunk_task, 'geocode', ids, queue="heavy")
         self.message_user(request, f"Reprocess enqueued for {len(ids)} article(s).", messages.SUCCESS)
 
     @admin.action(description="Score importance (LLM)")
     def score_importance_selected(self, request, queryset):
         from services.queue import enqueue
-        from services.tasks import score_articles_task
+        from services.tasks import run_stage_chunk_task
         ids = [str(a.id) for a in queryset]
         if ids:
-            enqueue(score_articles_task, article_ids=ids, queue="heavy")
+            enqueue(run_stage_chunk_task, 'score', ids, queue="heavy")
         self.message_user(request, f"Importance scoring enqueued for {len(ids)} article(s).", messages.SUCCESS)
 
     readonly_fields = [
@@ -248,50 +248,29 @@ class ArticleAdmin(ImportExportModelAdmin):
 
     def _handle_pipeline_action(self, request):
         from services.queue import enqueue
-        from services.tasks import (
-            aggregate_events_task,
-            dispatch_fetch_task,
-            dispatch_process_articles_task,
-        )
+        from services.tasks import dispatch_stage_task, pipeline_tick_task
 
         action = request.POST["pipeline_action"]
 
         if action == "run_all":
-            enqueue(dispatch_fetch_task, queue='default')
-            enqueue(dispatch_process_articles_task, queue='default')
-            # Bounded (was -1/no cap) — an uncapped job that deadlocks has no
-            # watchdog at all and can sit in "started" forever with nothing to
-            # show for it. 1h covers a full 168h backlog aggregation with margin.
-            enqueue(aggregate_events_task, queue="heavy", job_timeout=3600)
-            self.message_user(
-                request,
-                "Pipeline dispatchers enqueued (fetch → process → aggregate).",
-                messages.SUCCESS,
-            )
+            # force=True — dispatch every enabled stage with pending work,
+            # skipping the per-stage cadence gates (see services/stages.py).
+            enqueue(pipeline_tick_task, True, queue='default')
+            self.message_user(request, "Pipeline tick enqueued (all due stages).", messages.SUCCESS)
             return redirect(request.path)
 
-        if action == "fetch":
-            source_code = request.POST.get("fetch_source") or None
-            enqueue(dispatch_fetch_task, queue='default')
-            self.message_user(request, f"Fetch dispatched ({source_code or 'all sources'}).", messages.SUCCESS)
-        elif action == "process":
-            limit = max(1, int(request.POST.get("process_limit") or 500))
-            enqueue(dispatch_process_articles_task, limit=limit, queue='default')
-            self.message_user(request, f"Process dispatched (limit {limit}).", messages.SUCCESS)
-        elif action == "reprocess_failed":
-            limit = max(1, int(request.POST.get("process_limit") or 500))
-            enqueue(dispatch_process_articles_task, limit=limit, only_failed=True, queue='default')
-            self.message_user(
-                request,
-                f"Re-dispatched up to {limit} processed-but-unlocated articles.",
-                messages.SUCCESS,
-            )
-        elif action == "aggregate":
-            hours = max(1, int(request.POST.get("aggregate_hours") or 24))
-            enqueue(aggregate_events_task, hours=hours, queue="heavy")
-            self.message_user(request, f"Aggregate job enqueued - last {hours}h.", messages.SUCCESS)
-        else:
+        # Stage names map 1:1 onto services/stages.py REGISTRY entries.
+        stage = {
+            "fetch": "fetch",
+            "process": "process",
+            "reprocess_failed": "geocode",
+            "aggregate": "aggregate",
+        }.get(action)
+        if stage is None:
             self.message_user(request, f"Unknown action: {action}", messages.ERROR)
+        else:
+            enqueue(dispatch_stage_task, stage, queue='default')
+            self.message_user(request, f'Stage "{stage}" dispatch enqueued.', messages.SUCCESS)
 
         return redirect(request.path)
 
@@ -306,7 +285,7 @@ class EventAdmin(admin.ModelAdmin):
         "article_count",
         "avg_sentiment",
         "avg_intensity",
-        "started_at",
+        "published_on",
     ]
     date_hierarchy = "started_at"
     list_filter = ["category", EventStageFilter]
@@ -322,22 +301,26 @@ class EventAdmin(admin.ModelAdmin):
     ]
     actions = ["retag_selected", "reroute_selected"]
 
+    @admin.display(description="Published", ordering="started_at")
+    def published_on(self, obj):
+        return obj.started_at
+
     @admin.action(description="Re-tag topics for selected events")
     def retag_selected(self, request, queryset):
         from services.queue import enqueue
-        from services.tasks import tag_events_chunk_task
+        from services.tasks import run_stage_chunk_task
         ids = [e.pk for e in queryset]
         if ids:
-            enqueue(tag_events_chunk_task, ids, queue="heavy")
+            enqueue(run_stage_chunk_task, 'tag', ids, queue="heavy")
         self.message_user(request, f"Re-tag enqueued for {len(ids)} event(s).", messages.SUCCESS)
 
     @admin.action(description="Re-route selected events to symbols")
     def reroute_selected(self, request, queryset):
         from services.queue import enqueue
-        from services.tasks import route_events_chunk_task
+        from services.tasks import run_stage_chunk_task
         ids = [e.pk for e in queryset]
         if ids:
-            enqueue(route_events_chunk_task, ids, queue="heavy")
+            enqueue(run_stage_chunk_task, 'route', ids, queue="heavy")
         self.message_user(request, f"Re-route enqueued for {len(ids)} event(s).", messages.SUCCESS)
 
 
@@ -439,15 +422,14 @@ class TopicAdmin(admin.ModelAdmin):
 
     def _handle_topic_action(self, request):
         from services.queue import enqueue
-        from services.tasks import refresh_topics_task, dispatch_tag_topics_task
+        from services.tasks import refresh_topics_task, dispatch_stage_task
         action = request.POST["topic_action"]
         if action == "refresh":
             enqueue(refresh_topics_task)
             self.message_user(request, "Refresh topics job enqueued.", messages.SUCCESS)
         elif action == "tag":
-            hours = max(1, int(request.POST.get("tag_hours") or 24))
-            enqueue(dispatch_tag_topics_task, hours=hours, queue='default')
-            self.message_user(request, f"Tag topics dispatched (last {hours}h).", messages.SUCCESS)
+            enqueue(dispatch_stage_task, 'tag', queue='default')
+            self.message_user(request, "Tag stage dispatch enqueued.", messages.SUCCESS)
         return redirect(request.path)
 
 
@@ -573,6 +555,13 @@ def _admin_get_urls():
 
 
 admin.site.get_urls = _admin_get_urls
+
+# Make /admin/dashboard/ the default landing page instead of the stock app-list index.
+def _admin_index(request, extra_context=None):
+    return redirect('admin:ops_dashboard')
+
+
+admin.site.index = _admin_index
 
 
 # ── Branding ──────────────────────────────────────────────────────────────────

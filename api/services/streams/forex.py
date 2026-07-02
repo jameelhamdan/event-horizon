@@ -4,13 +4,12 @@ Forex stream — ECB Statistical Data Warehouse REST API (free, no key).
 Stores rates as PriceTick with stream_key='forex'.
 """
 import logging
-from datetime import date
 
 import requests
 
 from django.utils import timezone as dj_timezone
 
-from .base import BaseStream
+from .base import BaseStream, HEADERS
 from .prices import save_price_ticks
 
 logger = logging.getLogger(__name__)
@@ -27,7 +26,6 @@ ECB_SERIES = {
 
 # ECB replaced sdw-wsrest.ecb.europa.eu with data-api.ecb.europa.eu
 ECB_BASE_URL = 'https://data-api.ecb.europa.eu/service/data/EXR'
-from services.streams.base import HEADERS
 
 
 def _fetch_series(currency: str) -> float | None:

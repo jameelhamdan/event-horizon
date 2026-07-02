@@ -72,7 +72,6 @@ def _metrics(y_true, proba, y_pred):
 
 def _run_model_arm(frame, horizon, origins, train_window_days):
     """Train raw LGBM per origin, predict the next step. Returns (y_true, proba, y_pred)."""
-    import numpy as np
     from lightgbm import LGBMClassifier
 
     ycol = f'y_dir_{horizon}'
@@ -123,7 +122,6 @@ def _run_naive_arm(frame, horizon, origins, train_window_days):
 def run_backtest(symbols=None, years=2, step_days=21, train_window_days=None,
                  horizons=None, output_path=None) -> dict:
     """Run the full walk-forward backtest across all arms/horizons; write + return the report."""
-    import pandas as pd
 
     symbols = list(symbols or get_panel_symbols())
     horizons = horizons or settings.FORECAST_HORIZONS_DAYS

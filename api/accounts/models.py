@@ -84,9 +84,6 @@ class User(AbstractBaseUser, PermissionsMixin):
     def can_login(self) -> bool:
         return self.is_active
 
-    def full_name(self):
-        return self.display_name
-
     def clean(self):
         super().clean()
         self.email = self.__class__.objects.normalize_email(self.email).lower()

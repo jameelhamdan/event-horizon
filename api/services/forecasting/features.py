@@ -103,7 +103,6 @@ def _load_events(start, end, router=None):
 # ── feature computation ─────────────────────────────────────────────────────────
 
 def _rsi(series, period=14):
-    import numpy as np
     diff = series.diff().dropna()
     if len(diff) < period:
         return 50.0

@@ -20,9 +20,11 @@ bootstrap_django()
 # ── Key registry — pure string formatting, no I/O ─────────────────────────────
 
 def test_key_backfill_checkpoint_shape():
+    # v3: members are per (day, source) and only written for source-days whose
+    # fetch actually ran — see services.cache.key_backfill_checkpoint.
     from services.cache import key_backfill_checkpoint
     key = key_backfill_checkpoint('2024-01-01', '2024-06-01')
-    assert key == 'pipeline:backfill:v2:2024-01-01:2024-06-01:done'
+    assert key == 'pipeline:backfill:v3:2024-01-01:2024-06-01:done'
 
 
 def test_key_backfill_source_block_shape():

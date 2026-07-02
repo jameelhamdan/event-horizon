@@ -1,4 +1,3 @@
-import typing
 from dataclasses import dataclass
 from uuid import uuid4
 from django.utils.translation import gettext_lazy as _
@@ -14,10 +13,6 @@ class SourceType(models.TextChoices):
     EMAIL = 'email'
     NEWSLETTER = 'newsletter'
     DATABASE = 'database'
-
-    @classmethod
-    def headers_keys(cls):
-        return []
 
 
 class Source(models.Model):
@@ -44,6 +39,12 @@ class Source(models.Model):
     weight = models.FloatField(default=1.0, help_text=_('Importance score multiplier (0.1–2.0)'))
     weight_locked = models.BooleanField(default=False, help_text=_('Prevent auto-weight adjustment'))
 
+    # Fetch cursor — start of the last *successful* live fetch. The fetch stage
+    # fetches since this timestamp (clamped to a 24h floor) instead of a fixed
+    # look-back window, so worker/cron downtime longer than the fetch interval
+    # no longer silently drops articles published during the gap.
+    last_fetched_at = models.DateTimeField(null=True, blank=True)
+
     updated_on = models.DateTimeField(auto_now=True)
     created_on = models.DateTimeField(auto_now_add=True)
 
@@ -54,12 +55,6 @@ class Source(models.Model):
         indexes = [
             models.Index(fields=['created_on']),
         ]
-
-    def get_header(self, key, default=None) -> typing.Any:
-        if not self.headers:
-            return default
-
-        return self.headers.get(key, default)
 
     def __str__(self):
         return self.name
@@ -118,14 +113,14 @@ class Article(models.Model):
     sub_category = models.CharField(max_length=64, null=True, blank=True)
     processed_on = models.DateTimeField(null=True, blank=True)
 
-    # Set by dispatch_process_articles_task when a job is enqueued for this
-    # article; not cleared explicitly — once processed_on is set the article
-    # is excluded from selection regardless of this value. Prevents
-    # re-dispatch while an earlier job for the same article is still sitting
-    # in the queue (see PROCESS_QUEUE_CLAIM_TTL_HOURS).
+    # Set by the 'process' pipeline stage (services/stages.py) when a job is
+    # enqueued for this article; not cleared explicitly — once processed_on is
+    # set the article is excluded from selection regardless of this value.
+    # Prevents re-dispatch while an earlier job for the same article is still
+    # sitting in the queue (see stages.PROCESS_CLAIM_TTL_HOURS).
     process_queued_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
-    # Importance scoring — set by score_articles_task (LLM batch, every 15 min).
+    # Importance scoring — set by the 'score' pipeline stage (LLM batch).
     # null = unscored (treated as medium priority in the process queue).
     # importance_source: 'llm' | 'default'
     importance_score = models.FloatField(null=True, blank=True, db_index=True)
@@ -532,14 +527,6 @@ class Topic(models.Model):
             models.Index(fields=['parent_slug']),
             models.Index(fields=['historical_month', 'historical_day']),
         ]
-
-    def is_live_at(self, dt) -> bool:
-        """Return True if this topic was active at the given datetime."""
-        if self.started_at and self.started_at > dt:
-            return False
-        if self.ended_at and self.ended_at < dt:
-            return False
-        return True
 
     def __str__(self):
         return self.name

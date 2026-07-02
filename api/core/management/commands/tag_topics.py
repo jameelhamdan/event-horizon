@@ -23,9 +23,9 @@ class Command(BaseTaskCommand):
 
         if kwargs['background']:
             from services.queue import enqueue
-            from services.tasks import dispatch_tag_topics_task
-            enqueue(dispatch_tag_topics_task, **task_kwargs, queue='default')
-            self.stdout.write(self.style.SUCCESS('Enqueued dispatch_tag_topics_task'))
+            from services.tasks import dispatch_stage_task
+            enqueue(dispatch_stage_task, 'tag', queue='default')
+            self.stdout.write(self.style.SUCCESS('Enqueued tag stage dispatch'))
             return
 
         from services.workflow import tag_events_with_topics

@@ -101,7 +101,7 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "--skip-fetch", action="store_true",
-            help="Skip step 1 — fetch_articles",
+            help="Skip step 1 — fetch_sources",
         )
         parser.add_argument(
             "--skip-process", action="store_true",
@@ -120,7 +120,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         from core import models as core_models
-        from services.workflow import fetch_articles, process_articles, aggregate_events, tag_events_with_topics
+        from services.workflow import fetch_sources, process_articles, aggregate_events, tag_events_with_topics
 
         source = options["source"]
         fetch_hours = options["fetch_hours"]
@@ -156,12 +156,12 @@ class Command(BaseCommand):
         # ── Step 1: Fetch ──────────────────────────────────────────────────────
         step1: dict = {"skipped": options["skip_fetch"]}
         if not options["skip_fetch"]:
-            self.stdout.write("→ Step 1: fetch_articles …")
+            self.stdout.write("→ Step 1: fetch_sources …")
             articles_before = core_models.Article.objects.count()
             start_date = datetime.now(dt_timezone.utc) - timedelta(hours=fetch_hours)
 
             try:
-                fetched = fetch_articles(source_code=source, start_date=start_date)
+                fetched = fetch_sources(source_code=source, start=start_date)
                 articles_after = core_models.Article.objects.count()
                 # Sample the most-recently-created articles
                 recent_articles = list(
@@ -187,11 +187,9 @@ class Command(BaseCommand):
             unprocessed_before = core_models.Article.objects.filter(processed_on__isnull=True).count()
 
             try:
-                processed = process_articles(
-                    limit=process_limit,
-                    source_code=source,
-                    reprocess=False,
-                )
+                from services.stages import select_ids
+                pending_ids = select_ids('process', process_limit, source_code=source)
+                processed = process_articles(ids=pending_ids) if pending_ids else 0
                 unprocessed_after = core_models.Article.objects.filter(processed_on__isnull=True).count()
                 # Sample recently-processed articles
                 recent_processed = list(

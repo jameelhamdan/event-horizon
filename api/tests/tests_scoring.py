@@ -174,7 +174,7 @@ def test_jaccard_consistency():
 
 def test_importance_scorer_default_score():
     """When LLM call fails, ArticleImportanceScorer falls back to DEFAULT_SCORE."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
     from services.scoring import ArticleImportanceScorer
 
     scorer = ArticleImportanceScorer()
@@ -187,9 +187,6 @@ def test_importance_scorer_default_score():
 
 def test_importance_scorer_weight_zero_honoured():
     """source.weight=0 means suppressed — score must be near 0 (not coerced to 1.0)."""
-    from services.scoring import ArticleImportanceScorer
-    scorer = ArticleImportanceScorer()
-
     # Simulate internals: weight=0, llm_score=7.0, no bonus, no floor
     llm_score = 7.0
     weight    = 0.0

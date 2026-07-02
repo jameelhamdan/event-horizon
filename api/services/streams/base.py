@@ -54,13 +54,19 @@ class BaseStream:
         raise NotImplementedError
 
     def run(self) -> int:
-        """fetch → save → publish SSE notification. Returns count saved."""
+        """fetch → save → publish SSE notification. Returns count saved.
+
+        fetch/save failures are logged and re-raised — a broken stream must
+        surface as a FAILED TaskRun, not a success with 0 records (which is
+        indistinguishable from "no new data"). Streams that want partial-failure
+        tolerance handle it per-item inside fetch() (see prices/forex).
+        """
         logger.info(f'[{self.stream_type}] starting fetch')
         try:
             records = self.fetch()
         except Exception as exc:
             logger.error(f'[{self.stream_type}] fetch failed: {exc}', exc_info=exc)
-            return 0
+            raise
 
         if not records:
             logger.info(f'[{self.stream_type}] no new records')
@@ -70,7 +76,7 @@ class BaseStream:
             count = self.save(records)
         except Exception as exc:
             logger.error(f'[{self.stream_type}] save failed: {exc}', exc_info=exc)
-            return 0
+            raise
 
         redis_publish('sse:stream', {'type': self.stream_type, 'count': count})
         logger.info(f'[{self.stream_type}] saved {count} record(s)')

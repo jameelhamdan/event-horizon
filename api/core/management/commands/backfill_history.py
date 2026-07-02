@@ -8,7 +8,7 @@ Article.objects.get_or_create (idempotent), and then immediately runs NLP
 processing (services.workflow.articles.process_articles) on the newly-saved
 articles — see services/data/historical.py's module docstring for the full
 fetch→save→process chain and its chunking trade-offs. Importance *scoring* is
-still picked up by the normal score_articles_task cron (via created_on), same as
+still picked up by the normal 'score' pipeline stage (via created_on), same as
 live-fetched articles.
 
 Examples:
@@ -34,8 +34,8 @@ Examples:
         --start-date 2022-01-01 --end-date 2025-01-01 --background
 
 After a backfill, articles already have NLP processing done; importance scoring
-still happens on the normal score_articles_task cron. To force it immediately:
-    python manage.py run_task score_articles_task --sync
+still happens on the normal 'score' stage tick. To force it immediately:
+    python manage.py run_task dispatch_stage_task stage_name=score --sync
 """
 import datetime
 
@@ -250,8 +250,8 @@ class Command(BaseTaskCommand):
         if not dry_run and totals['saved'] > 0:
             self.stdout.write(
                 '\n  Articles are saved and NLP-processed already. Importance scoring '
-                'still runs on the normal cron. To force it now:\n'
-                '  python manage.py run_task score_articles_task --sync'
+                'still runs on the normal stage tick. To force it now:\n'
+                '  python manage.py run_task dispatch_stage_task stage_name=score --sync'
             )
 
 

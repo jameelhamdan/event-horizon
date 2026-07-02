@@ -11,7 +11,7 @@ import requests
 
 from django.utils import timezone as dj_timezone
 
-from .base import BaseStream, redis_publish
+from .base import BaseStream, HEADERS_UA as HEADERS, redis_publish
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,6 @@ NOTAM_PARAMS = {
     'bbox': '-180,-90,180,90',  # global
     'featureType': 'notam',
 }
-from services.streams.base import HEADERS_UA as HEADERS
 
 
 def _circle_to_polygon(lat: float, lon: float, radius_nm: float, points: int = 32) -> dict:
@@ -101,13 +100,11 @@ class NotamStream(BaseStream):
     stream_type = 'notam'
 
     def fetch(self) -> list[dict]:
-        try:
-            resp = requests.get(NOTAM_URL, params=NOTAM_PARAMS, headers=HEADERS, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            logger.warning(f'[notam] fetch failed: {exc}')
-            return []
+        # No try/except here — a whole-fetch failure must propagate so the
+        # stream task fails visibly (BaseStream.run re-raises into TaskRun).
+        resp = requests.get(NOTAM_URL, params=NOTAM_PARAMS, headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
 
         # A2 schema validation: surface drift on this undocumented API loudly.
         if not isinstance(data, list) and 'features' not in data:

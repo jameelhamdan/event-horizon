@@ -7,11 +7,13 @@ LLM (role='scoring') for 1.0–10.0 significance ratings, then applies:
   - cross-source corroboration bonus (+0.5 per extra source, max +2.0)
   - category importance floor (for already-categorised articles only)
 
-score_unscored_articles() is the main entry point called by score_articles_task.
+score_unscored_articles() is the main entry point, called by the 'score'
+pipeline stage (services/stages.py).
 """
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone as dt_tz
 
 from services.utils import tokenize as _tokenize, jaccard as _jaccard
@@ -98,6 +100,7 @@ class ArticleImportanceScorer:
         lines  = '\n'.join(f'{i + 1}. {title}' for i, title in enumerate(titles))
         prompt = _SCORE_PROMPT_HEADER + lines + _SCORE_PROMPT_FOOTER
 
+        raw = ''
         try:
             llm = get_llm_service(role)
             raw   = strip_code_fences(llm.chat([{'role': 'user', 'content': prompt}]))
@@ -105,7 +108,7 @@ class ArticleImportanceScorer:
             if array is None:
                 logger.warning(
                     'LLM importance score: no JSON array in response (%r); using %.1f',
-                    raw[:120], self.DEFAULT_SCORE,
+                    raw[:200], self.DEFAULT_SCORE,
                 )
                 return default
             data = json.loads(array)
@@ -119,8 +122,33 @@ class ArticleImportanceScorer:
             logger.warning('LLM importance scoring failed (%s); using %.1f', exc, self.DEFAULT_SCORE)
             return default
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-            logger.warning('LLM importance score parse error (%s); using %.1f', exc, self.DEFAULT_SCORE)
+            fallback = self._recover_scores_from_text(raw, len(titles))
+            if fallback is not None:
+                logger.info(
+                    'LLM importance score parse error (%s); recovered %d/%d scores via regex fallback',
+                    exc, len(fallback), len(titles),
+                )
+                return fallback
+            logger.warning(
+                'LLM importance score parse error (%s); raw=%r; using %.1f',
+                exc, raw[:200], self.DEFAULT_SCORE,
+            )
             return default
+
+    def _recover_scores_from_text(self, raw: str, count: int) -> list[float] | None:
+        """
+        Best-effort salvage when the LLM's array isn't valid JSON (trailing comma,
+        truncated tail, stray prose). Pulls every bare number out of the response
+        in order; only used if it yields exactly as many numbers as titles, so a
+        garbled/unrelated response can't silently masquerade as real scores.
+        """
+        numbers = re.findall(r'-?\d+(?:\.\d+)?', raw)
+        if len(numbers) != count:
+            return None
+        try:
+            return [float(n) for n in numbers]
+        except ValueError:
+            return None
 
     @staticmethod
     def _extract_json_array(raw: str) -> str | None:
@@ -158,9 +186,14 @@ class ArticleImportanceScorer:
 
     def _corroboration_bonuses(self, articles: list) -> dict[str, float]:
         """
-        For each article, count how many OTHER sources filed a similar title in the last
-        24 h (Jaccard >= _CORROBORATION_THRESHOLD). Bonus: +0.5 per source, capped at +2.0.
+        For each article, count how many OTHER sources filed a similar title
+        (Jaccard >= _CORROBORATION_THRESHOLD). Bonus: +0.5 per source, capped at +2.0.
         Uses the same tokenizer as the title dedup filter for consistency.
+
+        Similar titles are looked for both in the last 24h of stored articles
+        AND among the other members of this same batch — breaking news covered
+        by several sources within one scoring window used to earn nobody a
+        bonus, because the batch excluded itself from the comparison set.
         """
         from core import models as m
 
@@ -175,17 +208,24 @@ class ArticleImportanceScorer:
         recent_tokensets: list[tuple[frozenset, str]] = [
             (_tokenize(title), src) for title, src in recent_pairs
         ]
+        batch_tokensets: list[tuple[frozenset, str, str]] = [
+            (_tokenize(a.title), a.source_code, str(a.id)) for a in articles
+        ]
 
         bonuses: dict[str, float] = {}
-        for article in articles:
-            my_tokens = _tokenize(article.title)
+        for my_tokens, my_source, my_id in batch_tokensets:
             corroborating: set[str] = set()
             for tokens, src in recent_tokensets:
-                if src == article.source_code:
+                if src == my_source:
                     continue
                 if _jaccard(my_tokens, tokens) >= _CORROBORATION_THRESHOLD:
                     corroborating.add(src)
-            bonuses[str(article.id)] = min(
+            for tokens, src, other_id in batch_tokensets:
+                if other_id == my_id or src == my_source:
+                    continue
+                if _jaccard(my_tokens, tokens) >= _CORROBORATION_THRESHOLD:
+                    corroborating.add(src)
+            bonuses[my_id] = min(
                 len(corroborating) * _CORROBORATION_BONUS,
                 _CORROBORATION_MAX,
             )
@@ -193,40 +233,33 @@ class ArticleImportanceScorer:
         return bonuses
 
 
-def score_unscored_articles(hours: int = 2, article_ids: list | None = None) -> int:
+def score_unscored_articles(article_ids: list) -> int:
     """
-    LLM-score Article rows. Called by score_articles_task.
-
-    article_ids: when given, score exactly these articles (re-score if already scored).
-    hours: when article_ids is None, score rows created in this window that have no score.
+    LLM-score exactly these Article rows (re-scores if already scored). Called
+    by the 'score' stage (services/stages.py), which selects unscored article
+    ids and passes them in chunks.
     """
     from core import models as m
 
-    if article_ids is not None:
-        articles = list(m.Article.objects.filter(id__in=article_ids))
-    else:
-        cutoff   = datetime.now(dt_tz.utc) - timedelta(hours=hours)
-        articles = list(
-            m.Article.objects.filter(
-                importance_score__isnull=True,
-                created_on__gte=cutoff,
-            ).order_by('-created_on')
-        )
+    articles = list(m.Article.objects.filter(id__in=article_ids))
 
     if not articles:
         return 0
 
     scorer  = ArticleImportanceScorer()
     scores  = scorer.score_articles(articles)
-    updated = 0
 
+    to_save = []
     for article in articles:
         score = scores.get(str(article.id))
         if score is not None:
             article.importance_score  = score
             article.importance_source = 'llm'
-            article.save(update_fields=['importance_score', 'importance_source'])
-            updated += 1
+            to_save.append(article)
+    if to_save:
+        m.Article.objects.bulk_update(
+            to_save, ['importance_score', 'importance_source'], batch_size=500,
+        )
 
-    logger.info('[scoring] scored %d/%d articles (window=%dh)', updated, len(articles), hours)
-    return updated
+    logger.info('[scoring] scored %d/%d articles', len(to_save), len(articles))
+    return len(to_save)

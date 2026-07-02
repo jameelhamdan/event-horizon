@@ -8,13 +8,13 @@ from datetime import datetime, timezone
 
 import requests
 
+from django.conf import settings
 
-from .base import BaseStream, redis_publish
+from .base import BaseStream, HEADERS_UA as HEADERS, redis_publish
 
 logger = logging.getLogger(__name__)
 
 USGS_URL = 'https://earthquake.usgs.gov/fdsnws/event/1/query'
-from services.streams.base import HEADERS_UA as HEADERS
 
 
 class EarthquakeStream(BaseStream):
@@ -28,13 +28,11 @@ class EarthquakeStream(BaseStream):
             'orderby': 'time',
             'limit': 200,
         }
-        try:
-            resp = requests.get(USGS_URL, params=params, headers=HEADERS, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            logger.warning(f'[earthquake] fetch failed: {exc}')
-            return []
+        # No try/except here — a whole-fetch failure must propagate so the
+        # stream task fails visibly (BaseStream.run re-raises into TaskRun).
+        resp = requests.get(USGS_URL, params=params, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
 
         records = []
         for feature in data.get('features', []):
@@ -84,7 +82,7 @@ class EarthquakeStream(BaseStream):
             and r.get('magnitude') is not None
         ]
         if new:
-            # ignore_conflicts guards against two concurrent fetch_earthquakes_task
+            # ignore_conflicts guards against two concurrent earthquake stream runs
             # workers racing on the same USGS page and trying to insert the same usgs_id.
             EarthquakeRecord.objects.bulk_create(new, ignore_conflicts=True)
             redis_publish('sse:earthquakes', {

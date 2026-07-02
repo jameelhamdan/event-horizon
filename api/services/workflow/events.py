@@ -54,12 +54,15 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
     lookback = timezone.now() - timedelta(hours=hours)
     logger.info('[aggregate] starting run: hours=%d min_articles=%d lookback=%s', hours, min_articles, lookback)
 
+    # defer('content'): the week-wide window can be thousands of rows and only
+    # each sub-cluster's representative article's content is ever read (a
+    # deferred-field load per event — cheap next to carrying every body around).
     articles = list(
         Article.objects.filter(
             processed_on__isnull=False,
             location__isnull=False,
             published_on__gte=lookback,
-        ).exclude(location='')
+        ).exclude(location='').defer('content')
     )
     logger.info('[aggregate] fetched %d located article(s) in window', len(articles))
 
@@ -69,7 +72,7 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
     if skipped_no_location:
         logger.info(
             '[aggregate] %d processed article(s) in window have no location — excluded from '
-            'events. Recover with process_articles(only_failed=True).', skipped_no_location,
+            'events. The geocode repair stage recovers them.', skipped_no_location,
         )
 
     if not articles:
@@ -227,13 +230,25 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
                     location, category, len(group), gi, len(sub_groups),
                 )
             except Exception:
-                # Concurrent run already created this event — re-fetch and update below.
+                # Usually a concurrent run already created this event — re-fetch
+                # and update below. Log it: if the re-fetch also comes up empty,
+                # the create failed for a real reason (validation, connection)
+                # and this sub-cluster is otherwise silently dropped.
+                logger.exception(
+                    '[aggregate] Event create failed for %s [%s] — retrying as update',
+                    location, category,
+                )
                 event = Event.objects.filter(
                     location_name=location,
                     category=category,
                     started_at__gte=day_start,
                     started_at__lt=day_end,
                 ).first()
+                if event is None:
+                    logger.error(
+                        '[aggregate] sub-cluster %d/%d dropped: create failed and no '
+                        'existing event found for %s [%s]', gi, len(sub_groups), location, category,
+                    )
 
         if not created and event is not None:
             event.title = representative.title
@@ -266,94 +281,63 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
 
 
 def pipeline_coverage() -> list[dict]:
-    """Per-stage count of records stuck at a step + a sample error.
+    """Per-stage count of records pending at a step + a sample error.
 
-    Returns one dict per row: {stage, model, label, need, action, error_sample}.
-    ``stage`` identifies the row; ``action`` is the value posted to
-    admin_dashboard._handle_reprocess's ``stage`` param when the Reprocess
-    button is clicked, or None for an informational row with no button (e.g.
-    "unprocessed because of a deliberate importance-score cutoff" — clicking
-    Reprocess there wouldn't do anything, since the same filter excludes them
-    from the normal dispatcher too).
+    Built directly from the stage registry (services/stages.py): each row's
+    ``need`` comes from the stage's own ``pending_count`` — the SAME predicate
+    the tick dispatcher uses — so the displayed count, the Reprocess button's
+    effect, and what the cron actually dispatches cannot drift apart.
+
+    Returns one dict per row: {stage, model, label, need, action, error_sample,
+    last_dispatch}. ``action`` is the stage name posted back to
+    admin_dashboard._handle_reprocess (None for informational rows).
     """
     from core.models import Article, Event
+    from services.stages import REGISTRY, last_dispatched_at
 
-    def _err_sample(model, stage):
+    def _err_sample(model, stage_key):
         try:
-            row = model.objects.filter(**{f'stage_status__{stage}__ok': False}).only('stage_status').first()
+            row = model.objects.filter(**{f'stage_status__{stage_key}__ok': False}).only('stage_status').first()
             if row:
-                return ((row.stage_status or {}).get(stage) or {}).get('error')
+                return ((row.stage_status or {}).get(stage_key) or {}).get('error')
         except Exception:  # noqa: BLE001 — nested JSON lookup may be unsupported
             pass
         return None
 
+    _models = {'article': Article, 'event': Event}
+
     out: list[dict] = []
+    for stage in REGISTRY.values():
+        if stage.singleton or not stage.coverage:
+            continue  # no per-record pending set (aggregate) / not a stuck signal (fetch)
+        error_sample = None
+        if stage.error_stage_key and stage.model in _models:
+            error_sample = _err_sample(_models[stage.model], stage.error_stage_key)
+        last = last_dispatched_at(stage)
+        out.append({
+            'stage': stage.name, 'model': stage.model, 'label': stage.label,
+            'need': stage.pending_count() if stage.enabled() else 0,
+            'action': stage.name if stage.enabled() else None,
+            'error_sample': error_sample,
+            'last_dispatch': last,
+        })
 
-    # "Unprocessed" conflates three different situations, only one of which the
-    # 'process' action actually fixes — dispatch_process_articles_task's own
-    # selection query excludes scored-but-below-threshold articles (via
-    # _apply_min_score_filter) but lets unscored ones through once they're
-    # scored. Split so the count and the button's effect match:
-    from django.conf import settings
-    from services.workflow.articles import unscored_unprocessed_articles
-    unprocessed = Article.objects.filter(processed_on__isnull=True)
-    unscored_count = unscored_unprocessed_articles().count()
-    min_score = getattr(settings, 'ARTICLE_MIN_IMPORTANCE_TO_PROCESS', 0)
-    low_score_count = (
-        unprocessed.filter(importance_score__isnull=False, importance_score__lt=min_score).count()
-        if min_score > 0 else 0
-    )
-    process_error = _err_sample(Article, 'process')
-
-    out.append({
-        'stage': 'unscored', 'model': 'article', 'label': 'Unprocessed & unscored',
-        'need': unscored_count, 'action': 'score', 'error_sample': None,
-    })
-    out.append({
-        'stage': 'low_score', 'model': 'article',
-        'label': 'Unprocessed, below importance threshold (by design)',
-        # No action — these are permanently excluded from the normal dispatcher
-        # by the same filter it uses, so "Reprocess" would be a no-op here.
-        'need': low_score_count, 'action': None, 'error_sample': None,
-    })
-    out.append({
-        'stage': 'process', 'model': 'article', 'label': 'Unprocessed & eligible (awaiting dispatch)',
-        'need': unprocessed.count() - unscored_count - low_score_count,
-        'action': 'process', 'error_sample': process_error,
-    })
-    try:
-        unlocated = (
-            Article.objects.filter(processed_on__isnull=False, location__isnull=True).count()
-            + Article.objects.filter(processed_on__isnull=False, location='').count()
-        )
-    except Exception:  # noqa: BLE001
-        unlocated = Article.objects.filter(processed_on__isnull=False, location__isnull=True).count()
-    out.append({
-        'stage': 'geocode', 'model': 'article', 'label': 'Processed but un-located',
-        # action == 'geocode', matching admin_dashboard._handle_reprocess's stage key
-        # (not the row's own 'stage' identity) — previously this said 'reprocess_unlocated',
-        # which _handle_reprocess never checked for; the template posted c.stage, not
-        # c.action, so it worked by accident. Now the template posts c.action directly.
-        'need': unlocated, 'action': 'geocode',
-        'error_sample': _err_sample(Article, 'geocode'),
-    })
-    try:
-        untagged = (
-            Event.objects.filter(topics_source='').count()
-            + Event.objects.filter(topics_source='keyword').count()
-        )
-    except Exception:  # noqa: BLE001
-        untagged = Event.objects.filter(topics_source='').count()
-    out.append({
-        'stage': 'tag', 'model': 'event', 'label': 'Untagged / keyword-fallback events',
-        'need': untagged, 'action': 'tag', 'error_sample': _err_sample(Event, 'tag'),
-    })
-    try:
-        unrouted = Event.objects.filter(affected_indicators=[]).count()
-    except Exception:  # noqa: BLE001
-        unrouted = 0
-    out.append({
-        'stage': 'route', 'model': 'event', 'label': 'Unrouted events',
-        'need': unrouted, 'action': 'route', 'error_sample': _err_sample(Event, 'route'),
-    })
+        if stage.name == 'score':
+            # Informational: articles deliberately excluded by the importance
+            # cutoff — no action, the same filter excludes them from dispatch.
+            from django.conf import settings
+            min_score = getattr(settings, 'ARTICLE_MIN_IMPORTANCE_TO_PROCESS', 0)
+            low_score_count = (
+                Article.objects.filter(
+                    processed_on__isnull=True,
+                    importance_score__isnull=False, importance_score__lt=min_score,
+                ).count()
+                if min_score > 0 else 0
+            )
+            out.append({
+                'stage': 'low_score', 'model': 'article',
+                'label': 'Unprocessed, below importance threshold (by design)',
+                'need': low_score_count, 'action': None, 'error_sample': None,
+                'last_dispatch': None,
+            })
     return out

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from django.conf import settings
 
-from .features import build_feature_matrix, feature_columns
+from .features import feature_columns
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,6 @@ def predict(features_df, horizon: int) -> list[dict]:
     artifact = load(horizon)
     if artifact is None or features_df.empty:
         return []
-    import numpy as np
 
     cols = artifact['columns']
     X = features_df.reindex(columns=cols, fill_value=0.0).astype(float).values

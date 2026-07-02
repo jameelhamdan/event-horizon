@@ -11,12 +11,11 @@ class Command(BaseTaskCommand):
                             help='Enqueue as a background Celery task instead of running directly')
 
     def handle(self, *args, **kwargs):
-        task_kwargs = dict(hours=kwargs['hours'])
         if kwargs['background']:
             from services.queue import enqueue
-            from services.tasks import dispatch_route_events_task
-            enqueue(dispatch_route_events_task, **task_kwargs, queue='default')
-            self.stdout.write(self.style.SUCCESS('Enqueued dispatch_route_events_task'))
+            from services.tasks import dispatch_stage_task
+            enqueue(dispatch_stage_task, 'route', queue='default')
+            self.stdout.write(self.style.SUCCESS('Enqueued route stage dispatch'))
             return
 
         from datetime import datetime, timedelta, timezone as dt_timezone

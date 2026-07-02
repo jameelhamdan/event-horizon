@@ -4,13 +4,13 @@ Price stream — Yahoo Finance (stocks, commodities, bonds) + CoinGecko (crypto)
 All public APIs, no keys required.
 """
 import logging
-from datetime import datetime, timezone
 
 import requests
 
+from django.conf import settings
 from django.utils import timezone as dj_timezone
 
-from .base import BaseStream, redis_publish
+from .base import BaseStream, HEADERS, redis_publish
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +47,6 @@ YAHOO_STREAM_KEY = {
     '^TNX': 'bond', '^TYX': 'bond',
     '^VIX': 'index', 'DX-Y.NYB': 'index',
 }
-
-from services.streams.base import HEADERS
 
 
 def _yahoo_quote(symbol: str) -> dict | None:

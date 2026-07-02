@@ -37,7 +37,7 @@ network/LLM and won't fail the run when an environment is offline.
 """
 import json
 import os
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 
 from django.conf import settings
@@ -205,18 +205,17 @@ class Command(BaseCommand):
     # ── Stage 2: fan-out fetch (WA3) ──────────────────────────────────────
 
     def _stage_fetch(self, c, opts):
-        self.stdout.write('→ Stage 2: fan-out fetch (real RSS)')
+        self.stdout.write('→ Stage 2: fetch stage (real RSS)')
         from core import models as core_models
-        from services.tasks import dispatch_fetch_task, fetch_source_task
+        from services.stages import dispatch_stage, run_chunk
 
         src = opts['source']
         if not core_models.Source.objects.filter(code=src, is_enabled=True).exists():
             c.soft('fetch.source_exists', False, f'source {src} not found/enabled — skipping fetch')
             return
         before = core_models.Article.objects.count()
-        start = datetime.now(dt_timezone.utc) - timedelta(hours=opts['fetch_hours'])
         try:
-            fetched = fetch_source_task(src, start)
+            fetched = run_chunk('fetch', [src])
             c.hard('fetch.returns_int', isinstance(fetched, int), f'{fetched}')
             after = core_models.Article.objects.count()
             c.soft('fetch.articles_present', after > 0, f'{after} total articles')
@@ -227,9 +226,9 @@ class Command(BaseCommand):
 
         # Dispatcher returns a job-count even when nothing new is available.
         try:
-            dispatched = dispatch_fetch_task(start)
+            dispatched = dispatch_stage('fetch', force=True)
             c.hard('fetch.dispatch_counts_sources', isinstance(dispatched, int) and dispatched >= 1,
-                   f'{dispatched} sources dispatched')
+                   f'{dispatched} fetch job(s) dispatched')
         except Exception as exc:  # noqa: BLE001
             c.soft('fetch.dispatch_ran', False, str(exc))
 
@@ -238,14 +237,14 @@ class Command(BaseCommand):
     def _stage_process(self, c, opts):
         self.stdout.write('→ Stage 3: fan-out process (real NLP/LLM)')
         from core import models as core_models
-        from services.tasks import dispatch_process_articles_task
+        from services.stages import dispatch_stage
 
         pending = core_models.Article.objects.filter(processed_on__isnull=True).count()
         if pending == 0:
             c.soft('process.has_pending', False, 'no unprocessed articles — skipping')
             return
         try:
-            jobs = dispatch_process_articles_task(limit=opts['process_limit'])
+            jobs = dispatch_stage('process', force=True)
             c.hard('process.dispatch_returns_int', isinstance(jobs, int))
             self.stdout.write(f'    dispatched {jobs} per-record process job(s)')
         except Exception as exc:  # noqa: BLE001
@@ -267,9 +266,9 @@ class Command(BaseCommand):
     def _stage_aggregate(self, c, opts):
         self.stdout.write('→ Stage 4: aggregate events')
         from core import models as core_models
-        from services.tasks import aggregate_events_task
+        from services.workflow import aggregate_events
         try:
-            created, updated = aggregate_events_task(hours=opts['hours'])
+            created, updated = aggregate_events(hours=opts['hours'])
             c.hard('aggregate.returns_tuple', isinstance(created, int) and isinstance(updated, int))
             self.stdout.write(f'    {created} created / {updated} updated')
         except Exception as exc:  # noqa: BLE001
@@ -282,13 +281,13 @@ class Command(BaseCommand):
     def _stage_tag(self, c, opts):
         self.stdout.write('→ Stage 5: tag topics (real LLM)')
         from core import models as core_models
-        from services.tasks import dispatch_tag_topics_task
+        from services.stages import dispatch_stage
 
         if core_models.Topic.objects.filter(is_active=True).count() == 0:
             c.soft('tag.topics_available', False, 'no active topics — skipping tag')
             return
         try:
-            jobs = dispatch_tag_topics_task(hours=opts['hours'])
+            jobs = dispatch_stage('tag', force=True)
             c.hard('tag.dispatch_returns_int', isinstance(jobs, int))
             self.stdout.write(f'    dispatched {jobs} tag chunk(s)')
         except Exception as exc:  # noqa: BLE001
@@ -305,14 +304,16 @@ class Command(BaseCommand):
     def _stage_route(self, c, opts, fast):
         self.stdout.write('→ Stage 6: route events (rules router — deterministic)')
         from core import models as core_models
-        from services.tasks import dispatch_route_events_task
+        from services.stages import dispatch_stage
 
         events = core_models.Event.objects.count()
         if events == 0:
             c.soft('route.events_present', False, 'no events to route')
             return
         try:
-            jobs = dispatch_route_events_task(hours=max(opts['hours'], 24 * 14))
+            # Repair-only stage: 0 jobs is normal when aggregation already
+            # routed every event inline.
+            jobs = dispatch_stage('route', force=True)
             c.hard('route.dispatch_returns_int', isinstance(jobs, int), f'{jobs} chunk(s)')
         except Exception as exc:  # noqa: BLE001
             c.hard('route.ran', False, str(exc))

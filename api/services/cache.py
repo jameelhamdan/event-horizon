@@ -43,6 +43,22 @@ def redis_set_members(key: str) -> set[str]:
     return {m.decode() if isinstance(m, bytes) else m for m in rc.smembers(key)}
 
 
+def redis_incr(key: str, ttl: int | None = None) -> int:
+    """Atomically increment a counter, returning the new value. ttl sets/refreshes
+    expiry only when given (mirrors redis_set_add's TTL semantics) — safe under
+    concurrent callers (unlike cache_get/mutate/cache_set read-modify-write)."""
+    rc = get_redis_client(write=True)
+    value = rc.incr(key)
+    if ttl is not None:
+        rc.expire(key, ttl)
+    return value
+
+
+def redis_delete(key: str) -> None:
+    rc = get_redis_client(write=True)
+    rc.delete(key)
+
+
 class Blocklist:
     """Redis-backed temporary block flag; falls back to an in-process dict when
     Redis is unavailable (e.g. local dev without a running Redis).
@@ -72,25 +88,76 @@ class Blocklist:
                 self._local[key] = time.monotonic() + ttl
 
 
+class Counter:
+    """Redis-backed counter; falls back to an in-process dict when Redis is
+    unavailable (same fallback pattern as Blocklist above).
+
+    Pure mechanism only — callers own key naming and TTL selection. Used for
+    cross-process tallies (e.g. consecutive-failure streaks) that need to
+    survive across separate Celery task invocations.
+    """
+
+    def __init__(self) -> None:
+        self._local: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def incr(self, key: str, ttl: int | None = None) -> int:
+        try:
+            return redis_incr(key, ttl=ttl)
+        except Exception:
+            with self._lock:
+                self._local[key] = self._local.get(key, 0) + 1
+                return self._local[key]
+
+    def reset(self, key: str) -> None:
+        try:
+            redis_delete(key)
+        except Exception:
+            with self._lock:
+                self._local.pop(key, None)
+
+
 # ── Key registry — one place, namespaced, so nothing collides ──────────────
 # pipeline:*  — fetch/process/backfill state
 # llm:*       — provider round-robin, debounce, call stats
 
 KEY_ARTICLE_TITLE_DEDUP = 'pipeline:dedup:article_title'
+# Separate rolling window for historical backfill so a year-long backfill's
+# old titles can't evict live titles from (or false-positive against) the
+# live fetch path's 24h dedup window.
+KEY_BACKFILL_TITLE_DEDUP = 'pipeline:dedup:backfill_title'
 KEY_BOOTSTRAP_INITIAL_DATA_DONE = 'pipeline:bootstrap:initial_data:done'
+# Last pipeline_health_task report ({'at': ISO str, 'report': dict}) — written
+# every health run, rendered by the admin dashboard's Health section.
+KEY_PIPELINE_HEALTH_LAST = 'pipeline:health:last'
+
+
+def key_stage_last_dispatch(stage: str) -> str:
+    """Timestamp (epoch float) of the last pipeline_tick dispatch for a stage —
+    the per-stage cadence gate (see services.stages.run_due_stages)."""
+    return f'pipeline:stage:last_dispatch:{stage}'
 
 
 def key_backfill_checkpoint(start: str, end: str) -> str:
-    """Redis SET of completed '{day_iso}:{chunk_idx}' members (SADD/SMEMBERS).
-    v2: bumped from the pre-chunking scheme, which stored a single serialized
-    Python set via cache_set — same cache key name, incompatible value type
-    (SADD on a leftover string-typed key would raise WRONGTYPE). Old v1
-    checkpoints never expired, so this avoids colliding with any still in Redis."""
-    return f'pipeline:backfill:v2:{start}:{end}:done'
+    """Redis SET of completed '{day_iso}:{source_code}' members (SADD/SMEMBERS).
+    v3: members are per (day, source) — a source-day is only marked once its
+    fetch actually ran ('fetched' or 'empty' outcome, see
+    services.tasks.backfill_day_chunk_task), so days skipped by a blocklist are
+    NOT checkpointed and a --resume rerun recovers them. v2 members were
+    per (day, source-chunk) and recorded blocked skips as done; the version
+    bump avoids misreading those. (v1 was a serialized Python set via
+    cache_set — SADD on it would raise WRONGTYPE.)"""
+    return f'pipeline:backfill:v3:{start}:{end}:done'
 
 
 def key_backfill_source_block(source_code: str) -> str:
     return f'pipeline:backfill:blocked:{source_code}'
+
+
+def key_backfill_empty_streak(source_code: str) -> str:
+    """Consecutive-empty-day counter, per source, across a backfill run's chunk
+    tasks (see historical.py's _note_empty_day / _EMPTY_STREAK_THRESHOLD)."""
+    return f'pipeline:backfill:empty_streak:{source_code}'
 
 
 def key_llm_cycle(provider: str, kind: str) -> str:

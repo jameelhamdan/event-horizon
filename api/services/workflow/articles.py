@@ -1,7 +1,7 @@
 import logging
 import re
 import requests
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.utils import timezone
 
@@ -18,49 +18,69 @@ def _apply_min_score_filter(qs, min_score: float):
     return qs
 
 
-def unscored_unprocessed_articles():
-    """Articles stuck before scoring even ran — shared by pipeline_coverage()'s
-    'unscored' row and admin_dashboard._handle_reprocess's 'score' action, so the
-    displayed count and what the action actually selects can't drift apart."""
-    from core.models import Article
-    return Article.objects.filter(processed_on__isnull=True, importance_score__isnull=True)
+# Cursor floor: never fetch further back than this on the live path — feeds
+# rarely retain more than a day, and anything older is historical-backfill
+# territory (services/data/historical.py).
+FETCH_CURSOR_MAX_LOOKBACK_HOURS = 24
 
 
-def fetch_articles(
-    source_code: str | None,
-    start_date: datetime,
-    deadline: datetime | None = None,
-) -> int:
-    """Fetch from one or all sources starting at start_date and save as Articles.
-    Returns the number of newly created articles.
+def fetch_source(source_code: str, start: datetime | None = None) -> int:
+    """Fetch one source from its ``last_fetched_at`` cursor and advance it.
 
-    deadline: if provided, stops between sources once the current time exceeds it
-    so the task exits cleanly before Celery's task time limit fires.
+    The cursor (start of the last *successful* fetch) replaces the old fixed
+    ``now − 20min`` window, so downtime longer than the fetch interval no
+    longer drops articles published during the gap — the next successful run
+    picks up exactly where the last one left off (clamped to
+    FETCH_CURSOR_MAX_LOOKBACK_HOURS; URL-level get_or_create makes any overlap
+    free). The cursor only advances on success: a fetch that raises leaves it
+    untouched, so the window keeps widening until the source recovers.
+
+    start: explicit window start (CLI/e2e override) — still clamped to the
+    lookback floor; anything older is historical-backfill territory.
     """
     from services.data import DataService
     from core.models import Source
 
-    sources = (
-        list(Source.objects.filter(code=source_code))
+    source = Source.objects.filter(code=source_code).first()
+    if source is None or not source.is_enabled:
+        return 0
+
+    now = datetime.now(dt_timezone.utc)
+    floor = now - timedelta(hours=FETCH_CURSOR_MAX_LOOKBACK_HOURS)
+    if start is None:
+        start = source.last_fetched_at or floor
+    if start < floor:
+        start = floor
+
+    count = DataService(source).refresh_until(start)
+    # Stamp with the time *before* the fetch began, so articles published while
+    # the fetch was running fall inside the next run's window.
+    source.last_fetched_at = now
+    source.save(update_fields=['last_fetched_at'])
+    logger.info('[fetch] %s: %d new article(s) (since %s)', source.code, count, start)
+    return count
+
+
+def fetch_sources(source_code: str | None = None, start: datetime | None = None) -> int:
+    """Fetch one or all enabled sources via the cursor-correct ``fetch_source``
+    path (the same one the fetch stage uses). CLI/e2e convenience — per-source
+    failures are logged and skipped so one broken feed doesn't stop the sweep.
+    Returns the number of newly created articles.
+    """
+    from core.models import Source
+
+    codes = (
+        [source_code]
         if source_code
-        else list(Source.objects.filter(is_enabled=True))
+        else list(Source.objects.filter(is_enabled=True).values_list('code', flat=True))
     )
     total = 0
-    for i, source in enumerate(sources):
-        if deadline is not None and datetime.now(dt_timezone.utc) >= deadline:
-            logger.warning(
-                '[fetch] deadline reached — stopping after %d/%d source(s)',
-                i, len(sources),
-            )
-            break
+    for code in codes:
         try:
-            count = DataService(source).refresh_until(start_date)
-            total += count
-        except Exception as e:
-            count = 0
-            logger.error(f'[fetch] Exception - {e}', exc_info=e)
-        logger.info(f'[fetch] {source.code}: {count} new article(s)')
-    logger.info(f'[fetch] done — {total} new article(s) across {len(sources)} source(s)')
+            total += fetch_source(code, start=start)
+        except Exception:
+            logger.exception('[fetch] %s failed', code)
+    logger.info('[fetch] done — %d new article(s) across %d source(s)', total, len(codes))
     return total
 
 
@@ -83,43 +103,25 @@ def _fetch_og_image(url: str) -> str | None:
         return None
 
 
-def process_articles(
-    limit: int = 500,
-    source_code: str | None = None,
-    reprocess: bool = False,
-    only_failed: bool = False,
-    ids: list | None = None,
-) -> int:
-    """LLM analyzer extracts category and location; local NER/VADER add entities and
-    sentiment; FinBERT adds financial sentiment. Returns the number of articles processed.
+def process_articles(ids: list, only_failed: bool = False) -> int:
+    """Run NLP on exactly these article ids. LLM analyzer extracts category and
+    location; local NER/VADER add entities and sentiment; FinBERT adds financial
+    sentiment. Returns the number of articles processed.
 
-    only_failed: re-run NLP on articles that were processed but ended up with no location.
-    ids: when given, process exactly these article ids (bypasses normal selection).
+    Selection lives with the callers — the stage predicates in services/stages.py
+    (``_process_pending`` / ``_geocode_pending_ids``) are the single source of
+    truth for what needs processing; this function is the id-driven executor.
+
+    only_failed: geocode-repair mode — articles that stay location-less get
+    marked ``geo_failed`` so they aren't re-selected forever.
     """
     import uuid as _uuid
     from core.models import Article, ArticleDocument
     from services.processing.cleaner import ArticleCleaner
     from services.utils import mark_stage
 
-    if ids is not None:
-        uuids = [i if isinstance(i, _uuid.UUID) else _uuid.UUID(str(i)) for i in ids]
-        articles = list(Article.objects.filter(id__in=uuids))
-    else:
-        qs = Article.objects.all()
-        if source_code:
-            qs = qs.filter(source_code=source_code)
-        if only_failed:
-            from django.db.models import Q
-            qs = qs.filter(processed_on__isnull=False).filter(Q(location__isnull=True) | Q(location=''))
-            articles = [a for a in qs if not (a.extra_data or {}).get('geo_failed')][:limit]
-        else:
-            if not reprocess:
-                from django.conf import settings as _s
-                qs = qs.filter(processed_on__isnull=True)
-                qs = _apply_min_score_filter(qs, _s.ARTICLE_MIN_IMPORTANCE_TO_PROCESS)
-                articles = list(qs.order_by('-importance_score')[:limit])
-            else:
-                articles = list(qs[:limit])
+    uuids = [i if isinstance(i, _uuid.UUID) else _uuid.UUID(str(i)) for i in ids]
+    articles = list(Article.objects.filter(id__in=uuids))
 
     if not articles:
         return 0

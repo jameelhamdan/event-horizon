@@ -102,7 +102,7 @@ See `api/.env.example` for the full annotated list. Key variables:
 fetch            (every 10m)
   └─ feedparser (RSS) / requests → Article objects in MongoDB
 
-process          (every 4h, fan-out to heavy workers)
+process          (every 30m, fan-out to heavy workers)
   └─ LLM analyzer — category/sub-category, city/country, intensity
   └─ Local NER (dslim/bert-base-NER) — entities
   └─ Local VADER — general sentiment [-1, 1]
@@ -110,11 +110,11 @@ process          (every 4h, fan-out to heavy workers)
   └─ Local MarianMT — Arabic translation (from the LLM's English title/summary)
   └─ geonamescache — city/country → lat/lng
 
-aggregate        (every 4h, 30m after process)
+aggregate        (every 30m)
   └─ Groups articles by (location, category, day) + semantic clustering → Event objects
 
-tag + route      (every 6h)
-  └─ Local sentence-transformer embeddings → Event.topic_slugs (LLM matcher available, unused by default)
+tag              (every 60m) / route (every 6h, repair only)
+  └─ Local sentence-transformer embeddings → Event.topic_slugs
   └─ Deterministic rules routing → Event.affected_indicators (market symbols)
 
 forecast         (daily)

@@ -32,7 +32,7 @@ historical hardcoded defaults if the table is empty/unreachable:
 
 | Helper | Used by |
 |--------|---------|
-| `get_panel_symbols()` | `forecasting/routing.py`, `features.py`, `backtest.py`, `routing/llm_router.py` — the forecasting panel |
+| `get_panel_symbols()` | `forecasting/routing.py`, `features.py`, `backtest.py` — the forecasting panel |
 | `get_symbol_meta()` | `streams/prices.py`, `forecasting/history.py` — symbol → (stream_key, name) |
 | `get_coingecko_ids()` | `streams/prices.py`, `forecasting/history.py` — crypto provider ids |
 | `get_yahoo_symbols()` | `streams/prices.py` — Yahoo quote set |

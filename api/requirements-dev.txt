@@ -1,0 +1,6 @@
+# Development-only tooling — not installed in the Docker images.
+#   pip install -r requirements-dev.txt
+-r requirements.txt
+
+# Lint: run from api/ with `ruff check .` (config in api/ruff.toml)
+ruff==0.15.20

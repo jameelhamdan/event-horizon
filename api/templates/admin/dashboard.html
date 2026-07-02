@@ -34,12 +34,13 @@
   <section class="ops-card">
     <h2>Pipeline coverage</h2>
     <table class="ops-table">
-      <thead><tr><th>Stage</th><th>Need reprocessing</th><th>Last error</th><th></th></tr></thead>
+      <thead><tr><th>Stage</th><th>Pending</th><th>Last dispatch</th><th>Last error</th><th></th></tr></thead>
       <tbody>
       {% for c in coverage %}
         <tr{% if c.need and not c.action %} class="ops-informational"{% endif %}>
           <td>{{ c.label }}</td>
           <td class="{% if c.need and c.action %}ops-warn{% elif c.need %}ops-muted{% endif %}">{{ c.need }}</td>
+          <td class="ops-muted">{{ c.last_dispatch|date:"M d H:i"|default:"—" }}</td>
           <td class="ops-muted">{{ c.error_sample|default:"—" }}</td>
           <td>
             {% if c.need and c.action %}
@@ -53,35 +54,50 @@
           </td>
         </tr>
       {% empty %}
-        <tr><td colspan="4" class="ops-muted">No coverage data.</td></tr>
+        <tr><td colspan="5" class="ops-muted">No coverage data.</td></tr>
       {% endfor %}
       </tbody>
     </table>
   </section>
 
-  {# ── Throughput ──────────────────────────────────────────────────── #}
+  {# ── Health ──────────────────────────────────────────────────────── #}
   <section class="ops-card">
-    <h2>Throughput (items / runs)</h2>
+    <h2>Health
+      {% if health.available %}
+        <span class="{% if health.report_stale %}ops-warn{% else %}ops-muted{% endif %}" style="font-weight:normal">
+          — report from {{ health.at|date:"M d H:i"|default:"unknown" }} UTC
+          {% if health.report_stale %}(STALE — health task not running?){% endif %}
+        </span>
+      {% endif %}
+    </h2>
+    {% if health.available %}
     <table class="ops-table">
-      <thead><tr>
-        <th>Task</th><th>Today</th><th>Yesterday</th>
-        <th>Failed (today)</th><th>Last success</th><th>Last error</th>
-      </tr></thead>
+      <thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead>
       <tbody>
-      {% for name, s in throughput.items %}
+      {% for f in health.freshness %}
         <tr>
-          <td>{{ name }}</td>
-          <td>{{ s.today_items }} / {{ s.today_runs }}</td>
-          <td>{{ s.yest_items }} / {{ s.yest_runs }}</td>
-          <td class="{% if s.today_failed %}ops-warn{% endif %}">{{ s.today_failed }}</td>
-          <td class="ops-muted">{{ s.last_success|default:"—" }}</td>
-          <td class="ops-muted">{{ s.last_error|default:"" }}</td>
+          <td>{{ f.name }} freshness</td>
+          <td>{% if f.ok %}<span class="ops-ok">&#10003; ok</span>{% else %}<span class="ops-warn">stale</span>{% endif %}</td>
+          <td class="ops-muted">latest: {{ f.latest|default:"never" }}</td>
         </tr>
-      {% empty %}
-        <tr><td colspan="6" class="ops-muted">No runs recorded yet.</td></tr>
+      {% endfor %}
+        <tr>
+          <td>Current topics</td>
+          <td>{% if health.current_topics %}<span class="ops-ok">&#10003; ok</span>{% else %}<span class="ops-warn">zero — topic source broken?</span>{% endif %}</td>
+          <td class="ops-muted">{{ health.current_topics }} topic(s)</td>
+        </tr>
+      {% for s in health.stages %}
+        <tr>
+          <td>Stage: {{ s.name }}</td>
+          <td>{% if s.ok %}<span class="ops-ok">&#10003; ok</span>{% else %}<span class="ops-warn">stuck — pending work, no recent dispatch</span>{% endif %}</td>
+          <td class="ops-muted">{{ s.pending }} pending · last dispatch {{ s.last_dispatch|default:"never" }}</td>
+        </tr>
       {% endfor %}
       </tbody>
     </table>
+    {% else %}
+    <p class="ops-muted">No health report yet — pipeline_health_task runs every 30 min (or trigger it: <code>manage.py run_task pipeline_health_task --sync</code>).</p>
+    {% endif %}
   </section>
 
   <div class="ops-grid">
@@ -108,17 +124,19 @@
     <section class="ops-card">
       <h2>Task queues</h2>
       <table class="ops-table">
-        <thead><tr><th>Queue</th><th>Queued</th><th>Running</th><th>Failed (24h)</th></tr></thead>
+        <thead><tr><th>Queue</th><th>Workers</th><th>Depth</th><th>Queued</th><th>Running</th><th>Failed (24h)</th></tr></thead>
         <tbody>
         {% for q in queue_summary %}
           <tr>
             <td><a href="{{ q.all_url }}">{{ q.queue }}</a></td>
+            <td class="ops-muted">{{ q.workers|default:"—" }}</td>
+            <td class="ops-muted" title="Unclaimed messages on the Redis broker — persistent disagreement with Queued means lost/untracked tasks">{{ q.depth|default_if_none:"—" }}</td>
             <td><a href="{{ q.queued_url }}">{{ q.queued }}</a></td>
             <td><a href="{{ q.running_url }}">{{ q.running }}</a></td>
             <td class="{% if q.failed %}ops-warn{% endif %}"><a href="{{ q.failed_url }}">{{ q.failed }}</a></td>
           </tr>
         {% empty %}
-          <tr><td colspan="4" class="ops-muted">No queue data.</td></tr>
+          <tr><td colspan="6" class="ops-muted">No queue data.</td></tr>
         {% endfor %}
         </tbody>
       </table>

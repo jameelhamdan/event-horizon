@@ -22,12 +22,8 @@ flowchart TD
     B --> C[Events + topic tags<br/>existing pipeline]
 
     subgraph ROUTING [Event to Symbol Routing]
-        C --> D{router source}
-        D -->|rules · default| F[routing.py rules<br/>router_source=rules]
-        D -->|llm · opt-in| G[LLMEventRouter<br/>router_source=llm]
-        G -->|error / fallback| F
+        C --> F[routing.py rules<br/>router_source=rules]
         F --> E[signed per-symbol weights]
-        G --> E
     end
 
     E --> G[Event.affected_indicators<br/>= FEATURE, a hypothesis NOT the label]
@@ -75,22 +71,16 @@ both producing `Event.affected_indicators = [{symbol, weight(signed -1..1)}]`:
 
 ```mermaid
 flowchart LR
-    EV[Event: title, summary,<br/>category, topic tags, sentiment] --> R{router}
-    R -->|rules · default| RU[routing.py<br/>deterministic weight product]
-    R -->|llm · opt-in| LLM[LLMEventRouter<br/>batched LLM, cached per event]
-    LLM -->|on error| RU
-    LLM --> AI[(affected_indicators)]
-    RU --> AI
+    EV[Event: title, summary,<br/>category, topic tags, sentiment] --> RU[routing.py<br/>deterministic weight product]
+    RU --> AI[(affected_indicators)]
 ```
 
 - **Rules** (`services/forecasting/routing.py`): deterministic, auditable weight =
-  `sub_category_affinity × symbol_affinity × country_risk × asymmetric_sentiment`. **Default**
-  (`FORECAST_ROUTER='rules'`) — no LLM call, no rate limits, fully reproducible.
-- **LLM** (`services/routing/llm_router.py`, `LLMEventRouter`): batches ~10 events/call, prompts
-  with the panel + the event's text/category/tags, asks for signed weights, strips code fences,
-  caches by event id, and **falls back to the rule router** on any error. Role `'routing'` in
-  `settings.LLM_ROUTES`. Opt-in only (`FORECAST_ROUTER='llm'`) — kept for comparison, not used
-  in production.
+  `sub_category_affinity × symbol_affinity × country_risk × asymmetric_sentiment`. This is the
+  only router — no LLM call, no rate limits, fully reproducible. `services/routing/__init__.py`
+  is a thin wrapper that calls it and persists `Event.affected_indicators`
+  (`route_events()`), used by the `aggregate` and `route` pipeline stages
+  (see [pipeline.md](pipeline.md)).
 
 ### 2. Price history — `PriceBar`
 Daily OHLC backfilled via **yfinance** (non-crypto) and **CoinGecko** (BTC/ETH), distinct from
@@ -217,16 +207,16 @@ so crypto bars need a key or a Yahoo fallback. Neither affects the Docker stack.
 3. **Baseline first** — report directional accuracy next to the naive baseline; beating it by a
    few points (with significance) is the honest positive result. Frame as direction/volatility,
    not price-level prediction.
-4. **LLM routing is opt-in, not the default** — the deterministic rule router runs in production
-   (`FORECAST_ROUTER='rules'`); the LLM router is non-deterministic and kept only as a comparison
-   arm in the backtest, cached per event when it is used.
+4. **Routing is deterministic, not LLM-driven** — `routing.py`'s rule-based weight
+   product is the only router (`FORECAST_ROUTER='rules'`); there is no LLM
+   routing path to fall back to or compare against.
 
 ## Key files
 
 | File | Responsibility |
 |------|----------------|
-| `services/forecasting/routing.py` | deterministic event→symbol weights (default router + fallback) |
-| `services/routing/llm_router.py` | LLM event→symbol router (opt-in, `FORECAST_ROUTER='llm'`) |
+| `services/forecasting/routing.py` | deterministic event→symbol weights |
+| `services/routing/__init__.py` | persists `Event.affected_indicators` from `forecasting/routing.py` |
 | `services/forecasting/history.py` | OHLC backfill (yfinance + CoinGecko) |
 | `services/forecasting/features.py` | as-of, leak-free feature matrix |
 | `services/forecasting/model.py` | LightGBM clf+reg train/predict per horizon |

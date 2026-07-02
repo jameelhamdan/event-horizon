@@ -28,7 +28,7 @@ class Command(BaseCommand):
         parser.add_argument('--output', type=str, default=None)
 
     def handle(self, *args, **opts):
-        from datetime import datetime, timedelta, timezone as dt_timezone
+        from datetime import timedelta, timezone as dt_timezone
         from core import models as core_models
         from services.tasks import (
             backfill_prices_task,

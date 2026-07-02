@@ -19,62 +19,81 @@ which dispatches jobs via `manage.py run_task`. `bootstrap_initial_data_task` is
 To re-run it manually: the admin dashboard **Re-run bootstrap** button (forces past the
 guard), or `enqueue(bootstrap_initial_data_task, True)`.
 
-## The fan-out pipeline (dispatcher → per-record worker)
+## The stage-registry pipeline (tick → fan-out worker)
 
-Heavy pipeline steps are split into a light **dispatcher** (selects pending records,
-enqueues one worker job per record/chunk, runs on the `default` queue) and idempotent
-**per-record workers** (run on the `heavy` queue). This spreads work across all
-`worker-heavy` replicas instead of one job hogging a worker.
+The pipeline is **not** a set of per-step dispatcher/worker task pairs — it's a
+single registry (`services/stages.py`) executed by exactly two Celery tasks (see
+[pipeline.md](pipeline.md) for the full stage list and cadences):
 
-| Dispatcher (light) | Worker (heavy) |
-|--------------------|----------------|
-| `dispatch_fetch_task` | `fetch_source_task(source_code, start_date)` |
-| `dispatch_process_articles_task` | `process_article_task(id)` / `process_articles_chunk_task(ids)` |
-| `dispatch_tag_topics_task` | `tag_events_chunk_task(event_ids)` (chunks of 10) |
-| `dispatch_route_events_task` | `route_events_chunk_task(event_ids)` (chunks of 10) |
-| `backfill_history_task` | `backfill_day_chunk_task(day, source_codes)` (one day × `BACKFILL_CHUNK_SIZE` sources — fetches, saves, and NLP-processes inline; see `services/data/historical.py`) |
+| Task | Role |
+|------|------|
+| `pipeline_tick_task` (cron, every 10m) | Dispatches every enabled stage that is due (past its own `every_minutes`) and has pending work — runs on `default` |
+| `run_stage_chunk_task(stage_name, ids)` | The only fan-out worker — executes one stage's handler over one chunk of ids — runs on the stage's own queue (`default`/`heavy`) |
+| `dispatch_stage_task(stage_name)` | Force-dispatches one stage, skipping the cadence gate (admin buttons, manual repair) |
+| `backfill_history_task` → `backfill_day_chunk_task(day, source_codes)` | Historical backfill dispatcher (separate from the live-pipeline `fetch` stage) — one day × `BACKFILL_CHUNK_SIZE` sources, fetches+saves+NLP-processes inline; see `services/data/historical.py` |
 
-Scale throughput by adding `worker-heavy` replicas in `docker-compose.yml` (no code
-change). Tuning env vars: `PROCESS_CHUNK_SIZE`, `PROCESS_DISPATCH_LIMIT`,
-`TAG_DISPATCH_LIMIT`, `ROUTE_DISPATCH_LIMIT`, `STUCK_RECOVERY_INTERVAL_MINUTES`.
+Each stage in the registry declares its own `chunk_size`/`limit`/`queue`/
+`every_minutes` — to change a stage's throughput, edit its entry in
+`services/stages.py`, not env vars. Scale worker capacity by adding
+`worker-heavy` replicas in `docker-compose.yml` (no code change).
 
-**Coordination.** Downstream steps stay on their own schedule and operate on whatever
-is ready (eventually-consistent; idempotent upserts mean nothing is lost). The admin **"Run full pipeline"** button enqueues `dispatch_fetch_task`,
-`dispatch_process_articles_task`, and `aggregate_events_task` independently — eventual
-consistency; results appear as each stage completes.
+**Coordination.** Downstream stages stay on their own cadence and operate on
+whatever is ready (eventually-consistent; idempotent upserts mean nothing is
+lost). The admin **"Run full pipeline"** button calls `pipeline_tick_task(force=True)`
+— dispatches every enabled stage with pending work, skipping cadence gates.
 
-**Robustness.** Network/LLM workers are Celery tasks declared with
+**Robustness.** `run_stage_chunk_task` is a Celery task declared with
 `autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={'max_retries': 3}`.
 Saves are idempotent (`get_or_create` for articles, date-skip for prices), so a
-retried or resumed run fills only gaps. A low-frequency safety net re-dispatches
-processed-but-unlocated articles.
+retried or resumed run fills only gaps. The `process` stage claims ids at
+dispatch time (`process_queued_at`, TTL `PROCESS_CLAIM_TTL_HOURS`) so a
+backlogged heavy queue doesn't get the same articles re-dispatched every tick;
+a mid-loop enqueue failure releases the claim on ids that never actually made
+it onto the queue.
+
+**Manual/CLI parity.** `manage.py fetch_data` and `manage.py process_articles`
+select work through the exact same predicates as the dispatcher
+(`services/stages.py::select_ids` / `fetch_source`) — a manual run can never
+select a different record set than the pipeline would.
 
 ## Per-record stage tracking
 
-Each worker records its outcome on the record's `stage_status` JSON
-(`{stage: {ok, at, error}}`) via `services/stages.py::mark_stage`. Stages:
+Each stage handler records its outcome on the record's `stage_status` JSON
+(`{stage: {ok, at, error}}`) via `services/utils.py::mark_stage`. Stages tracked
+this way:
 
-- **Article**: `process`, `geocode` (the known g4f-outage gap)
-- **Event**: `tag`, `route`
+- **Article**: `process`, `geocode`
+- **Event**: `route` (routing failures/no-indicator outcomes)
 
-`Workflow.pipeline_coverage()` returns, per stage, the count of records stuck there
-plus a sample error — the data behind the dashboard's coverage panel.
+`pipeline_coverage()` (`services/workflow/events.py`) returns, per stage, the
+count of records still pending there — built directly from the same
+`pending_count` callable each stage declares in the registry, so the displayed
+count, the Reprocess button's effect, and what the tick actually dispatches
+cannot drift apart — plus a sample error, the data behind the dashboard's
+coverage panel.
 
 ## Admin operations dashboard
 
 `/admin/dashboard/` (server-rendered). Sections:
 
-- **Throughput** — per-task item/run counts for today/yesterday from `TaskRun`, last
-  success time, last error. Every run (scheduled, dispatched, or per-record) is recorded
-  by `enqueue()` + Celery signal handlers in `services/queue.py`.
-- **Pipeline coverage** — per-stage "N need reprocessing" + last error, each with a
-  **Reprocess** button that re-dispatches only the stuck records.
+- **Health** — the last `pipeline_health_task` report (persisted to Redis every
+  30m): per-stream freshness (articles, prices, earthquakes), a zero-current-topics
+  check (the single-source Wikipedia scraper risk), and per-stage staleness
+  (pending work piling up while the tick hasn't dispatched that stage in 3× its
+  cadence — a stuck tick/queue signal, not just "slow"). Flags if the report
+  itself is stale (health task not running).
+- **Pipeline coverage** — per-stage "N need reprocessing" + last dispatch time +
+  last error, each with a **Reprocess** button that force-dispatches just that
+  stage.
 - **Upcoming runs** — next scheduled time per task (from `api/crontab`).
-- **Task queues** — per-queue queued/running/failed-today counts, linking into the
-  task browser.
+- **Task queues** — per-queue workers, broker depth (unclaimed Redis-list
+  length — persistent disagreement with the Queued count means lost/untracked
+  messages), queued/running/failed-24h counts, linking into the task browser.
+- **LLM providers** — per-provider ok/err/avg-ms + active debounce cooldowns.
 - **Forecast model** — artifact mtimes, last forecast, live directional accuracy.
-- **Actions** — run full sync, backfill prices/articles, retrain forecast, re-run
-  bootstrap, and **cancel a job** by Celery task id (`app.control.revoke`).
+- **Actions** — run full sync, backfill prices/articles (incl. "until date"),
+  retrain forecast, re-run bootstrap, and **cancel a job** by Celery task id
+  (`app.control.revoke`).
 
 Per-record reprocessing is also available from the `Article`/`Event` changelists: the
 **"pipeline gap"** filter narrows to records stuck at a stage, and bulk actions

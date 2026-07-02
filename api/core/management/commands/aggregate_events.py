@@ -19,17 +19,18 @@ class Command(BaseTaskCommand):
         )
 
     def handle(self, *args, **kwargs):
-        from services.tasks import aggregate_events_task
+        from services.workflow import aggregate_events
 
         task_kwargs = dict(hours=kwargs['hours'], min_articles=kwargs['min_articles'])
 
         if kwargs['background']:
             from services.queue import enqueue
-            enqueue(aggregate_events_task, **task_kwargs)
-            self.stdout.write(self.style.SUCCESS('Enqueued aggregate_events_task'))
+            from services.tasks import dispatch_stage_task
+            enqueue(dispatch_stage_task, 'aggregate', queue='default')
+            self.stdout.write(self.style.SUCCESS('Enqueued aggregate stage dispatch'))
             return
 
-        created, updated = aggregate_events_task(**task_kwargs)
+        created, updated = aggregate_events(**task_kwargs)
         self.stdout.write(self.style.SUCCESS(
             f'Aggregation complete: {created} created, {updated} updated'
         ))

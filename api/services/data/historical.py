@@ -57,7 +57,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from services.cache import Blocklist, key_backfill_source_block
+from services.cache import Blocklist, Counter, key_backfill_empty_streak, key_backfill_source_block
 from services.data.base import ArticleDatum, ClientServiceException
 
 if TYPE_CHECKING:
@@ -74,12 +74,47 @@ def _is_source_blocked(source_code: str) -> bool:
     return _source_blocklist.is_blocked(key_backfill_source_block(source_code))
 
 
-def _block_source(source_code: str, reason: str) -> None:
+def _block_source(source_code: str, reason: str, ttl: int = _SOURCE_BLOCK_TTL_SECONDS) -> None:
     logger.warning(
-        'Backfill source %r timed out (%s) — blocking for %ds',
-        source_code, reason, _SOURCE_BLOCK_TTL_SECONDS,
+        'Backfill source %r blocked (%s) — blocking for %ds',
+        source_code, reason, ttl,
     )
-    _source_blocklist.block(key_backfill_source_block(source_code), _SOURCE_BLOCK_TTL_SECONDS)
+    _source_blocklist.block(key_backfill_source_block(source_code), ttl)
+
+
+# ── Consecutive-empty-day circuit breaker ─────────────────────────────────────
+# A source whose sitemap discovery *succeeds* but keeps returning zero entries
+# for the requested window (wrong domain, dead sitemap, mismatched date range —
+# see RSSHistoricalService's feeds-subdomain docstring) never trips the timeout
+# blocklist above, since nothing times out. Bulk backfills dispatch every
+# (day, source) pair up front (see services.tasks.backfill_history_task), so
+# there's no natural place to "cancel" already-queued chunk tasks — instead,
+# each chunk task reports its own source-level empty/non-empty result here, and
+# once a source racks up _EMPTY_STREAK_THRESHOLD empty days in a row we block it
+# the same way a timeout would, so every subsequent already-queued chunk task
+# for that source skips with zero HTTP calls (fetch_day already checks
+# _is_source_blocked first) instead of repeating an identical, doomed crawl.
+#
+# Only genuine 'empty' outcomes count (discovery ran, no error/timeout/block —
+# see fetch_and_save_day's outcome logic); the threshold is sized so a
+# weekday-only or low-volume publisher's legitimate quiet stretch (weekend +
+# holidays) doesn't trip it — day-chunks also execute out of order across
+# concurrent heavy workers, so "consecutive" is approximate.
+_EMPTY_STREAK_THRESHOLD = 8
+# Long enough to span a bulk backfill's full dispatch window (all chunks for a
+# multi-month range are enqueued immediately, so this can't just be the 30min
+# timeout TTL — it needs to outlive the whole run).
+_EMPTY_STREAK_TTL_SECONDS = 6 * 3600
+_empty_streak_counter = Counter()
+
+
+def _note_empty_day(source_code: str) -> int:
+    """Increment and return the consecutive-empty-day counter for a source."""
+    return _empty_streak_counter.incr(key_backfill_empty_streak(source_code), ttl=_EMPTY_STREAK_TTL_SECONDS)
+
+
+def _note_nonempty_day(source_code: str) -> None:
+    _empty_streak_counter.reset(key_backfill_empty_streak(source_code))
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +126,17 @@ class DayResult:
     day: datetime.datetime
     fetched: int                      # total candidates collected across the given sources
     saved_ids: list = field(default_factory=list)  # newly-created Article ids (for process_articles)
+    # Per-source outcome for this day window:
+    #   'fetched'  — discovery ran and returned candidates
+    #   'empty'    — discovery ran cleanly but matched nothing (counts toward the
+    #                empty-streak circuit breaker; still checkpointable — a quiet
+    #                news day is a real, final result)
+    #   'blocked'  — skipped (or emptied) by the timeout/empty-streak blocklist
+    #   'error'    — discovery raised; result unknown
+    #   'deadline' — never attempted (wall-clock budget ran out first)
+    # Only 'fetched'/'empty' should be checkpointed as done — the rest must stay
+    # eligible for a --resume rerun (see services.tasks.backfill_day_chunk_task).
+    outcomes: dict = field(default_factory=dict)
 
     @property
     def saved(self) -> int:
@@ -180,11 +226,16 @@ class RSSHistoricalService:
 
     def __init__(
         self, source: 'core.models.Source', max_candidates: int | None = None,
+        first_match_only: bool = False,
     ) -> None:
         self._source = source
         # Cap on entries kept per day. Sorted by recency (a weak relevance proxy)
         # before this cap is applied, since there's no LLM score to rank by.
         self._max_candidates = max_candidates
+        # Existence probe mode (see probe_source_has_sitemap_entries): stop all
+        # discovery the moment ANY entry is found, instead of exhaustively
+        # crawling every candidate sitemap + sub-sitemap and capping afterward.
+        self._first_match_only = first_match_only
         parsed = urlparse(source.url)
         netloc = _strip_feed_subdomain(parsed.netloc)
         self._base_url = f'{parsed.scheme}://{netloc}'
@@ -249,6 +300,8 @@ class RSSHistoricalService:
                 if entry['url'] not in seen_urls:
                     seen_urls.add(entry['url'])
                     merged.append(entry)
+            if self._first_match_only and merged:
+                break
         return merged
 
     def _candidate_sitemap_urls(self) -> list[str]:
@@ -371,6 +424,8 @@ class RSSHistoricalService:
                 )
                 break
             entries.extend(self._parse_sitemap(sub_url, day_start, day_end))
+            if self._first_match_only and entries:
+                break
         return entries
 
     def _deadline_passed(self) -> bool:
@@ -412,6 +467,42 @@ class RSSHistoricalService:
 
 
 # ---------------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------------
+
+# Wide enough that a source's genuine sitemap (whatever its update cadence) is
+# very likely to have *something* in it if the discovery path is even hitting
+# the right domain — deliberately not the actual backfill window, so the probe
+# (first_match_only) usually stops after the first sitemap page it opens.
+_PREFLIGHT_LOOKBACK_DAYS = 90
+# Wall-clock budget per probe — keeps the dispatcher's serial per-source
+# preflight loop bounded even against a slow-but-not-timing-out host.
+_PREFLIGHT_DEADLINE_SECONDS = 45
+
+
+def probe_source_has_sitemap_entries(source: 'core.models.Source') -> bool:
+    """One-shot sanity check: does this source's sitemap discovery return ANY
+    entries in a wide recent window?
+
+    Meant to run once per source before a bulk multi-day backfill dispatches
+    N day-chunk tasks for it (see services.tasks.backfill_history_task) — a
+    misconfigured source (wrong domain from feed-subdomain stripping, dead
+    sitemap, etc.) will return empty for every single day of a multi-month
+    range; this catches that in one request instead of after dispatching and
+    burning the whole range on it. ``first_match_only`` + the deadline keep it
+    to a handful of requests, not a full 40-sub-sitemap crawl.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    window_start = now - datetime.timedelta(days=_PREFLIGHT_LOOKBACK_DAYS)
+    deadline = now + datetime.timedelta(seconds=_PREFLIGHT_DEADLINE_SECONDS)
+    strategy = RSSHistoricalService(source, max_candidates=1, first_match_only=True)
+    try:
+        return bool(strategy.fetch_day(window_start, now, deadline=deadline))
+    except HistoricalServiceError:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -433,8 +524,8 @@ class HistoricalBackfillService:
     source_type, source_url) — fully idempotent. NLP processing is the
     caller's job (services.tasks.backfill_day_chunk_task calls
     services.workflow.articles.process_articles on ``result.saved_ids``);
-    importance *scoring* is untouched — score_articles_task's normal cron
-    still picks these up via created_on.
+    importance *scoring* is untouched — the 'score' pipeline stage
+    still picks these up (they have no importance_score yet).
 
     Backfill metadata is stored in Article.extra_data under key:
       backfill_day — ISO date string of the day window the article was found in
@@ -485,24 +576,46 @@ class HistoricalBackfillService:
 
         dry_run  — discover but do not write to the database.
         deadline — wall-clock cutoff; stops fetching further sources once passed
-                   (mirrors services.workflow.articles.fetch_articles's ``deadline``
-                   param) so a chunk task exits cleanly with partial results
+                   so a chunk task exits cleanly with partial results
                    instead of relying solely on Celery's hard task time limit.
         """
         source_datums: list[tuple['core.models.Source', ArticleDatum]] = []
         fetched_total = 0
+        outcomes: dict[str, str] = {}
         for source in self.sources:
             if deadline is not None and datetime.datetime.now(datetime.timezone.utc) >= deadline:
                 logger.warning('[backfill] deadline reached — stopping mid source list for day=%s', day_start.date())
-                break
+                outcomes[source.code] = 'deadline'
+                continue
             top_n = self._resolve_top_n(source)
             if top_n == 0:
-                continue  # weight=0 — suppressed
+                outcomes[source.code] = 'suppressed'  # weight=0 — operator-suppressed
+                continue
+            if _is_source_blocked(source.code):
+                outcomes[source.code] = 'blocked'
+                continue
             try:
                 candidates = self._strategies[source.code].fetch_day(day_start, day_end, deadline=deadline)
             except HistoricalServiceError as exc:
                 logger.error('fetch_day failed source=%s day=%s: %s', source.code, day_start.date(), exc)
+                outcomes[source.code] = 'error'
                 candidates = []
+            else:
+                if candidates:
+                    outcomes[source.code] = 'fetched'
+                    _note_nonempty_day(source.code)
+                elif _is_source_blocked(source.code):
+                    # A timeout mid-fetch blocked it — result unknown, not "empty".
+                    outcomes[source.code] = 'blocked'
+                else:
+                    outcomes[source.code] = 'empty'
+                    streak = _note_empty_day(source.code)
+                    if streak >= _EMPTY_STREAK_THRESHOLD:
+                        _block_source(
+                            source.code, f'{streak} consecutive empty backfill days',
+                            ttl=_EMPTY_STREAK_TTL_SECONDS,
+                        )
+
             fetched_total += len(candidates)
             candidates.sort(
                 key=lambda d: d.get('published_on') or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
@@ -514,7 +627,7 @@ class HistoricalBackfillService:
                 time.sleep(self.delay_seconds)
 
         saved_ids = [] if dry_run else self._save_day_batch(source_datums, day_start, deadline=deadline)
-        return DayResult(day=day_start, fetched=fetched_total, saved_ids=saved_ids)
+        return DayResult(day=day_start, fetched=fetched_total, saved_ids=saved_ids, outcomes=outcomes)
 
     def _save_day_batch(
         self,
@@ -537,6 +650,7 @@ class HistoricalBackfillService:
         """
         import core.models as m
         from django.conf import settings
+        from services.cache import KEY_BACKFILL_TITLE_DEDUP
         from services.data import _filter_title_dupes
 
         if not source_datums:
@@ -554,6 +668,7 @@ class HistoricalBackfillService:
                 datums,
                 threshold=getattr(settings, 'ARTICLE_DEDUP_JACCARD_THRESHOLD', 0.75),
                 hours=getattr(settings, 'ARTICLE_DEDUP_HOURS', 24),
+                cache_key=KEY_BACKFILL_TITLE_DEDUP,
             )
 
         by_source: dict[tuple[str, str], list[dict]] = {}

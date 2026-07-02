@@ -1,4 +1,4 @@
-from services.workflow.articles import fetch_articles, process_articles
+from services.workflow.articles import fetch_source, fetch_sources, process_articles
 from services.workflow.events import aggregate_events, pipeline_coverage
 from services.workflow.topics import (
     _needs_tagging,
@@ -11,7 +11,8 @@ from services.workflow.topics import (
 )
 
 __all__ = [
-    'fetch_articles',
+    'fetch_source',
+    'fetch_sources',
     'process_articles',
     'aggregate_events',
     'pipeline_coverage',

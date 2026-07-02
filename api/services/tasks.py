@@ -3,6 +3,14 @@
 These are Celery tasks (@shared_task) enqueued via services.queue.enqueue.
 Calling one directly as a plain function (func(**kwargs)) still runs it
 synchronously in-process — used by run_task.py --sync and TASK_QUEUE_ENABLED=False.
+
+The pull-based pipeline (fetch → score → process → geocode → aggregate → tag →
+route) is NOT a set of per-step tasks anymore — it's declared in
+services/stages.py and executed by exactly two tasks here:
+pipeline_tick_task (cron, dispatches due stages) and run_stage_chunk_task
+(the only fan-out worker). Everything else in this module is either
+genuinely scheduled (dailies, maintenance, forecasting) or one-shot
+(backfills, bootstrap).
 """
 
 import functools
@@ -13,14 +21,10 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from celery import shared_task
 
 from services.workflow import (
-    fetch_articles,
     process_articles,
-    aggregate_events,
-    tag_events_by_ids,
     refresh_topics,
     retroactive_tag_topic,
     discover_topics_from_events,
-    _needs_tagging,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,21 +56,6 @@ def _log_task(func):
 # itself (Celery convention), not passed in at the enqueue() call site.
 _RETRY_KW = dict(autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={'max_retries': 3})
 
-DEFAULT_FETCH_MINUTES = 20          # look-back window for fetch tasks (2× interval)
-DEFAULT_PROCESS_LIMIT = 1000
-DEFAULT_AGGREGATE_HOURS = 168        # widened from 24h so events don't age out of the tag-dispatch window before being tagged
-DEFAULT_AGGREGATE_MIN_ARTICLES = 1
-
-# Fan-out tuning — dispatchers cap records enqueued per tick; chunk size amortises overhead.
-# Matches ArticleAnalyzer.ANALYZE_BATCH_SIZE so each chunk maps to exactly one batched LLM call
-# (mirrors TAG_CHUNK_SIZE below for topic tagging).
-PROCESS_CHUNK_SIZE = 8
-PROCESS_DISPATCH_LIMIT = 500
-PROCESS_QUEUE_CLAIM_TTL_HOURS = 6  # claim lease so a slow queue doesn't get re-dispatched every tick
-TAG_DISPATCH_LIMIT = 500
-ROUTE_DISPATCH_LIMIT = 500
-TAG_CHUNK_SIZE = 10     # events per chunk (EmbeddingTopicMatcher batch, local — no LLM call)
-ROUTE_CHUNK_SIZE = 10
 BOOTSTRAP_ARTICLE_YEARS = 1
 
 # One backfill_day_chunk_task covers one day × this many sources. Sized so the
@@ -85,178 +74,38 @@ BACKFILL_CHUNK_DEADLINE_SECONDS = 480
 BACKFILL_CHECKPOINT_TTL_SECONDS = 30 * 24 * 3600
 
 
-# ── Text pipeline ─────────────────────────────────────────────────────────────
+# ── The pipeline: two tasks, all stages ──────────────────────────────────────
+# Stage definitions (selection, chunking, cadence, queue) live in
+# services/stages.py — see its module docstring. The tick is the only
+# scheduler entry point; the chunk task is the only fan-out worker.
 
 @shared_task
 @_log_task
-def aggregate_events_task(
-    hours: int = DEFAULT_AGGREGATE_HOURS,
-    min_articles: int = DEFAULT_AGGREGATE_MIN_ARTICLES,
-) -> tuple[int, int]:
-    result = aggregate_events(hours=hours, min_articles=min_articles)
-    from services.queue import enqueue
-    enqueue(dispatch_tag_topics_task, hours, queue='default')
-    return result
-
-
-# ── Fan-out: dispatcher → per-record worker (WA3) ────────────────────────────────
-# A light dispatcher (default queue) selects pending records and enqueues one worker
-# job per record/chunk so the queue spreads work across all workers. Workers are
-# idempotent. Downstream steps run on their own schedule (eventually-consistent).
-
-@shared_task(**_RETRY_KW)
-@_log_task
-def fetch_source_task(source_code: str, start_date: datetime | None = None) -> int:
-    """Fetch one source. Idempotent per source (RSS de-dupes on save)."""
-    now = datetime.now(dt_timezone.utc)
-    if start_date is None:
-        start_date = now - timedelta(minutes=DEFAULT_FETCH_MINUTES)
-    return fetch_articles(source_code, start_date)
+def pipeline_tick_task(force: bool = False) -> dict:
+    """One scheduler tick: dispatch every enabled stage that is due and has
+    pending work (cron: every 10 min). force=True skips the per-stage cadence
+    gates — used by the admin dashboard's "Run pipeline" button.
+    Returns {stage_name: jobs_enqueued}."""
+    from services.stages import run_due_stages
+    return run_due_stages(force=force)
 
 
 @shared_task
 @_log_task
-def dispatch_fetch_task(start_date: datetime | None = None) -> int:
-    """Enqueue one fetch_source_task per enabled source. Returns sources dispatched."""
-    from core import models as core_models
-    from services.queue import enqueue
-
-    now = datetime.now(dt_timezone.utc)
-    if start_date is None:
-        start_date = now - timedelta(minutes=DEFAULT_FETCH_MINUTES)
-    codes = list(core_models.Source.objects.filter(is_enabled=True).values_list('code', flat=True))
-    for code in codes:
-        enqueue(fetch_source_task, code, start_date, queue='default')
-    return len(codes)
+def dispatch_stage_task(stage_name: str, force: bool = True) -> int:
+    """Dispatch a single stage by name (admin buttons / manual repair).
+    Returns jobs enqueued."""
+    from services.stages import dispatch_stage
+    return dispatch_stage(stage_name, force=force)
 
 
 @shared_task(**_RETRY_KW)
 @_log_task
-def process_articles_chunk_task(ids: list, only_failed: bool = False) -> int:
-    """Process a chunk of articles by id (idempotent)."""
-    return process_articles(ids=ids, only_failed=only_failed)
-
-
-@shared_task(**_RETRY_KW)
-@_log_task
-def process_article_task(article_id, only_failed: bool = False) -> int:
-    """Process a single article by id (idempotent)."""
-    return process_articles(ids=[article_id], only_failed=only_failed)
-
-
-@shared_task
-@_log_task
-def dispatch_process_articles_task(limit: int | None = None, only_failed: bool = False, chunk_size: int | None = None) -> int:
-    """Select unprocessed (or un-located) articles and fan them out. Returns jobs enqueued."""
-    from core import models as core_models
-    from services.queue import enqueue
-
-    limit = limit or PROCESS_DISPATCH_LIMIT
-    chunk_size = max(1, chunk_size or PROCESS_CHUNK_SIZE)
-    if only_failed:
-        from django.db.models import Q
-        qs = core_models.Article.objects.filter(processed_on__isnull=False).filter(
-            Q(location__isnull=True) | Q(location='')
-        )
-        ids = [a.id for a in qs.only('id', 'extra_data') if not (a.extra_data or {}).get('geo_failed')][:limit]
-    else:
-        from django.db.models import Q
-        from django.conf import settings as _s
-        from services.workflow.articles import _apply_min_score_filter
-        now = datetime.now(dt_timezone.utc)
-        claim_cutoff = now - timedelta(hours=PROCESS_QUEUE_CLAIM_TTL_HOURS)
-        qs = core_models.Article.objects.filter(processed_on__isnull=True)
-        # Skip articles whose earlier dispatch is still (presumably) in flight —
-        # avoids re-enqueueing duplicate jobs when the heavy queue is backlogged.
-        qs = qs.filter(Q(process_queued_at__isnull=True) | Q(process_queued_at__lt=claim_cutoff))
-        qs = _apply_min_score_filter(qs, _s.ARTICLE_MIN_IMPORTANCE_TO_PROCESS)
-        ids = list(qs.order_by('-importance_score').values_list('id', flat=True)[:limit])
-    if not ids:
-        return 0
-    if not only_failed:
-        core_models.Article.objects.filter(id__in=ids).update(process_queued_at=now)
-    enq = 0
-    enqueued_ids: set = set()
-    try:
-        for i in range(0, len(ids), chunk_size):
-            chunk = ids[i:i + chunk_size]
-            if len(chunk) == 1:
-                enqueue(process_article_task, chunk[0], only_failed, queue='heavy')
-            else:
-                enqueue(process_articles_chunk_task, chunk, only_failed, queue='heavy')
-            enqueued_ids.update(chunk)
-            enq += 1
-    except Exception:
-        if not only_failed:
-            # Release the claim on articles a mid-loop failure never actually got to
-            # enqueue, so the next dispatch tick can pick them up immediately instead
-            # of waiting out PROCESS_QUEUE_CLAIM_TTL_HOURS for a job that was never queued.
-            unclaimed = [aid for aid in ids if aid not in enqueued_ids]
-            if unclaimed:
-                core_models.Article.objects.filter(id__in=unclaimed).update(process_queued_at=None)
-        raise
-    return enq
-
-
-@shared_task(**_RETRY_KW)
-@_log_task
-def tag_events_chunk_task(event_ids: list) -> int:
-    """Tag a chunk of events by id (local embedding matcher, no LLM call). Idempotent."""
-    return tag_events_by_ids(event_ids)
-
-
-@shared_task
-@_log_task
-def dispatch_tag_topics_task(hours: int = DEFAULT_AGGREGATE_HOURS, force_retag: bool = False,
-                             limit: int | None = None) -> int:
-    """Select events needing tags and fan them out in chunks of 10. Returns jobs enqueued."""
-    from core import models as core_models
-    from services.queue import enqueue
-    limit = limit or TAG_DISPATCH_LIMIT
-    lookback = datetime.now(dt_timezone.utc) - timedelta(hours=hours)
-    qs = core_models.Event.objects.filter(started_at__gte=lookback).only('pk', 'topics', 'topics_source')
-    if not force_retag:
-        events = [e for e in qs if _needs_tagging(e.topics) or e.topics_source == 'keyword']
-        ids = [e.pk for e in events[:limit]]
-    else:
-        ids = list(qs.values_list('pk', flat=True)[:limit])
-    if not ids:
-        return 0
-    enq = 0
-    for i in range(0, len(ids), TAG_CHUNK_SIZE):
-        enqueue(tag_events_chunk_task, ids[i:i + TAG_CHUNK_SIZE], queue='heavy')
-        enq += 1
-    return enq
-
-
-@shared_task(**_RETRY_KW)
-@_log_task
-def route_events_chunk_task(event_ids: list) -> int:
-    """Route a chunk of events by id. Idempotent."""
-    from core import models as core_models
-    from services.routing import route_events
-
-    events = list(core_models.Event.objects.filter(pk__in=list(event_ids)))
-    return route_events(events)
-
-
-@shared_task
-@_log_task
-def dispatch_route_events_task(hours: int = 720, limit: int | None = None) -> int:
-    """Select recent events and fan out routing in chunks of 10. Returns jobs enqueued."""
-    from core import models as core_models
-    from services.queue import enqueue
-
-    limit = limit or ROUTE_DISPATCH_LIMIT
-    start = datetime.now(dt_timezone.utc) - timedelta(hours=hours)
-    ids = list(core_models.Event.objects.filter(started_at__gte=start).values_list('pk', flat=True)[:limit])
-    if not ids:
-        return 0
-    enq = 0
-    for i in range(0, len(ids), ROUTE_CHUNK_SIZE):
-        enqueue(route_events_chunk_task, ids[i:i + ROUTE_CHUNK_SIZE], queue='heavy')
-        enq += 1
-    return enq
+def run_stage_chunk_task(stage_name: str, ids: list | None = None) -> int:
+    """Execute one chunk (or a singleton run) of a pipeline stage. Idempotent —
+    every stage handler tolerates re-runs on the same ids."""
+    from services.stages import run_chunk
+    return run_chunk(stage_name, ids)
 
 
 # ── Configurationless first-load bootstrap (WA4) ─────────────────────────────────
@@ -289,8 +138,9 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
     # Long one-shot seeds go on the bulk queue so they don't block the live pipeline.
     enqueue(backfill_prices_task, years=10, queue='bulk', job_timeout=-1)
     # source_code=None (all enabled RSS sources), top_n=None → each source's per-day
-    # cap derives from its weight (2–6 by priority). backfill_history_task is a pure
-    # dispatcher (see its docstring) — cheap enough that it doesn't need job_timeout=-1.
+    # cap derives from its weight (2–6 by priority). backfill_history_task does one
+    # bounded preflight probe per source, then pure enqueueing (see its docstring)
+    # — no job_timeout=-1 needed on the bulk queue.
     enqueue(backfill_history_task, start, now, None, queue='bulk')
     if settings.FORECAST_ENABLED:
         enqueue(train_forecast_model_task, queue='bulk', job_timeout=-1)
@@ -341,47 +191,35 @@ def refresh_openrouter_models_task() -> dict:
 
 # ── Stream tasks ───────────────────────────────────────────────────────────────
 
-@shared_task
-def fetch_prices_task() -> int:
-    from django.conf import settings
-    if not settings.STREAM_PRICES_ENABLED:
-        return 0
-    from services.streams import run_stream
-    return run_stream('prices')
+# Stream name → settings flag that gates it (checked at run time too, so a
+# stray enqueue of a disabled stream is still a no-op).
+_STREAM_FLAGS = {
+    'prices': 'STREAM_PRICES_ENABLED',
+    'notam': 'STREAM_NOTAM_ENABLED',
+    'earthquakes': 'STREAM_EARTHQUAKE_ENABLED',
+    'forex': 'STREAM_FOREX_ENABLED',
+}
 
 
 @shared_task
-def fetch_notams_task() -> int:
+def run_stream_task(name: str) -> int:
+    """Run one stream collector by name ('prices' | 'notam' | 'earthquakes' |
+    'forex') — replaces the four identical per-stream wrapper tasks."""
     from django.conf import settings
-    if not settings.STREAM_NOTAM_ENABLED:
+    flag = _STREAM_FLAGS[name]
+    if not getattr(settings, flag, False):
         return 0
     from services.streams import run_stream
-    return run_stream('notam')
-
-
-@shared_task
-def fetch_earthquakes_task() -> int:
-    from django.conf import settings
-    if not settings.STREAM_EARTHQUAKE_ENABLED:
-        return 0
-    from services.streams import run_stream
-    return run_stream('earthquakes')
-
-
-@shared_task
-def fetch_forex_task() -> int:
-    from django.conf import settings
-    if not settings.STREAM_FOREX_ENABLED:
-        return 0
-    from services.streams import run_stream
-    return run_stream('forex')
+    return run_stream(name)
 
 
 # ── Health monitoring (A1 / A5) ─────────────────────────────────────────────────
 
 @shared_task
 def pipeline_health_task() -> dict:
-    """Warn when pipeline outputs go stale. Logs only — surfaced via Sentry / log alerts.
+    """Warn when pipeline outputs go stale. Warnings go to logs (Sentry / log
+    alerts); the full report is also persisted to Redis and rendered on the
+    admin dashboard's Health section.
 
     Covers the highest-risk silent failures (A1): no fetched articles, stale stream
     data on undocumented APIs, and — the single-source topic risk (A5) — zero current
@@ -417,6 +255,38 @@ def pipeline_health_task() -> dict:
     if current_topics == 0:
         log.warning('[health] zero current topics — the Wikipedia topic source may be broken')
 
+    # Stage staleness: pending work piling up while the tick hasn't dispatched
+    # the stage in 3× its cadence means the tick/queue is stuck, not just slow.
+    from services.stages import REGISTRY, last_dispatched_at
+    stages_report = {}
+    for stage in REGISTRY.values():
+        if not stage.enabled():
+            continue
+        pending = stage.pending_count()
+        last = last_dispatched_at(stage)
+        stale = (
+            pending > 0
+            and last is not None
+            and last < now - timedelta(minutes=3 * stage.every_minutes)
+        )
+        stages_report[stage.name] = {
+            'pending': pending,
+            'last_dispatch': last.isoformat() if last else None,
+            'ok': not stale,
+        }
+        if stale:
+            log.warning(
+                '[health] stage %r stale — %d pending, last dispatched %s (cadence %dm)',
+                stage.name, pending, last, stage.every_minutes,
+            )
+    report['stages'] = stages_report
+
+    from services.cache import KEY_PIPELINE_HEALTH_LAST, cache_set
+    try:
+        cache_set(KEY_PIPELINE_HEALTH_LAST, {'at': now.isoformat(), 'report': report}, timeout=None)
+    except Exception:  # noqa: BLE001 — no Redis in dev; the report itself still returns
+        log.exception('[health] failed to persist health report')
+
     return report
 
 
@@ -445,6 +315,7 @@ def backfill_history_task(
     dry_run: bool = False,
     resume: bool = False,
     progress=None,
+    skip_preflight: bool = False,
 ) -> dict:
     """
     Dispatcher: enumerate every (day, source-chunk) pair covering
@@ -458,18 +329,36 @@ def backfill_history_task(
     ``source_code=None`` backfills every enabled RSS source; pass a code to
     restrict to one source. ``top_n=None`` derives the per-source-per-day cap
     from each source's ``weight`` (2–6 by priority); pass an int to override.
-    ``resume`` skips (day, chunk) pairs already recorded in the Redis
-    checkpoint set (see services.cache.key_backfill_checkpoint).
+    ``resume`` skips (day, source) pairs already recorded in the Redis
+    checkpoint set (see services.cache.key_backfill_checkpoint). Checkpoints
+    are per source-day and only written for source-days whose fetch actually
+    ran (see backfill_day_chunk_task) — days a source spent blocklisted stay
+    un-checkpointed, so a --resume rerun recovers them.
     ``progress`` is an optional ``callable(dict)`` — only invoked when a chunk
     actually runs synchronously in this same call (TASK_QUEUE_ENABLED=False,
     where enqueue() returns the chunk task's result directly); skipped when a
     chunk is genuinely queued, since its outcome isn't known yet.
 
-    Returns {'days': int, 'sources': int, 'chunks_dispatched': int}.
+    Before dispatching, each candidate source gets one cheap preflight probe
+    (``probe_source_has_sitemap_entries`` — a single wide-window sitemap fetch)
+    so a misconfigured source (wrong domain, dead sitemap) is dropped from the
+    whole run up front instead of burning every (day × chunk) pair in the
+    requested range on a source that's going to return empty every single
+    time. Pass ``skip_preflight=True`` to force-dispatch a source anyway (e.g.
+    while debugging the probe itself). Sources dropped this way are reported
+    under ``skipped_sources`` rather than silently disappearing.
+
+    This makes the dispatcher itself do one blocking HTTP round-trip per
+    source before it enqueues anything — previously pure enqueue, no I/O. Only
+    safe because this task runs on the ``bulk`` queue (long one-shot jobs, 1
+    worker); don't reuse this dispatcher pattern on a queue sized for
+    fast/non-blocking work.
+
+    Returns {'days': int, 'sources': int, 'chunks_dispatched': int, 'skipped_sources': list[str]}.
     """
     import core.models as m
     from services.cache import key_backfill_checkpoint, redis_set_members
-    from services.data.historical import iter_days
+    from services.data.historical import iter_days, probe_source_has_sitemap_entries
     from services.queue import enqueue
 
     start_date = _parse_backfill_date(start_date)
@@ -481,6 +370,21 @@ def backfill_history_task(
         sources = list(
             m.Source.objects.filter(type=m.SourceType.RSS, is_enabled=True).order_by('code')
         )
+
+    skipped_sources: list[str] = []
+    if not skip_preflight and not dry_run:
+        verified = []
+        for source in sources:
+            if probe_source_has_sitemap_entries(source):
+                verified.append(source)
+            else:
+                skipped_sources.append(source.code)
+                logger.warning(
+                    '[backfill] source=%r: preflight found no sitemap entries in the last '
+                    '90 days — dropping from this run (pass skip_preflight=True to force)',
+                    source.code,
+                )
+        sources = verified
     source_codes = [s.code for s in sources]
 
     checkpoint_key = key_backfill_checkpoint(str(start_date.date()), str(end_date.date()))
@@ -495,28 +399,35 @@ def backfill_history_task(
     for day_start, day_end in iter_days(start_date, end_date):
         total_days += 1
         day_iso = day_start.date().isoformat()
-        for chunk_start in range(0, len(source_codes), BACKFILL_CHUNK_SIZE):
-            chunk = source_codes[chunk_start:chunk_start + BACKFILL_CHUNK_SIZE]
-            # Content-addressed, not index-based: if the enabled-source set changes
-            # between an interrupted run and a --resume rerun, an index-based key
-            # (f'{day}:{chunk_index}') would silently point at a *different* set of
-            # sources than the original run covered, and --resume would skip them
-            # without ever actually backfilling that day for the new source set.
-            chunk_key = f"{day_iso}:{'-'.join(chunk)}"
-            if resume and chunk_key in done:
-                continue
+        # Checkpoint members are '{day_iso}:{source_code}' — per source-day, so a
+        # --resume rerun re-dispatches exactly the source-days that never actually
+        # ran (blocked/errored/deadline), even if the enabled-source set or chunk
+        # boundaries changed since the interrupted run.
+        pending = [c for c in source_codes if not (resume and f'{day_iso}:{c}' in done)]
+        for chunk_start in range(0, len(pending), BACKFILL_CHUNK_SIZE):
+            chunk = pending[chunk_start:chunk_start + BACKFILL_CHUNK_SIZE]
             result = enqueue(
                 backfill_day_chunk_task, day_start, day_end, chunk, top_n, dry_run,
-                checkpoint_key if resume else None, chunk_key, delay_seconds,
+                checkpoint_key, delay_seconds,
                 queue='heavy',
             )
             dispatched += 1
             if progress is not None and isinstance(result, dict):
                 progress(result)
 
-    summary = {'days': total_days, 'sources': len(sources), 'chunks_dispatched': dispatched}
+    summary = {
+        'days': total_days, 'sources': len(sources), 'chunks_dispatched': dispatched,
+        'skipped_sources': skipped_sources,
+    }
     logger.info('backfill_history_task dispatched: %s', summary)
     return summary
+
+
+# Source-day outcomes that count as "done" for resume checkpointing — the fetch
+# actually ran to a final answer. 'blocked'/'error'/'deadline' stay
+# un-checkpointed so a --resume rerun retries them; 'suppressed' (weight=0) is
+# deliberate but reversible, so it also stays eligible.
+_CHECKPOINTABLE_OUTCOMES = frozenset({'fetched', 'empty'})
 
 
 @shared_task(**_RETRY_KW)
@@ -527,7 +438,6 @@ def backfill_day_chunk_task(
     top_n: int | None,
     dry_run: bool,
     checkpoint_key: str | None,
-    chunk_key: str,
     delay_seconds: float = 0.5,
 ) -> dict:
     """
@@ -541,7 +451,12 @@ def backfill_day_chunk_task(
     Celery's hard kill. See services/data/historical.py's module docstring for
     fetch/save/dedup details and the trade-offs this chunking makes.
 
-    Returns {'day': ISO date str, 'sources': [...], 'fetched', 'saved', 'processed'}.
+    Checkpointing is per source-day and outcome-gated: only sources whose fetch
+    ran to a real answer ('fetched'/'empty' — see DayResult.outcomes) are marked
+    done, so blocklisted/errored/deadline source-days remain resumable.
+
+    Returns {'day': ISO date str, 'sources': [...], 'fetched', 'saved',
+    'processed', 'outcomes': {source_code: outcome}}.
     """
     import core.models as m
     from services.cache import redis_set_add
@@ -558,14 +473,19 @@ def backfill_day_chunk_task(
         processed = process_articles(ids=result.saved_ids)
 
     if checkpoint_key and not dry_run:
-        try:
-            redis_set_add(checkpoint_key, chunk_key, ttl=BACKFILL_CHECKPOINT_TTL_SECONDS)
-        except Exception:
-            logger.exception('[backfill] failed to mark checkpoint %s/%s', checkpoint_key, chunk_key)
+        day_iso = day_start.date().isoformat()
+        for code, outcome in result.outcomes.items():
+            if outcome not in _CHECKPOINTABLE_OUTCOMES:
+                continue
+            try:
+                redis_set_add(checkpoint_key, f'{day_iso}:{code}', ttl=BACKFILL_CHECKPOINT_TTL_SECONDS)
+            except Exception:
+                logger.exception('[backfill] failed to mark checkpoint %s/%s:%s', checkpoint_key, day_iso, code)
 
     return {
         'day': day_start.date().isoformat(), 'sources': source_codes,
         'fetched': result.fetched, 'saved': result.saved, 'processed': processed,
+        'outcomes': result.outcomes,
     }
 
 
@@ -653,21 +573,8 @@ def run_forecast_task() -> int:
     return created
 
 
-# ── Article importance scoring ────────────────────────────────────────────────
-
-@shared_task
-def score_articles_task(hours: int = 2, article_ids: list | None = None) -> int:
-    """
-    LLM-score articles that have no importance_score.
-    article_ids: when given, re-score exactly these articles (ignores hours).
-    hours: when article_ids is None, score rows created in this window.
-    """
-    from django.conf import settings
-    if not settings.ARTICLE_IMPORTANCE_SCORING_ENABLED:
-        return 0
-    from services.scoring import score_unscored_articles
-    return score_unscored_articles(hours=hours, article_ids=article_ids)
-
+# ── Article maintenance ───────────────────────────────────────────────────────
+# (Importance scoring itself is the 'score' stage in services/stages.py.)
 
 @shared_task
 def cleanup_low_importance_articles_task() -> int:

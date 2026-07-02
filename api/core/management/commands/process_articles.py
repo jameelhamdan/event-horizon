@@ -23,19 +23,29 @@ class Command(BaseTaskCommand):
         )
 
     def handle(self, *args, **kwargs):
-        task_kwargs = dict(
-            limit=kwargs['limit'],
-            source_code=kwargs.get('source_code'),
-            reprocess=kwargs['reprocess'],
-        )
-
         if kwargs['background']:
             from services.queue import enqueue
-            from services.tasks import dispatch_process_articles_task
-            enqueue(dispatch_process_articles_task, limit=task_kwargs['limit'], queue='default')
-            self.stdout.write(self.style.SUCCESS('Enqueued dispatch_process_articles_task'))
+            from services.tasks import dispatch_stage_task
+            enqueue(dispatch_stage_task, 'process', queue='default')
+            self.stdout.write(self.style.SUCCESS('Enqueued process stage dispatch'))
             return
 
+        source_code = kwargs.get('source_code')
+        limit = kwargs['limit']
+
+        if kwargs['reprocess']:
+            # Deliberate re-run over already-processed rows — the only selection
+            # the stage predicate can't express (it selects pending work only).
+            from core.models import Article
+            qs = Article.objects.all()
+            if source_code:
+                qs = qs.filter(source_code=source_code)
+            ids = list(qs.values_list('id', flat=True)[:limit])
+        else:
+            # Same predicate the pipeline dispatcher uses (services/stages.py).
+            from services.stages import select_ids
+            ids = select_ids('process', limit, source_code=source_code)
+
         from services.workflow import process_articles
-        count = process_articles(**task_kwargs)
+        count = process_articles(ids=ids) if ids else 0
         self.stdout.write(self.style.SUCCESS(f'Processed {count} articles'))

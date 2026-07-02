@@ -459,6 +459,7 @@
       "name": "El País English",
       "description": "International and Latin American news from El País in English.",
       "url": "https://feeds.elpais.com/mrss-s/pages/ep/site/english.elpais.com/portada",
+      "sitemap_url": "https://english.elpais.com/sitemap.xml",
       "author_slug": "",
       "headers": {},
       "is_enabled": true,

@@ -64,15 +64,19 @@ flowchart LR
 
 ## Three-queue model
 
-Work is split by cost, not by feature:
+Work is split by cost, not by feature. The pipeline itself is a **stage
+registry** (`services/stages.py`) — every stage declares which of these three
+queues it runs on; see [pipeline.md](pipeline.md) for the full stage list.
 
-- **`default`** — fast I/O: article fetch, price/notam/earthquake/forex streams.
-  Enqueued by dispatchers (e.g. `dispatch_fetch_articles`, `dispatch_fetch_prices`).
-- **`heavy`** — anything CPU- or LLM-bound: `process_articles` (LLM + local NER/VADER/
-  FinBERT/translation), `aggregate_events`, topic tagging (local embeddings) /
-  discovery (LLM), `run_forecast`, `score_forecasts`, `train_forecaster`, newsletter
-  generation (LLM), `backfill_day_chunk_task` (one day × a few sources — fetch, save,
-  process, bounded to the queue's ~10min default time limit).
+- **`default`** — fast I/O: the `fetch` pipeline stage, `pipeline_tick_task`
+  itself, `dispatch_stage_task`, price/notam/earthquake/forex streams
+  (`run_stream_task`).
+- **`heavy`** — anything CPU- or LLM-bound: the `score`/`process`/`geocode`/
+  `aggregate`/`tag`/`route` pipeline stages (via `run_stage_chunk_task`),
+  `discover_topics_task`, `refresh_topics_task`, `run_forecast_task`,
+  `score_forecasts_task`, `train_forecast_model_task`, `generate_newsletter_task`,
+  `backfill_day_chunk_task` (one day × a few sources — fetch, save, process,
+  bounded to the queue's ~10min default time limit).
 - **`bulk`** — long one-shot jobs / pure dispatchers: `backfill_history_task`
   (dispatches `backfill_day_chunk_task` onto `heavy`, does no fetching itself),
   `backfill_prices_task`, `bootstrap_initial_data_task`.
@@ -84,13 +88,12 @@ needed locally.
 ```mermaid
 flowchart TB
     subgraph DEFAULT["default queue · worker-light · fast I/O"]
-        D1[fetch_articles] --- D2[fetch_prices] --- D3[fetch_notams]
-        D4[fetch_earthquakes] --- D5[fetch_forex]
+        D1[pipeline_tick_task] --- D2[fetch stage] --- D3[run_stream_task ×4]
     end
     subgraph HEAVY["heavy queue · worker-heavy · CPU / LLM"]
-        H1[process_articles<br/>+ FinBERT] --- H2[aggregate_events]
-        H3[tag_topics / discover_topics] --- H4[run_forecast / score_forecasts]
-        H5[train_forecaster] --- H6[generate_newsletter]
+        H1[score / process / geocode<br/>stages] --- H2[aggregate stage]
+        H3[tag stage / discover_topics] --- H4[route stage]
+        H5[run_forecast / score_forecasts / train] --- H6[generate_newsletter]
         H7[backfill_day_chunk_task]
     end
     subgraph BULK["bulk queue · worker-bulk · long one-shot jobs / dispatchers"]
@@ -106,16 +109,23 @@ api/
   core/        models (Source, Article, Event, Topic, PriceTick, …, Forecast) + admin + commands
   api/         DRF views + serializers (events, forecasts, newsletter)
   services/    stateless Python — no Django models
-    tasks.py            all task functions (plain Python, no decorator)
-    workflow.py         orchestrates process → aggregate → tag → route
+    stages.py           the pipeline stage registry — single source of truth for
+                         selection/handling/chunking/cadence per stage
+    tasks.py             all task functions (plain Python, no decorator); pipeline_tick_task
+                         + run_stage_chunk_task execute every stage in stages.py
+    workflow/            articles.py (fetch/process), events.py (aggregate + coverage),
+                         topics.py (tag/discover/refresh)
     processing/         analyzer (LLM), ner (local), vader (local), finbert (local), cleaner, clustering
     translation/        local EN→AR (MarianMT)
     forecasting/        features, buckets, routing (deterministic), calibration, service, model, metrics
-    routing/            llm_router — LLM alternative to forecasting/routing.py, unused by default
-    streams/            prices (+ ^VIX), notam, earthquakes, forex
-    topics/             matcher (EmbeddingTopicMatcher default, LLMTopicMatcher alt, TopicMatcher fallback), scraper, dedup, sources/current_events
+    routing/            thin wrapper persisting Event.affected_indicators from forecasting/routing.py
+    streams/            prices (+ ^VIX), notam, earthquakes, forex — BaseStream.run() re-raises
+                         fetch/save failures so a broken stream fails its TaskRun visibly
+    topics/             matcher (EmbeddingTopicMatcher default/semantic, TopicMatcher keyword
+                         fallback), scraper, dedup, sources/current_events
     newsletter/         generator, sender
   migrations/  centralized, mapped via MIGRATION_MODULES
+  requirements-dev.txt  dev-only deps (ruff); ruff.toml — lint config (F + E9/W6 only)
 ui/            React 19 + Vite SPA (TypeScript)
 ```
 

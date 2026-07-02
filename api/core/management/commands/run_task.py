@@ -12,8 +12,8 @@ Usage::
 
 Examples::
 
-    python manage.py run_task dispatch_fetch_task
-    python manage.py run_task dispatch_process_articles_task only_failed=true
+    python manage.py run_task pipeline_tick_task
+    python manage.py run_task dispatch_stage_task stage_name=process
     python manage.py run_task generate_newsletter_task --require-flag NEWSLETTER_ENABLED
 
 Params are ``key=value`` pairs, coerced to bool / null / int / float / JSON /
@@ -28,9 +28,9 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
 # Authoritative queue per task. Anything not listed runs on 'default' (light I/O).
+# Pipeline stages pick their own queue in services/stages.py — pipeline_tick_task
+# and dispatch_stage_task are light dispatchers and correctly default here.
 HEAVY_TASKS = frozenset({
-    'aggregate_events_task',
-    'score_articles_task',
     'refresh_topics_task',
     'discover_topics_task',
     'generate_newsletter_task',
@@ -78,7 +78,7 @@ class Command(BaseCommand):
     help = 'Trigger a background task by name (cron entry point).'
 
     def add_arguments(self, parser):
-        parser.add_argument('task_name', help='Task function name, e.g. dispatch_fetch_task')
+        parser.add_argument('task_name', help='Task function name, e.g. pipeline_tick_task')
         parser.add_argument('params', nargs='*', help='key=value task kwargs')
         parser.add_argument('--queue', default=None, choices=['default', 'heavy', 'bulk'],
                             help='Override the auto-selected queue')

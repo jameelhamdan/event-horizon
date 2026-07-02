@@ -12,7 +12,7 @@ BASE_DIR = BACKEND_DIR.parent                           # project root
 # App Versioning
 try:
     commit_id = subprocess.check_output(["git", "describe", "--always"], cwd=BASE_DIR).decode('utf-8').strip()
-except Exception as e:
+except Exception:
     commit_id = ''
 
 VERSION_NUMBER = app.__version__
@@ -351,6 +351,18 @@ CELERY_QUEUE_TIME_LIMITS = {
     'default': _JOB_TIMEOUT,
     'heavy': _JOB_TIMEOUT,
     'bulk': None,
+}
+
+# Worker concurrency per queue — display-only (admin dashboard's queue summary).
+# MUST be kept in sync with each worker-* service's --concurrency flag in
+# docker-compose.yml; not read from Celery at request time since app.control
+# .inspect() is a live broadcast round-trip to every worker (slow, and returns
+# nothing useful if a worker is mid-restart) — too fragile for a page that
+# should render instantly even when a queue's workers are down.
+CELERY_QUEUE_WORKERS = {
+    'default': 4,
+    'heavy': 4,
+    'bulk': 1,
 }
 
 # Email — provider selection: 'ses' (AWS SES) or 'smtp' (Django SMTP / console)

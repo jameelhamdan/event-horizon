@@ -63,8 +63,3 @@ def translate_en_ar_batch(texts: list[str]) -> list[str | None]:
     for i, text in zip(idxs, decoded):
         out[i] = text.strip() or None
     return out
-
-
-def translate_en_ar(text: str) -> str | None:
-    """Translate a single English string to Arabic (thin wrapper over the batch API)."""
-    return translate_en_ar_batch([text])[0]

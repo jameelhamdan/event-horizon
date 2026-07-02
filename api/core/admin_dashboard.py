@@ -28,13 +28,10 @@ def _handle_action(request):
     action = request.POST.get('dashboard_action', '')
     try:
         if action == 'run_pipeline':
-            enqueue(T.dispatch_fetch_task, queue='default')
-            enqueue(T.dispatch_process_articles_task, queue='default')
-            # Bounded (was -1/no cap) — an uncapped job that deadlocks has no
-            # watchdog at all and can sit in "started" forever with nothing to
-            # show for it. 1h covers a full 168h backlog aggregation with margin.
-            enqueue(T.aggregate_events_task, queue='heavy', job_timeout=3600)
-            _ok(request, 'Pipeline dispatchers enqueued (fetch → process → aggregate).')
+            # force=True: dispatch every enabled stage with pending work,
+            # skipping the per-stage cadence gates (see services/stages.py).
+            enqueue(T.pipeline_tick_task, True, queue='default')
+            _ok(request, 'Pipeline tick enqueued (all due stages, cadence gates skipped).')
         elif action == 'backfill_prices':
             enqueue(T.backfill_prices_task, years=10, queue='bulk', job_timeout=-1)
             _ok(request, 'Price backfill enqueued (10y, all active symbols).')
@@ -65,34 +62,19 @@ def _handle_action(request):
 
 
 def _handle_reprocess(request):
+    """Re-dispatch one pipeline stage. The posted value is a stage name from
+    services/stages.py — the button, the count next to it, and the dispatch all
+    read the same registry entry, so they can't disagree."""
     from services.queue import enqueue
+    from services.stages import REGISTRY
     from services import tasks as T
 
     stage = request.POST.get('stage', '')
-    if stage == 'score':
-        from services.workflow.articles import unscored_unprocessed_articles
-        ids = list(
-            unscored_unprocessed_articles().values_list('id', flat=True)[:T.PROCESS_DISPATCH_LIMIT]
-        )
-        if ids:
-            enqueue(T.score_articles_task, article_ids=ids, queue='heavy')
-            _ok(request, f'Scoring enqueued for {len(ids)} unscored article(s).')
-        else:
-            _ok(request, 'No unscored articles to score.')
-    elif stage == 'geocode':
-        n = enqueue(T.dispatch_process_articles_task, only_failed=True, queue='default')
-        _ok(request, 'Re-dispatched processed-but-unlocated articles.')
-    elif stage == 'process':
-        enqueue(T.dispatch_process_articles_task, queue='default')
-        _ok(request, 'Re-dispatched unprocessed articles.')
-    elif stage == 'tag':
-        enqueue(T.dispatch_tag_topics_task, force_retag=False, queue='default')
-        _ok(request, 'Re-dispatched untagged events.')
-    elif stage == 'route':
-        enqueue(T.dispatch_route_events_task, queue='default')
-        _ok(request, 'Re-dispatched unrouted events.')
-    else:
+    if stage not in REGISTRY:
         messages.error(request, f'Unknown reprocess stage: {stage}')
+        return
+    enqueue(T.dispatch_stage_task, stage, queue='default')
+    _ok(request, f'Stage "{stage}" dispatch enqueued.')
 
 
 def _handle_backfill_until(request):
@@ -157,28 +139,22 @@ def _ok(request, msg):
 
 # ── Data gathering ───────────────────────────────────────────────────────────
 
-def _throughput():
-    """Queue depth per queue — shown in the throughput table.
+def _broker_depths() -> dict:
+    """Broker queue depth per queue.
 
     Celery's default Redis transport stores pending (unclaimed) task messages
     as a Redis list keyed by queue name, so a plain LLEN gives the queue depth
-    without needing a result backend or app.control round-trip.
+    without needing a result backend or app.control round-trip. Shown next to
+    TaskRun's 'queued' count — the two disagreeing persistently means lost or
+    untracked messages.
     """
     try:
         import redis
         from django.conf import settings
         conn = redis.Redis.from_url(settings.CELERY_BROKER_URL)
-        stats = {}
-        for qname in ('default', 'heavy', 'bulk'):
-            depth = conn.llen(qname)
-            stats[qname] = {
-                'today_items': depth, 'today_runs': depth, 'today_failed': 0,
-                'yest_items': 0, 'yest_runs': 0, 'yest_failed': 0,
-                'last_success': None, 'last_error': '',
-            }
-        return stats
+        return {q: conn.llen(q) for q in ('default', 'heavy', 'bulk')}
     except Exception as exc:
-        logger.debug('[dashboard] throughput unavailable: %s', exc)
+        logger.debug('[dashboard] broker depths unavailable: %s', exc)
         return {}
 
 
@@ -197,11 +173,14 @@ def _queue_summary():
     browser (/admin/core/taskrun/) filtered to that queue+status — replaces the
     old ad hoc in-flight table now that individual tasks live in TaskRun admin."""
     try:
+        from django.conf import settings
         from django.urls import reverse
         from core.models import TaskRun
 
         base = reverse('admin:core_taskrun_changelist')
         cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        workers = getattr(settings, 'CELERY_QUEUE_WORKERS', {})
+        depths = _broker_depths()
         rows = []
         for q in ('default', 'heavy', 'bulk'):
             counts = {}
@@ -212,6 +191,8 @@ def _queue_summary():
             ).count()
             rows.append({
                 'queue': q,
+                'workers': workers.get(q),
+                'depth': depths.get(q),
                 'queued': counts[TaskRun.Status.QUEUED],
                 'queued_url': f'{base}?queue={q}&status={TaskRun.Status.QUEUED}',
                 'running': counts[TaskRun.Status.RUNNING],
@@ -224,6 +205,61 @@ def _queue_summary():
     except Exception as exc:  # noqa: BLE001
         logger.debug('[dashboard] queue_summary unavailable: %s', exc)
         return []
+
+
+# Health report is written every 30 min (crontab) — older than 2× that means
+# the health task itself (or the whole cron/queue path) is stuck.
+_HEALTH_MAX_AGE_MINUTES = 60
+
+
+def _health_status():
+    """Last pipeline_health_task report from Redis, template-ready.
+
+    Returns {'available', 'at', 'report_stale', 'freshness', 'current_topics',
+    'stages'} — see services.tasks.pipeline_health_task for the report shape.
+    """
+    try:
+        from services.cache import KEY_PIPELINE_HEALTH_LAST, cache_get
+        payload = cache_get(KEY_PIPELINE_HEALTH_LAST)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug('[dashboard] health unavailable: %s', exc)
+        payload = None
+    if not payload:
+        return {'available': False}
+
+    report = payload.get('report') or {}
+    at = None
+    try:
+        at = datetime.fromisoformat(payload.get('at', ''))
+    except (TypeError, ValueError):
+        pass
+    report_stale = (
+        at is None
+        or at < datetime.now(timezone.utc) - timedelta(minutes=_HEALTH_MAX_AGE_MINUTES)
+    )
+
+    freshness = [
+        {'name': name, 'latest': info.get('latest'), 'ok': info.get('ok', False)}
+        for name, info in report.items()
+        if isinstance(info, dict) and 'latest' in info
+    ]
+    stages = [
+        {
+            'name': name,
+            'pending': info.get('pending'),
+            'last_dispatch': info.get('last_dispatch'),
+            'ok': info.get('ok', False),
+        }
+        for name, info in (report.get('stages') or {}).items()
+    ]
+    return {
+        'available': True,
+        'at': at,
+        'report_stale': report_stale,
+        'freshness': freshness,
+        'current_topics': report.get('current_topics'),
+        'stages': stages,
+    }
 
 
 def _forecast_status():
@@ -322,7 +358,7 @@ def dashboard_view(request):
     context = {
         **admin.site.each_context(request),
         'title': 'Operations Dashboard',
-        'throughput': _throughput(),
+        'health': _health_status(),
         'upcoming': _upcoming(),
         'queue_summary': _queue_summary(),
         'coverage': coverage,

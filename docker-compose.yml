@@ -60,11 +60,15 @@ services:
       - ./media_data:/app/media
       - static_data:/app/.static
 
-  # Steady NLP/LLM work — 2 workers (matches the LLM key/proxy rotation depth).
+  # Steady NLP/LLM work — 4 workers. NOTE: each prefork child lazily loads its
+  # own copy of the local ML stack (MiniLM + FinBERT + NER + MarianMT, ~1.5-2GB
+  # warm), so RAM scales with --concurrency; max-tasks-per-child recycles
+  # children periodically as a leak backstop. Keep --concurrency in sync with
+  # CELERY_QUEUE_WORKERS in api/settings/base.py (dashboard display).
   worker-heavy:
     <<: *api-build
     restart: always
-    command: sh -c "celery -A app worker -Q heavy --concurrency=2 --pool=prefork -O fair -n heavy@%h"
+    command: sh -c "celery -A app worker -Q heavy --concurrency=4 --pool=prefork -O fair --max-tasks-per-child=200 -n heavy@%h"
     environment:
       # Celery's prefork pool forks per-task worker processes — safety default
       # in case anything ever loads an HF tokenizer in the parent (its background
