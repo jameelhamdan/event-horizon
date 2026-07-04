@@ -108,6 +108,13 @@ export interface PriceHistoryResponse {
   count: number
 }
 
+/** A single chart-ready point derived from PriceTick/PriceBar history. */
+export interface PricePoint {
+  t: number
+  value: number
+  volume: number | null
+}
+
 export interface GeoJSONFeature {
   type: "Feature"
   geometry: { type: string; coordinates: unknown } | null

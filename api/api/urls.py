@@ -44,7 +44,6 @@ urlpatterns = [
     path('topics/<str:slug>/events/', TopicEventsView.as_view(), name='topic-events'),
 
     # ── Forecasts (event-fused symbol prediction) ─────────────────────────────
-    path('forecasts/', ForecastLatestView.as_view(), name='forecast-list'),
     path('forecasts/latest/', ForecastLatestView.as_view(), name='forecast-latest'),
     path('forecasts/accuracy/', ForecastAccuracyView.as_view(), name='forecast-accuracy'),
 

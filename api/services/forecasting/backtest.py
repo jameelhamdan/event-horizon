@@ -133,7 +133,6 @@ def run_backtest(symbols=None, years=2, step_days=21, train_window_days=None,
     load_start = start - timedelta(days=train_window_days + 60)
 
     logger.info('[backtest] building frames %s … %s', load_start.date(), end.date())
-    frame_events = feat.build_training_frame(symbols, load_start, end, horizons, include_events=True)
     frame_rules = feat.build_training_frame(symbols, load_start, end, horizons,
                                             include_events=True, router='rules')
     frame_price = feat.build_training_frame(symbols, load_start, end, horizons, include_events=False)
@@ -156,7 +155,6 @@ def run_backtest(symbols=None, years=2, step_days=21, train_window_days=None,
         'caveats': [
             'Reliability curve reflects the raw (uncalibrated) backtest model; served model is calibrated.',
             'Directional prediction of markets is near-random-walk; read accuracy vs the naive baseline.',
-            'LLM-routed arm requires events routed with router_source=llm; rule arm with =rules.',
         ],
     }
 
@@ -164,7 +162,6 @@ def run_backtest(symbols=None, years=2, step_days=21, train_window_days=None,
         'naive': ('naive', frame_price),
         'price_only': ('model', frame_price),
         'price_plus_rule_events': ('model', frame_rules),
-        'price_plus_llm_events': ('model', frame_events),
     }
 
     for h in horizons:

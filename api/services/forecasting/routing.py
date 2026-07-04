@@ -10,8 +10,10 @@ where ``asymmetric_sentiment`` keeps the *sign* of the news and **amplifies nega
 sentiment (negative news has larger, harder-to-predict market impact).
 
 Two entry points:
-  * ``route_event_to_symbols(...)``      → list[str]  (legacy; symbols only)
-  * ``route_event_to_weighted_symbols(...)`` → list[{'symbol', 'weight'}]  (new)
+  * ``route_event_to_symbols(...)``      → list[str]  (symbols only; used internally
+    by ``route_event_to_weighted_symbols`` below)
+  * ``route_event_to_weighted_symbols(...)`` → list[{'symbol', 'weight'}]  (preferred
+    for callers that need per-symbol weights)
 """
 
 

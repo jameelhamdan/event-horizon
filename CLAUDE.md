@@ -98,12 +98,17 @@ api/                       PYTHONPATH root inside Docker (/app)
     topics/                matcher.py (EmbeddingTopicMatcher — local, default, semantic;
                            TopicMatcher — keyword fallback, used when the embedding model
                            can't load and for retroactive tagging), scraper.py, dedup.py,
-                           WikipediaCurrentEventsAdapter
+                           sources/ (WikipediaCurrentEventsAdapter)
     streams/               prices.py, notam.py, earthquakes.py, forex.py — BaseStream.run()
                            re-raises fetch/save failures so a broken stream surfaces as a
                            FAILED TaskRun instead of a silent success-with-0
     data/                  DataService, rss.py (feedparser), telegram.py (Telethon)
+    scoring/               LLM importance scoring (batches of 30 titles) for the score stage
+    workflow/              articles.py, events.py, topics.py — per-stage orchestration glue
+                           (fetch/process article flow, event aggregation, topic discover/
+                           refresh/enrich) that doesn't belong in a single stateless module
     newsletter/            generator.py (LLM), sender.py (Markdown→HTML→SES)
+    email/                 mailer.py, providers.py — SES wrapper used by newsletter + accounts
     forecasting/           routing.py — deterministic (rules-based) event→symbol routing + LightGBM clf+reg
     routing/               __init__.py — thin wrapper around forecasting/routing.py that
                            persists Event.affected_indicators (route_events()); no LLM path

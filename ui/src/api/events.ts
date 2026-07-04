@@ -1,7 +1,7 @@
 import type { EventsResponse, EventDetail, EventFilters } from "../types"
 import constants from "@/constants";
 
-const BASE = `${constants.BASE_URL}/api`
+const BASE = constants.API_BASE
 
 export async function fetchEvents(
   filters: EventFilters = {},

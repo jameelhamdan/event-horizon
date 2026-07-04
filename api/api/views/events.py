@@ -60,6 +60,32 @@ def _parse_int(value: str | None, default: int, max_value: int | None = None) ->
     return min(result, max_value) if max_value is not None else result
 
 
+def _apply_date_range(qs, field: str, request, start_param: str = 'start', end_param: str = 'end'):
+    """Filter ``qs`` by ``<field>__gte``/``__lte`` from the given query params.
+
+    Returns (filtered_qs, None) on success, or (None, error_response) if either
+    param fails to parse — caller should ``return`` the error response as-is.
+    """
+    if start := request.query_params.get(start_param):
+        try:
+            qs = qs.filter(**{f'{field}__gte': _parse_dt(start)})
+        except ValueError:
+            return None, Response({'error': f'Invalid {start_param} date'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if end := request.query_params.get(end_param):
+        try:
+            qs = qs.filter(**{f'{field}__lte': _parse_dt(end)})
+        except ValueError:
+            return None, Response({'error': f'Invalid {end_param} date'}, status=status.HTTP_400_BAD_REQUEST)
+
+    return qs, None
+
+
+def _envelope(results, **extra) -> dict:
+    """Standard {'results': ..., 'count': ...} response body, plus any extra keys."""
+    return {'results': results, 'count': len(results), **extra}
+
+
 class EventListView(APIView):
     """
     GET /api/events/
@@ -81,17 +107,9 @@ class EventListView(APIView):
         if topic_slug := request.query_params.get('topic'):
             qs = qs.filter(topic_slugs=topic_slug)
 
-        if start := request.query_params.get('start'):
-            try:
-                qs = qs.filter(started_at__gte=_parse_dt(start))
-            except ValueError:
-                return Response({'error': 'Invalid start date'}, status=status.HTTP_400_BAD_REQUEST)
-
-        if end := request.query_params.get('end'):
-            try:
-                qs = qs.filter(started_at__lte=_parse_dt(end))
-            except ValueError:
-                return Response({'error': 'Invalid end date'}, status=status.HTTP_400_BAD_REQUEST)
+        qs, err = _apply_date_range(qs, 'started_at', request)
+        if err:
+            return err
 
         if bbox := request.query_params.get('bbox'):
             try:
@@ -108,8 +126,7 @@ class EventListView(APIView):
 
         limit = _parse_int(request.query_params.get('limit'), 100, 500)
         source_map = _build_source_map()
-        data = {'results': EventSerializer(qs[:limit], many=True, context={'source_map': source_map}).data}
-        data['count'] = len(data['results'])
+        data = _envelope(EventSerializer(qs[:limit], many=True, context={'source_map': source_map}).data)
         cache.set(cache_key, data, _CACHE_TTL)
         return Response(data)
 
@@ -195,7 +212,7 @@ class PriceHistoryView(APIView):
         qs = qs.filter(occurred_at__gte=start, occurred_at__lte=end)
         limit = _parse_int(request.query_params.get('limit'), 500, 5000)
         serializer = PriceTickSerializer(qs[:limit], many=True)
-        return Response({'symbol': symbol, 'results': serializer.data, 'count': len(serializer.data)})
+        return Response(_envelope(serializer.data, symbol=symbol))
 
 
 class PriceBarsView(APIView):
@@ -210,8 +227,7 @@ class PriceBarsView(APIView):
         start = max(total - limit, 0)
         bars = list(qs[start:total])
         serializer = PriceBarSerializer(bars, many=True)
-        return Response({'symbol': symbol, 'interval': interval,
-                         'results': serializer.data, 'count': len(serializer.data)})
+        return Response(_envelope(serializer.data, symbol=symbol, interval=interval))
 
 
 class NotamZoneListView(APIView):
@@ -228,7 +244,7 @@ class NotamZoneListView(APIView):
             qs = qs.filter(notam_type__iexact=notam_type)
 
         serializer = NotamZoneSerializer(qs[:1000], many=True)
-        return Response({'results': serializer.data, 'count': len(serializer.data)})
+        return Response(_envelope(serializer.data))
 
 
 class NotamHistoryView(APIView):
@@ -242,21 +258,13 @@ class NotamHistoryView(APIView):
         if notam_status := request.query_params.get('status'):
             qs = qs.filter(status=notam_status)
 
-        if from_dt := request.query_params.get('from'):
-            try:
-                qs = qs.filter(effective_from__gte=_parse_dt(from_dt))
-            except ValueError:
-                return Response({'error': 'Invalid from date'}, status=status.HTTP_400_BAD_REQUEST)
-
-        if to_dt := request.query_params.get('to'):
-            try:
-                qs = qs.filter(effective_from__lte=_parse_dt(to_dt))
-            except ValueError:
-                return Response({'error': 'Invalid to date'}, status=status.HTTP_400_BAD_REQUEST)
+        qs, err = _apply_date_range(qs, 'effective_from', request, start_param='from', end_param='to')
+        if err:
+            return err
 
         limit = _parse_int(request.query_params.get('limit'), 200, 2000)
         serializer = NotamRecordSerializer(qs[:limit], many=True)
-        return Response({'results': serializer.data, 'count': len(serializer.data)})
+        return Response(_envelope(serializer.data))
 
 
 class EarthquakeListView(APIView):
@@ -277,7 +285,7 @@ class EarthquakeListView(APIView):
             occurred_at__gte=cutoff,
         )
         serializer = EarthquakeRecordSerializer(qs[:limit], many=True)
-        return Response({'results': serializer.data, 'count': len(serializer.data)})
+        return Response(_envelope(serializer.data))
 
 
 class StaticPointListView(APIView):
@@ -292,7 +300,7 @@ class StaticPointListView(APIView):
             qs = qs.filter(country_code__iexact=country_code)
 
         serializer = StaticPointSerializer(qs, many=True)
-        return Response({'results': serializer.data, 'count': len(serializer.data)})
+        return Response(_envelope(serializer.data))
 
 
 class SymbolListView(APIView):
@@ -315,7 +323,7 @@ class SymbolListView(APIView):
         if (popular := _parse_bool_param(request.query_params.get('popular'), default=None)) is not None:
             qs = qs.filter(is_popular=popular)
         serializer = MarketSymbolSerializer(qs, many=True)
-        return Response({'results': serializer.data, 'count': len(serializer.data)})
+        return Response(_envelope(serializer.data))
 
 
 class TopicListView(APIView):
@@ -379,15 +387,14 @@ class TopicListView(APIView):
             except (ValueError, TypeError):
                 return Response({'error': 'Invalid year.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        topics = list(qs)
+        limit = _parse_int(request.query_params.get('limit'), 200, 1000)
+        topics = list(qs[:limit])
 
         # source filter — applied in Python (JSONField list contains check)
         if source_id := request.query_params.get('source'):
             topics = [t for t in topics if source_id in (t.source_ids or [])]
 
-        data = {'results': TopicSerializer(topics, many=True).data}
-        data['count'] = len(data['results'])
-        return Response(data)
+        return Response(_envelope(TopicSerializer(topics, many=True).data))
 
 
 class TopicDetailView(APIView):
@@ -414,25 +421,16 @@ class TopicEventsView(APIView):
 
         qs = core_models.Event.objects.filter(topic_slugs=slug)
 
-        if start := request.query_params.get('start'):
-            try:
-                qs = qs.filter(started_at__gte=_parse_dt(start))
-            except ValueError:
-                return Response({'error': 'Invalid start date'}, status=status.HTTP_400_BAD_REQUEST)
-
-        if end := request.query_params.get('end'):
-            try:
-                qs = qs.filter(started_at__lte=_parse_dt(end))
-            except ValueError:
-                return Response({'error': 'Invalid end date'}, status=status.HTTP_400_BAD_REQUEST)
+        qs, err = _apply_date_range(qs, 'started_at', request)
+        if err:
+            return err
 
         limit = _parse_int(request.query_params.get('limit'), 50, 200)
         source_map = _build_source_map()
-        data = {
-            'topic': slug,
-            'results': EventSerializer(qs[:limit], many=True, context={'source_map': source_map}).data,
-        }
-        data['count'] = len(data['results'])
+        data = _envelope(
+            EventSerializer(qs[:limit], many=True, context={'source_map': source_map}).data,
+            topic=slug,
+        )
         return Response(data)
 
 

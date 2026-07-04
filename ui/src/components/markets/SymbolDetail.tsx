@@ -6,7 +6,7 @@ import {
 } from "recharts"
 import { fetchPriceHistory, fetchPriceBars } from "../../api/streams"
 import { useLanguage } from "../../contexts/LanguageContext"
-import type { StreamKey } from "../../types"
+import type { StreamKey, PricePoint } from "../../types"
 
 function fmtValue(v: number, streamKey: StreamKey): string {
   if (streamKey === "forex") return v.toFixed(4)
@@ -14,8 +14,6 @@ function fmtValue(v: number, streamKey: StreamKey): string {
   if (v >= 1) return v.toFixed(2)
   return v.toFixed(4)
 }
-
-interface Point { t: number; value: number; volume: number | null }
 
 interface SymbolDetailProps {
   symbol: string
@@ -30,7 +28,7 @@ interface SymbolDetailProps {
 // source falls back to the other when empty, so non-panel symbols still render whatever exists.
 export default function SymbolDetail({ symbol, streamKey, name, days }: SymbolDetailProps) {
   const { t, lang } = useLanguage()
-  const [data, setData] = useState<Point[]>([])
+  const [data, setData] = useState<PricePoint[]>([])
   const [resolvedName, setResolvedName] = useState<string | undefined>(name)
   const [loading, setLoading] = useState(true)
 

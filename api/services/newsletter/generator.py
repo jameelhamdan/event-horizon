@@ -65,7 +65,7 @@ def generate_newsletter(date_str: str | None = None) -> str:
     from django.utils import timezone
     from core import models as core_models
     from newsletter.models import DailyNewsletter
-    from services.llm import get_llm_service, LLMError
+    from services.llm import get_llm_service, strip_code_fences, LLMError
 
     if date_str:
         from datetime import date
@@ -88,11 +88,13 @@ def generate_newsletter(date_str: str | None = None) -> str:
         return f'No events found for {target_date} — newsletter not generated.'
 
     # --- Collect articles for all events ---
-    all_article_ids = [
-        _uuid.UUID(a)
-        for ev in events
-        for a in (ev.article_ids or [])
-    ]
+    all_article_ids = []
+    for ev in events:
+        for a in (ev.article_ids or []):
+            try:
+                all_article_ids.append(_uuid.UUID(a))
+            except (ValueError, AttributeError, TypeError):
+                logger.warning('Skipping malformed article id %r on event %s', a, ev.pk)
     articles = (
         list(core_models.Article.objects.filter(id__in=all_article_ids))
         if all_article_ids else []
@@ -165,10 +167,7 @@ def generate_newsletter(date_str: str | None = None) -> str:
             )},
             {'role': 'user', 'content': prompt_user},
         ])
-        raw = raw.strip().lstrip('`').rstrip('`')
-        if raw.startswith('json'):
-            raw = raw[4:].strip()
-        data = json.loads(raw)
+        data = json.loads(strip_code_fences(raw))
         subject = str(data.get('subject', f'Daily Briefing — {target_date}')).strip()
         sections = [
             {

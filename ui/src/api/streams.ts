@@ -15,7 +15,7 @@ import type {
 
 import constants from "@/constants"
 
-const BASE_URL = `${constants.BASE_URL}/api`
+const BASE_URL = constants.API_BASE
 
 export async function fetchPricesLatest(
   stream_key?: StreamKey

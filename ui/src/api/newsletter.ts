@@ -1,6 +1,6 @@
 import constants from "@/constants"
 
-const NEWSLETTER_URL = `${constants.BASE_URL}/api/newsletter`
+const NEWSLETTER_URL = `${constants.API_BASE}/newsletter`
 
 export interface NewsletterArticle {
   id: string

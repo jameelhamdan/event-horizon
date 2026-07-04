@@ -6,7 +6,7 @@ import {
 } from "recharts"
 import { fetchPriceHistory } from "../../api/streams"
 import { useLanguage } from "../../contexts/LanguageContext"
-import type { StreamKey } from "../../types"
+import type { StreamKey, PricePoint } from "../../types"
 
 const RANGES = [
   { hours: 24, key: "filter24h" },
@@ -21,12 +21,10 @@ function fmtValue(v: number, streamKey: StreamKey): string {
   return v.toFixed(4)
 }
 
-interface Point { t: number; value: number; volume: number | null }
-
 export default function PriceChart({ symbol, streamKey }: { symbol: string; streamKey: StreamKey }) {
   const { t, lang } = useLanguage()
   const [hours, setHours] = useState(24)
-  const [data, setData] = useState<Point[]>([])
+  const [data, setData] = useState<PricePoint[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {

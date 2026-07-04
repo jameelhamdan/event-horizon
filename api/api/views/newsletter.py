@@ -98,11 +98,16 @@ class NewsletterListView(APIView):
     """GET /api/newsletter/ — list sent newsletters"""
 
     def get(self, request):
-        newsletters = DailyNewsletter.objects.filter(
+        try:
+            limit = min(max(int(request.query_params.get('limit', 100)), 1), 500)
+        except ValueError:
+            limit = 100
+        qs = DailyNewsletter.objects.filter(
             status=DailyNewsletter.STATUS_SENT
         ).order_by('-date')
+        newsletters = qs[:limit]
         serializer = NewsletterListSerializer(newsletters, many=True)
-        return Response({'results': serializer.data, 'count': newsletters.count()})
+        return Response({'results': serializer.data, 'count': qs.count()})
 
 
 class NewsletterLatestView(APIView):
