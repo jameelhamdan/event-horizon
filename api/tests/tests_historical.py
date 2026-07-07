@@ -235,6 +235,48 @@ def test_entry_to_datum_no_llm_score():
     assert 'rank_signal' not in datum
 
 
+def test_iter_aggregate_windows_grid_aligned_and_covering():
+    """Historical aggregation windows must start on the CLUSTER_DATE_WINDOW_DAYS
+    ordinal grid (so no clustering bucket is split across calls) and cover the
+    whole requested range without gaps."""
+    if not _DJANGO_READY:
+        return
+    from services.workflow.events import CLUSTER_DATE_WINDOW_DAYS, iter_aggregate_windows
+
+    start, end = _dt(2021, 7, 2), _dt(2021, 9, 20)
+    windows = list(iter_aggregate_windows(start, end, window_days=30))
+
+    assert windows[0][0] <= start                      # range fully covered
+    assert windows[-1][1] == end
+    for (_, prev_end), (next_start, _) in zip(windows, windows[1:]):
+        assert prev_end == next_start                  # no gaps, no overlap
+    for w_start, _ in windows:
+        assert w_start.toordinal() % CLUSTER_DATE_WINDOW_DAYS == 0   # grid-aligned
+    for w_start, w_end in windows[:-1]:
+        assert (w_end - w_start).days % CLUSTER_DATE_WINDOW_DAYS == 0
+
+
+def test_iter_aggregate_windows_small_window_days_still_advances():
+    if not _DJANGO_READY:
+        return
+    from services.workflow.events import CLUSTER_DATE_WINDOW_DAYS, iter_aggregate_windows
+    windows = list(iter_aggregate_windows(_dt(2024, 1, 1), _dt(2024, 1, 10), window_days=1))
+    assert all((e - s).days <= CLUSTER_DATE_WINDOW_DAYS for s, e in windows[:-1])
+    assert windows[-1][1] == _dt(2024, 1, 10)
+
+
+def test_aggregate_events_requires_both_range_bounds():
+    if not _DJANGO_READY:
+        return
+    from services.workflow.events import aggregate_events
+    try:
+        aggregate_events(start=_dt(2024, 1, 1))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('expected ValueError for start without end')
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 _TESTS = [
@@ -253,6 +295,9 @@ _TESTS = [
     test_candidate_sitemap_urls_prefers_explicit_override,
     test_candidate_sitemap_urls_no_override_falls_back_to_standard_paths,
     test_entry_to_datum_no_llm_score,
+    test_iter_aggregate_windows_grid_aligned_and_covering,
+    test_iter_aggregate_windows_small_window_days_still_advances,
+    test_aggregate_events_requires_both_range_bounds,
 ]
 
 

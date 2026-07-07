@@ -20,6 +20,26 @@ def _date_window_key(dt: datetime) -> str:
     return date.fromordinal(window_start_ordinal).isoformat()
 
 
+def iter_aggregate_windows(start: datetime, end: datetime, window_days: int = 30):
+    """Yield (window_start, window_end) pairs covering [start, end) for
+    historical aggregation, with every boundary aligned to the same
+    CLUSTER_DATE_WINDOW_DAYS ordinal grid _date_window_key uses — so a
+    clustering bucket is never split across two aggregate_events() calls
+    (a bucket whose articles straddle a call boundary would cluster
+    incompletely on both sides)."""
+    def _align_down(dt: datetime) -> datetime:
+        ordinal = dt.toordinal() - (dt.toordinal() % CLUSTER_DATE_WINDOW_DAYS)
+        d = date.fromordinal(ordinal)
+        return datetime(d.year, d.month, d.day, tzinfo=dt.tzinfo)
+
+    step = timedelta(days=max(window_days - window_days % CLUSTER_DATE_WINDOW_DAYS,
+                              CLUSTER_DATE_WINDOW_DAYS))
+    current = _align_down(start)
+    while current < end:
+        yield current, min(current + step, end)
+        current += step
+
+
 def _aggregate_llm_usage(articles: list) -> dict:
     """Sum token counts from constituent articles, grouped by provider."""
     by_provider: dict[str, dict] = {}
@@ -44,15 +64,37 @@ def _aggregate_llm_usage(articles: list) -> dict:
     }
 
 
-def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
+def aggregate_events(
+    hours: int = 24,
+    min_articles: int = 1,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> tuple[int, int]:
     """Group processed Articles by (location, category, day) into Events.
     Returns (created_count, updated_count).
+
+    Default window is the trailing ``hours`` (the live pipeline's aggregate
+    stage). Pass explicit ``start``/``end`` (both required together) to
+    aggregate a historical range instead — used by aggregate_history_task to
+    surface backfilled articles as Events, which the trailing window can never
+    reach. Safe to re-run over the same range: the upsert below is keyed on
+    (location_name, category, calendar day).
     """
     from core.models import Article, Event
 
+    if (start is None) != (end is None):
+        raise ValueError('aggregate_events: start and end must be given together')
+
     run_started = time.monotonic()
-    lookback = timezone.now() - timedelta(hours=hours)
-    logger.info('[aggregate] starting run: hours=%d min_articles=%d lookback=%s', hours, min_articles, lookback)
+    if start is not None:
+        window = {'published_on__gte': start, 'published_on__lt': end}
+        logger.info('[aggregate] starting run: window=[%s, %s) min_articles=%d', start, end, min_articles)
+    else:
+        window = {'published_on__gte': timezone.now() - timedelta(hours=hours)}
+        logger.info(
+            '[aggregate] starting run: hours=%d min_articles=%d lookback=%s',
+            hours, min_articles, window['published_on__gte'],
+        )
 
     # defer('content'): the week-wide window can be thousands of rows and only
     # each sub-cluster's representative article's content is ever read (a
@@ -61,13 +103,13 @@ def aggregate_events(hours: int = 24, min_articles: int = 1) -> tuple[int, int]:
         Article.objects.filter(
             processed_on__isnull=False,
             location__isnull=False,
-            published_on__gte=lookback,
+            **window,
         ).exclude(location='').defer('content')
     )
     logger.info('[aggregate] fetched %d located article(s) in window', len(articles))
 
     skipped_no_location = Article.objects.filter(
-        processed_on__isnull=False, location__isnull=True, published_on__gte=lookback,
+        processed_on__isnull=False, location__isnull=True, **window,
     ).count()
     if skipped_no_location:
         logger.info(

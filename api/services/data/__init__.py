@@ -27,9 +27,10 @@ def _filter_title_dupes(
     Race conditions between workers are acceptable — URL dedup in get_or_create is the
     definitive guard; this filter reduces noise before it reaches the DB.
 
-    cache_key selects the rolling window — historical backfill passes its own
-    (KEY_BACKFILL_TITLE_DEDUP) so years-old titles don't evict or false-positive
-    against the live window.
+    cache_key selects the rolling window — historical backfill passes a
+    per-backfill-day key (key_backfill_title_dedup) so years-old titles don't
+    evict or false-positive against the live window, and concurrent day-chunks
+    for different historical days don't dedup against each other.
     """
     cached: list[frozenset] = cache_get(cache_key) or []
     # new_sets grows as we accept datums; checked against incoming ones too (intra-batch dedup).

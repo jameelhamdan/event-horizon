@@ -1,15 +1,19 @@
 """
-Backfill top-N historical articles per day window, across one or all RSS sources.
+Backfill top-N historical articles per day window — Wikipedia Current Events
+(curated per-day world events with citations; the primary discovery path) plus
+one or all RSS sources' sitemaps.
 
 This command's ``backfill_history_task`` dispatches one ``backfill_day_chunk_task``
-per (day, source-chunk) pair — each fetches its sources' sitemaps for that single
-day via RSSHistoricalService, cross-source title-dedups within its chunk, saves via
-Article.objects.get_or_create (idempotent), and then immediately runs NLP
-processing (services.workflow.articles.process_articles) on the newly-saved
-articles — see services/data/historical.py's module docstring for the full
-fetch→save→process chain and its chunking trade-offs. Importance *scoring* is
-still picked up by the normal 'score' pipeline stage (via created_on), same as
-live-fetched articles.
+per (day, source-chunk) pair — each discovers that day's articles via its
+source's strategy (WikipediaHistoricalService for the synthetic
+'wikipedia-current-events' source, RSSHistoricalService sitemap discovery for
+RSS sources), cross-source title-dedups within its chunk, fetches each
+article's title+body (live page first, Wayback Machine capture as fallback),
+saves via Article.objects.get_or_create (idempotent), and then immediately
+runs NLP processing (services.workflow.articles.process_articles) on the
+newly-saved articles — see services/data/historical.py's and
+services/data/wikipedia.py's module docstrings for the full chain and its
+chunking trade-offs.
 
 Examples:
 
@@ -33,9 +37,13 @@ Examples:
     python manage.py backfill_history \\
         --start-date 2022-01-01 --end-date 2025-01-01 --background
 
-After a backfill, articles already have NLP processing done; importance scoring
-still happens on the normal 'score' stage tick. To force it immediately:
-    python manage.py run_task dispatch_stage_task stage_name=score --sync
+Each chunk runs the live pipeline's order on what it saves: LLM importance
+scoring → ARTICLE_MIN_IMPORTANCE_TO_PROCESS gate → NLP processing.
+
+After a backfill's chunks finish, aggregate the range into Events (the live
+aggregate stage only looks back 168h, so it will never reach them):
+    python manage.py run_task aggregate_history_task \\
+        start_date=2021-07-01 end_date=2026-07-01 --sync
 """
 import datetime
 
@@ -51,8 +59,9 @@ class Command(BaseTaskCommand):
             type=str,
             nargs='?',
             default=None,
-            help='Source.code to backfill (must be of type rss). '
-                 'Omit to backfill all enabled RSS sources.',
+            help='Source.code to backfill (an RSS source, or '
+                 '"wikipedia-current-events"). Omit to backfill Wikipedia '
+                 'Current Events + all enabled RSS sources.',
         )
         parser.add_argument(
             '--start-date',
@@ -143,13 +152,16 @@ class Command(BaseTaskCommand):
             self.stderr.write(self.style.ERROR('--start-date must be before --end-date.'))
             return
 
+        from services.data.wikipedia import WIKIPEDIA_SOURCE_CODE, ensure_wikipedia_source
+
         if all_sources:
+            # +1: the wikipedia-current-events source is always included
+            # (created on demand by backfill_history_task).
             count = m.Source.objects.filter(
                 type=m.SourceType.RSS, is_enabled=True,
-            ).count()
-            if count == 0:
-                self.stderr.write(self.style.ERROR('No enabled RSS sources to backfill.'))
-                return
+            ).count() + 1
+        elif source_code == WIKIPEDIA_SOURCE_CODE:
+            ensure_wikipedia_source()
         else:
             try:
                 m.Source.objects.get(code=source_code)
@@ -171,7 +183,7 @@ class Command(BaseTaskCommand):
                 top_n=top_n, delay_seconds=delay, resume=resume,
                 queue='bulk',
             )
-            label = f'all enabled RSS sources ({count})' if all_sources else f'"{source_code}"'
+            label = f'wikipedia + all enabled RSS sources ({count})' if all_sources else f'"{source_code}"'
             self.stdout.write(self.style.SUCCESS(
                 f'Enqueued backfill_history_task for {label} '
                 f'({start_date.date()} → {end_date.date()}) on the bulk queue.'
@@ -183,8 +195,9 @@ class Command(BaseTaskCommand):
         dry_label = '  [DRY RUN — nothing will be written]' if dry_run else ''
 
         if all_sources:
-            top_n_label = f'{top_n} per source per day' if top_n is not None else '2–6 per source per day (by weight)'
-            scope_label = f'all enabled RSS sources ({count})'
+            top_n_label = (f'{top_n} per source per day' if top_n is not None
+                           else '2–6 per source per day (by weight); 25 for wikipedia')
+            scope_label = f'wikipedia + all enabled RSS sources ({count})'
         else:
             source = m.Source.objects.get(code=source_code)
             from services.tasks import _weighted_top_n
@@ -210,11 +223,12 @@ class Command(BaseTaskCommand):
         # dispatcher enqueues actually runs synchronously right there and its result
         # dict flows back through enqueue() to this callback — one line per (day,
         # source-chunk), the real unit of work now (was one line per day).
-        totals = {'fetched': 0, 'saved': 0, 'processed': 0, 'chunks': 0}
+        totals = {'fetched': 0, 'saved': 0, 'scored': 0, 'processed': 0, 'chunks': 0}
 
         def progress(result: dict):
             totals['fetched'] += result['fetched']
             totals['saved'] += result['saved']
+            totals['scored'] += result.get('scored', 0)
             totals['processed'] += result['processed']
             totals['chunks'] += 1
             sources_label = ','.join(result['sources'])
@@ -241,7 +255,8 @@ class Command(BaseTaskCommand):
         line = (
             f'Done.  {summary["sources"]} source(s) | {summary["days"]} days | '
             f'{totals["chunks"]} chunk(s) | {totals["fetched"]} candidates | '
-            f'{totals["saved"]} articles saved | {totals["processed"]} processed'
+            f'{totals["saved"]} articles saved | {totals["scored"]} scored | '
+            f'{totals["processed"]} processed'
         )
         if dry_run:
             line += '  (dry run — nothing written)'
@@ -249,9 +264,10 @@ class Command(BaseTaskCommand):
 
         if not dry_run and totals['saved'] > 0:
             self.stdout.write(
-                '\n  Articles are saved and NLP-processed already. Importance scoring '
-                'still runs on the normal stage tick. To force it now:\n'
-                '  python manage.py run_task dispatch_stage_task stage_name=score --sync'
+                '\n  Articles are saved and NLP-processed already. To surface them as '
+                'Events on the map, aggregate the range:\n'
+                f'  python manage.py run_task aggregate_history_task '
+                f'start_date={start_date.date()} end_date={end_date.date()} --sync'
             )
 
 

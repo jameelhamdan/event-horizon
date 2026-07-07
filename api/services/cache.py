@@ -122,10 +122,6 @@ class Counter:
 # llm:*       — provider round-robin, debounce, call stats
 
 KEY_ARTICLE_TITLE_DEDUP = 'pipeline:dedup:article_title'
-# Separate rolling window for historical backfill so a year-long backfill's
-# old titles can't evict live titles from (or false-positive against) the
-# live fetch path's 24h dedup window.
-KEY_BACKFILL_TITLE_DEDUP = 'pipeline:dedup:backfill_title'
 KEY_BOOTSTRAP_INITIAL_DATA_DONE = 'pipeline:bootstrap:initial_data:done'
 # Last pipeline_health_task report ({'at': ISO str, 'report': dict}) — written
 # every health run, rendered by the admin dashboard's Health section.
@@ -152,6 +148,24 @@ def key_backfill_checkpoint(start: str, end: str) -> str:
 
 def key_backfill_source_block(source_code: str) -> str:
     return f'pipeline:backfill:blocked:{source_code}'
+
+
+def key_backfill_title_dedup(day_iso: str) -> str:
+    """Rolling title-dedup pool for ONE historical backfill day ('YYYY-MM-DD').
+    Keyed per backfill day (not one shared pool) for two reasons: a year-long
+    backfill's old titles must not evict/false-positive against the live fetch
+    path's pool (KEY_ARTICLE_TITLE_DEDUP), and day-chunks for *different
+    historical days* run concurrently — a shared pool let a recurring headline
+    shape from 2021 suppress a genuinely distinct 2023 article. Near-duplicate
+    detection across sources is only meaningful within the same news day."""
+    return f'pipeline:dedup:backfill_title:{day_iso}'
+
+
+def key_backfill_wiki_month(month_iso: str) -> str:
+    """Cached Wikipedia Current Events monthly-page HTML, keyed 'YYYY-MM' — one
+    parse-API fetch shared by all ~30 of that month's backfill day-chunk tasks
+    (see services.data.wikipedia.WikipediaHistoricalService)."""
+    return f'pipeline:backfill:wiki_month:{month_iso}'
 
 
 def key_backfill_empty_streak(source_code: str) -> str:

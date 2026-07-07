@@ -2,14 +2,30 @@
 Historical backfill — fetch top-N articles for a single day window across a
 (usually small) set of sources.
 
-Strategy (per source type):
+Strategy (selected per source in HistoricalBackfillService._build_strategy):
 
-  RSSHistoricalService
+  WikipediaHistoricalService (services/data/wikipedia.py) — the primary path
+    The synthetic 'wikipedia-current-events' Source. Discovers each day's
+    curated events (with citations to news articles) from the Current Events
+    portal's monthly pages — human-selected importance, ~15-25 events/day,
+    one cheap API request per month. See that module's docstring.
+
+  WaybackHistoricalService (services/data/wayback.py) — per-publisher supplement
+    Publishers with recency-only sitemaps but a stable front-page URL
+    (BBC, Guardian, NPR, ... — see FRONTPAGES there): mine the day's
+    archived front page from the Wayback Machine; page position doubles
+    as the publisher's own importance ranking.
+
+  RSSHistoricalService — per-publisher supplement
     Discovers historical article URLs via the source domain's sitemap
     (robots.txt → /sitemap.xml → /sitemap_index.xml → /news-sitemap.xml,
     merged across whichever candidates return entries). Handles nested
     sitemap indexes (one level). Titles come from <news:title> when
-    available, otherwise inferred from the URL slug.
+    available, otherwise inferred from the URL slug (and upgraded to the
+    article page's own <title> at save time — see _save_day_batch). Only
+    a few majors keep multi-year sitemap archives (verified 2026-07: AP,
+    FT, Al Jazeera; most others are recency-only) — hence the Wikipedia +
+    Wayback paths above.
 
 Candidates are capped per source by recency (no LLM scoring at discovery
 time). HistoricalBackfillService.fetch_and_save_day() fetches every requested
@@ -462,7 +478,13 @@ class RSSHistoricalService:
             title=title[:200],
             content=title,
             published_on=entry['date'],
-            extra_data={'sitemap_title': entry['title']},
+            extra_data={
+                'sitemap_title': entry['title'],
+                # No <news:title> — slug-derived titles can be garbage (FT
+                # uses UUID slugs). _save_day_batch upgrades these to the
+                # article page's own <title> when the body fetch gets one.
+                'title_from_slug': entry['title'] is None,
+            },
         )
 
 
@@ -502,6 +524,18 @@ def probe_source_has_sitemap_entries(source: 'core.models.Source') -> bool:
         return False
 
 
+def probe_source(source: 'core.models.Source') -> bool:
+    """Strategy-aware preflight — routes to the right existence probe for the
+    source (see backfill_history_task's preflight loop)."""
+    from services.data.wayback import probe_wayback_source, supports_wayback
+    from services.data.wikipedia import WIKIPEDIA_SOURCE_CODE, probe_wikipedia_source
+    if source.code == WIKIPEDIA_SOURCE_CODE:
+        return probe_wikipedia_source(source)
+    if supports_wayback(source.code):
+        return probe_wayback_source(source)
+    return probe_source_has_sitemap_entries(source)
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -522,10 +556,11 @@ class HistoricalBackfillService:
     filter the live fetch path uses, article bodies are fetched inline, then
     saved via Article.objects.get_or_create() keyed on (source_code,
     source_type, source_url) — fully idempotent. NLP processing is the
-    caller's job (services.tasks.backfill_day_chunk_task calls
-    services.workflow.articles.process_articles on ``result.saved_ids``);
-    importance *scoring* is untouched — the 'score' pipeline stage
-    still picks these up (they have no importance_score yet).
+    caller's job — services.tasks.backfill_day_chunk_task scores
+    ``result.saved_ids`` (LLM importance), applies the same
+    ARTICLE_MIN_IMPORTANCE_TO_PROCESS gate the live pipeline uses, and only
+    then runs services.workflow.articles.process_articles — the live
+    score → gate → process order.
 
     Backfill metadata is stored in Article.extra_data under key:
       backfill_day — ISO date string of the day window the article was found in
@@ -551,14 +586,30 @@ class HistoricalBackfillService:
     def _resolve_top_n(self, source: 'core.models.Source') -> int:
         if self.top_n is not None:
             return self.top_n
+        from services.data.wikipedia import WIKI_DEFAULT_TOP_N, WIKIPEDIA_SOURCE_CODE
+        if source.code == WIKIPEDIA_SOURCE_CODE:
+            # Already-curated events — the weight-derived 2-6 cap would throw
+            # away most of the day's curation (see WIKI_DEFAULT_TOP_N).
+            return WIKI_DEFAULT_TOP_N
         from services.tasks import _weighted_top_n
         return _weighted_top_n(source.weight)
 
     def _build_strategy(self, source: 'core.models.Source'):
         import core.models as m
+        from services.data.wayback import WaybackHistoricalService, supports_wayback
+        from services.data.wikipedia import WIKIPEDIA_SOURCE_CODE, WikipediaHistoricalService
+        if source.code == WIKIPEDIA_SOURCE_CODE:
+            return WikipediaHistoricalService(source, max_candidates=self._resolve_top_n(source))
+        if supports_wayback(source.code):
+            # Recency-only-sitemap publishers: mine the day's archived front
+            # page instead (editorial rank ≥ sitemap recency as an importance
+            # proxy anyway). No candidate_factor over-fetch — links arrive
+            # rank-ordered, so top_n directly keeps the most prominent.
+            return WaybackHistoricalService(source, max_candidates=self._resolve_top_n(source))
         if source.type != m.SourceType.RSS:
             raise HistoricalServiceError(
-                f'No historical strategy for source type "{source.type}". Supported: rss.'
+                f'No historical strategy for source type "{source.type}". '
+                f'Supported: rss, {WIKIPEDIA_SOURCE_CODE}.'
             )
         top_n = self._resolve_top_n(source)
         max_candidates = top_n * self.candidate_factor if self.candidate_factor else None
@@ -650,7 +701,7 @@ class HistoricalBackfillService:
         """
         import core.models as m
         from django.conf import settings
-        from services.cache import KEY_BACKFILL_TITLE_DEDUP
+        from services.cache import key_backfill_title_dedup
         from services.data import _filter_title_dupes
 
         if not source_datums:
@@ -664,11 +715,14 @@ class HistoricalBackfillService:
             datums.append(d)
 
         if getattr(settings, 'ARTICLE_DEDUP_TITLE_ENABLED', True):
+            # Pool keyed per HISTORICAL day: near-duplicate titles only mean
+            # "same story" within the same news day — day-chunks for different
+            # years run concurrently and must not dedup against each other.
             datums = _filter_title_dupes(
                 datums,
                 threshold=getattr(settings, 'ARTICLE_DEDUP_JACCARD_THRESHOLD', 0.75),
                 hours=getattr(settings, 'ARTICLE_DEDUP_HOURS', 24),
-                cache_key=KEY_BACKFILL_TITLE_DEDUP,
+                cache_key=key_backfill_title_dedup(day_start.date().isoformat()),
             )
 
         by_source: dict[tuple[str, str], list[dict]] = {}
@@ -690,9 +744,27 @@ class HistoricalBackfillService:
                 fields = dict(datum)
                 past_deadline = deadline is not None and datetime.datetime.now(datetime.timezone.utc) >= deadline
                 if self.fetch_body and not past_deadline:
-                    body = fetch_article_body(datum['source_url'], source_code=source_code)
+                    page_title, body = fetch_article_page(datum['source_url'], source_code=source_code)
+                    if (not body or is_junk_page_title(page_title)) and not (
+                        deadline is not None and datetime.datetime.now(datetime.timezone.utc) >= deadline
+                    ):
+                        # Dead, JS-only, or paywalled (junk <title> = the body
+                        # is paywall chrome too) — the capture closest to the
+                        # backfill day usually still has the real text. The
+                        # fallback is 2 paced Wayback requests, so re-check the
+                        # deadline first (the pre-loop check predates the live
+                        # fetch above).
+                        wb_title, wb_body = fetch_wayback_page(datum['source_url'], around=day_start)
+                        if wb_body:
+                            page_title, body = wb_title, wb_body
                     if body:
                         fields['content'] = body
+                    if (page_title and not is_junk_page_title(page_title)
+                            and datum.get('extra_data', {}).get('title_from_slug')):
+                        # Discovery only had a slug/event-sentence title; the
+                        # article page's own <title> is strictly better —
+                        # unless it's paywall/interstitial junk.
+                        fields['title'] = page_title[:200]
                 fields['extra_data'] = {
                     **datum.get('extra_data', {}), 'backfill_day': day_start.date().isoformat(),
                 }
@@ -754,16 +826,52 @@ _BODY_MAX_CHARS = 4000
 _SCRIPT_STYLE_RE = re.compile(r'(?is)<(script|style|noscript)[^>]*>.*?</\1>')
 _PARAGRAPH_RE = re.compile(r'(?is)<p[^>]*>(.*?)</p>')
 _TAG_RE = re.compile(r'(?s)<[^>]+>')
+_TITLE_RE = re.compile(r'(?is)<title[^>]*>(.*?)</title>')
+
+# Paywall / interstitial / error page titles — never worth adopting as an
+# article title, and a signal the page body is chrome too (verified live:
+# FT's paywall serves <title>Subscribe to read</title>, which the smoke test
+# turned into Events literally titled "Subscribe to read").
+_JUNK_TITLE_RE = re.compile(
+    r'^\s*(subscribe|sign.?in|log.?in|register)\b'
+    r'|\b(access denied|forbidden|page not found|are you a robot'
+    r'|attention required|just a moment|enable (javascript|cookies)|captcha)\b'
+    r'|^\s*(404|403|401)\b',
+    re.IGNORECASE,
+)
 
 
-def fetch_article_body(url: str, source_code: str | None = None, timeout: int = _HTTP_TIMEOUT) -> str | None:
-    """Best-effort plain-text body for a historical article URL.
+def is_junk_page_title(title: str | None) -> bool:
+    return bool(title) and bool(_JUNK_TITLE_RE.search(title))
 
-    Backfill candidates come from sitemaps/CDX as title-only; without body text the
-    NLP step can't geocode them, so they'd never aggregate into Events (and never
-    hit the map). This pulls the page and extracts paragraph text — good enough for
-    geocoding + category. Returns None on any failure (caller falls back to the
-    title).
+_WAYBACK_AVAILABILITY_URL = 'https://archive.org/wayback/available'
+
+
+def _extract_title_and_text(page_html: str) -> tuple[str | None, str | None]:
+    """(<title> text, paragraph text capped at _BODY_MAX_CHARS) from raw HTML."""
+    # Cap before regex work: the backreference pattern degrades O(N) per unclosed
+    # <script>/<style> tag; 200 KB is ample for any news article's paragraph text.
+    page_html = page_html[:200_000]
+    title_m = _TITLE_RE.search(page_html)
+    title = _html.unescape(re.sub(r'\s+', ' ', title_m.group(1))).strip() if title_m else None
+    html = _SCRIPT_STYLE_RE.sub(' ', page_html)
+    paragraphs = _PARAGRAPH_RE.findall(html)
+    text = ' '.join(_TAG_RE.sub(' ', p) for p in paragraphs)
+    text = _html.unescape(re.sub(r'\s+', ' ', text)).strip()
+    return title or None, text[:_BODY_MAX_CHARS] or None
+
+
+def fetch_article_page(
+    url: str, source_code: str | None = None, timeout: int = _HTTP_TIMEOUT,
+) -> tuple[str | None, str | None]:
+    """Best-effort (page title, plain-text body) for a historical article URL.
+
+    Backfill candidates arrive title-only (sitemap entries / Wikipedia event
+    sentences); without body text the NLP step can't geocode them, so they'd
+    never aggregate into Events (and never hit the map). This pulls the page
+    and extracts <title> + paragraph text — good enough for geocoding +
+    category. Returns (None, None) on any failure (the caller falls back to
+    the Wayback Machine, then to the discovery title).
 
     source_code: when given, participates in the same timeout blocklist as sitemap
     discovery (skipped if already blocked; a Timeout here blocks it too) — a source
@@ -773,25 +881,58 @@ def fetch_article_body(url: str, source_code: str | None = None, timeout: int = 
     worth of articles at a time, not fanned out further — see module docstring).
     """
     if source_code and _is_source_blocked(source_code):
-        return None
+        return None, None
     try:
         resp = requests.get(url, headers=_HTTP_HEADERS, timeout=timeout)
         resp.raise_for_status()
     except requests.Timeout:
         if source_code:
             _block_source(source_code, f'article body timeout: {url}')
-        return None
+        return None, None
     except requests.RequestException as exc:
         logger.debug('body fetch failed url=%r: %s', url, exc)
-        return None
+        return None, None
+    return _extract_title_and_text(resp.text)
 
-    # Cap before regex work: the backreference pattern degrades O(N) per unclosed
-    # <script>/<style> tag; 200 KB is ample for any news article's paragraph text.
-    html = _SCRIPT_STYLE_RE.sub(' ', resp.text[:200_000])
-    paragraphs = _PARAGRAPH_RE.findall(html)
-    text = ' '.join(_TAG_RE.sub(' ', p) for p in paragraphs)
-    text = _html.unescape(re.sub(r'\s+', ' ', text)).strip()
-    return text[:_BODY_MAX_CHARS] or None
+
+def fetch_article_body(url: str, source_code: str | None = None, timeout: int = _HTTP_TIMEOUT) -> str | None:
+    """Body-only convenience wrapper around fetch_article_page."""
+    return fetch_article_page(url, source_code=source_code, timeout=timeout)[1]
+
+
+def fetch_wayback_page(
+    url: str, around: datetime.datetime | None = None, timeout: int = _HTTP_TIMEOUT,
+) -> tuple[str | None, str | None]:
+    """(title, body) for *url* from the Wayback Machine capture closest to
+    ``around`` — the fallback when the live page is dead, paywalled, or
+    JS-only (historical cited URLs frequently are).
+
+    Uses the availability API to find the closest capture, then fetches the
+    ``id_`` variant (original HTML, no archive toolbar). Both requests go
+    through services.data.wayback's polite shared client (module-wide pacing,
+    optional proxy) with a single retry each — a backfill flood of dead URLs
+    must not hammer Wayback, and a miss just means the caller saves the
+    article with its discovery title.
+    """
+    from services.data.wayback import _wayback_get
+
+    params = {'url': url}
+    if around is not None:
+        params['timestamp'] = around.strftime('%Y%m%d')
+    resp = _wayback_get(_WAYBACK_AVAILABILITY_URL, params=params, retries=1, timeout=timeout)
+    if resp is None:
+        return None, None
+    try:
+        snapshot = (resp.json().get('archived_snapshots') or {}).get('closest') or {}
+    except ValueError:
+        return None, None
+    if not snapshot.get('available') or not snapshot.get('timestamp'):
+        return None, None
+    archive_url = f'https://web.archive.org/web/{snapshot["timestamp"]}id_/{url}'
+    resp = _wayback_get(archive_url, retries=1, timeout=timeout)
+    if resp is None:
+        return None, None
+    return _extract_title_and_text(resp.text)
 
 
 def _slug_from_url(url: str) -> str:

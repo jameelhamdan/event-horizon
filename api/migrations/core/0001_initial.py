@@ -91,9 +91,14 @@ def _load_fixture(filename, apps, model_label):
     with open(path, encoding='utf-8') as f:
         entries = json.load(f)
     existing = set(Model.objects.values_list('code', flat=True))
+    # Fixture files evolve with the CURRENT model (e.g. sitemap_url, added in
+    # 0006, is present in them for fresh installs), but this historical model
+    # only has its 0001-era fields — drop anything newer here and let the
+    # later data migrations (0007, ...) backfill those columns once they exist.
+    allowed = {f.name for f in Model._meta.concrete_fields}
     created = 0
     for entry in entries:
-        fields = entry['fields']
+        fields = {k: v for k, v in entry['fields'].items() if k in allowed}
         if fields['code'] not in existing:
             Model.objects.create(**fields)
             created += 1

@@ -262,6 +262,11 @@ ARTICLE_DEDUP_TITLE_ENABLED = True        # Jaccard dedup on titles (Redis-backe
 ARTICLE_DEDUP_JACCARD_THRESHOLD = 0.75
 ARTICLE_DEDUP_HOURS = 24
 
+# Optional egress proxy for Wayback Machine requests during historical backfill
+# (front-page mining + dead-URL body fallback — see services/data/wayback.py).
+# Wayback rate-limits per IP; leave empty to go direct.
+WAYBACK_PROXY_URL = config('WAYBACK_PROXY_URL', default='')
+
 # Ollama (self-hosted, no key) — three model tiers for different task complexities.
 OLLAMA_BASE_URL = config('OLLAMA_BASE_URL', default='http://localhost:11434')
 OLLAMA_MODEL_SMALL  = 'qwen3:4b'

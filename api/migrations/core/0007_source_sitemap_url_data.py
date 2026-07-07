@@ -17,6 +17,7 @@ _SITEMAP_URLS = {
     'scmp-world': 'https://www.scmp.com/sitemap/archives-0.xml',
     'africa-news': 'https://www.africanews.com/sitemaps/en/sitemap.xml',
     'allafrica': 'https://allafrica.com/misc/sitemap/aans-urls-en.xml',
+    'elpais-english': 'https://english.elpais.com/sitemap.xml',
     # Standard /sitemap.xml path, but confirmed live — locked in explicitly
     'aljazeera-world': 'https://www.aljazeera.com/sitemap.xml',
     'arab-news': 'https://www.arabnews.com/sitemap.xml',

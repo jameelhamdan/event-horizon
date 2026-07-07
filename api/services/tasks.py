@@ -137,14 +137,23 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
 
     # Long one-shot seeds go on the bulk queue so they don't block the live pipeline.
     enqueue(backfill_prices_task, years=10, queue='bulk', job_timeout=-1)
-    # source_code=None (all enabled RSS sources), top_n=None → each source's per-day
-    # cap derives from its weight (2–6 by priority). backfill_history_task does one
-    # bounded preflight probe per source, then pure enqueueing (see its docstring)
-    # — no job_timeout=-1 needed on the bulk queue.
+    # source_code=None (wikipedia + all enabled RSS sources), top_n=None → each
+    # source's per-day cap derives from its weight (2–6 by priority; 25 for
+    # wikipedia). backfill_history_task does one bounded preflight probe per
+    # source, then pure enqueueing (see its docstring) — no job_timeout=-1
+    # needed on the bulk queue.
     enqueue(backfill_history_task, start, now, None, queue='bulk')
     if settings.FORECAST_ENABLED:
         enqueue(train_forecast_model_task, queue='bulk', job_timeout=-1)
         enqueue(run_forecast_task, queue='bulk', job_timeout=-1)
+    # Surface the backfilled range as Events (the live aggregate stage's 168h
+    # lookback can never reach it). Bulk is a 1-worker FIFO queue, so this runs
+    # after the price backfill + forecast training above — by then the heavy
+    # queue has usually drained the backfill day-chunks. Best-effort ordering
+    # only (bulk can't await heavy): aggregate_history_task is idempotent, so
+    # any articles processed after it ran are picked up by re-running it
+    # (manage.py run_task aggregate_history_task start_date=... end_date=...).
+    enqueue(aggregate_history_task, start, now, queue='bulk', job_timeout=-1)
 
     cache_set(KEY_BOOTSTRAP_INITIAL_DATA_DONE, True, timeout=None)
     log.info('[bootstrap] initial data backfill enqueued (article window %dy)', BOOTSTRAP_ARTICLE_YEARS)
@@ -358,16 +367,23 @@ def backfill_history_task(
     """
     import core.models as m
     from services.cache import key_backfill_checkpoint, redis_set_members
-    from services.data.historical import iter_days, probe_source_has_sitemap_entries
+    from services.data.historical import iter_days, probe_source
+    from services.data.wikipedia import WIKIPEDIA_SOURCE_CODE, ensure_wikipedia_source
     from services.queue import enqueue
 
     start_date = _parse_backfill_date(start_date)
     end_date = _parse_backfill_date(end_date)
 
-    if source_code:
+    if source_code == WIKIPEDIA_SOURCE_CODE:
+        sources = [ensure_wikipedia_source()]
+    elif source_code:
         sources = [m.Source.objects.get(code=source_code)]
     else:
-        sources = list(
+        # Wikipedia Current Events is the primary discovery path (curated
+        # per-day importance — see services/data/wikipedia.py); per-publisher
+        # sitemap sources supplement it. The wiki Source is is_enabled=False
+        # (backfill-only), so it must be included explicitly.
+        sources = [ensure_wikipedia_source()] + list(
             m.Source.objects.filter(type=m.SourceType.RSS, is_enabled=True).order_by('code')
         )
 
@@ -375,13 +391,13 @@ def backfill_history_task(
     if not skip_preflight and not dry_run:
         verified = []
         for source in sources:
-            if probe_source_has_sitemap_entries(source):
+            if probe_source(source):
                 verified.append(source)
             else:
                 skipped_sources.append(source.code)
                 logger.warning(
-                    '[backfill] source=%r: preflight found no sitemap entries in the last '
-                    '90 days — dropping from this run (pass skip_preflight=True to force)',
+                    '[backfill] source=%r: preflight found no entries in its recent '
+                    'window — dropping from this run (pass skip_preflight=True to force)',
                     source.code,
                 )
         sources = verified
@@ -404,8 +420,14 @@ def backfill_history_task(
         # ran (blocked/errored/deadline), even if the enabled-source set or chunk
         # boundaries changed since the interrupted run.
         pending = [c for c in source_codes if not (resume and f'{day_iso}:{c}' in done)]
-        for chunk_start in range(0, len(pending), BACKFILL_CHUNK_SIZE):
-            chunk = pending[chunk_start:chunk_start + BACKFILL_CHUNK_SIZE]
+        # The wiki source gets a chunk of its own: a day yields ~25 curated
+        # events (each with a body fetch + possible Wayback fallback) — a full
+        # chunk's workload by itself, and grouping it with sitemap sources
+        # would routinely blow the chunk deadline.
+        chunks = [[c] for c in pending if c == WIKIPEDIA_SOURCE_CODE]
+        rest = [c for c in pending if c != WIKIPEDIA_SOURCE_CODE]
+        chunks += [rest[i:i + BACKFILL_CHUNK_SIZE] for i in range(0, len(rest), BACKFILL_CHUNK_SIZE)]
+        for chunk in chunks:
             result = enqueue(
                 backfill_day_chunk_task, day_start, day_end, chunk, top_n, dry_run,
                 checkpoint_key, delay_seconds,
@@ -421,6 +443,64 @@ def backfill_history_task(
     }
     logger.info('backfill_history_task dispatched: %s', summary)
     return summary
+
+
+@shared_task
+@_log_task
+def aggregate_history_task(
+    start_date: datetime,
+    end_date: datetime,
+    window_days: int = 30,
+    tag: bool = True,
+) -> dict:
+    """Aggregate backfilled articles into Events across a historical range.
+
+    The live 'aggregate' stage only looks back EVENT_STAGE_WINDOW_HOURS (168h),
+    so articles saved by backfill_history_task would otherwise never form
+    Events (and never appear on the map). This walks [start_date, end_date) in
+    clustering-grid-aligned windows (services.workflow.events
+    .iter_aggregate_windows), running the SAME aggregate_events the live stage
+    uses on each — idempotent (upsert keyed on location/category/day), routing
+    inline as always. Each window's new/updated events are then topic-tagged
+    (``tag=False`` to skip), since the tag repair stage's 168h lookback can't
+    reach them either.
+
+    Run it AFTER a backfill's day-chunks have finished processing (the
+    dispatcher can't await them). Long single job → bulk queue:
+        python manage.py run_task aggregate_history_task \\
+            start_date=2021-07-01 end_date=2026-07-01 --sync
+
+    Returns {'windows', 'created', 'updated', 'tagged'}.
+    """
+    from core import models as m
+    from services.workflow import _needs_tagging, aggregate_events, tag_events_by_ids
+    from services.workflow.events import iter_aggregate_windows
+
+    start_date = _parse_backfill_date(start_date)
+    end_date = _parse_backfill_date(end_date)
+
+    windows = created_total = updated_total = tagged_total = 0
+    for w_start, w_end in iter_aggregate_windows(start_date, end_date, window_days=window_days):
+        windows += 1
+        created, updated = aggregate_events(start=w_start, end=w_end)
+        created_total += created
+        updated_total += updated
+        if tag and (created or updated):
+            qs = m.Event.objects.filter(
+                started_at__gte=w_start, started_at__lt=w_end,
+            ).only('pk', 'topics', 'topics_source')
+            ids = [e.pk for e in qs if _needs_tagging(e.topics) or e.topics_source == 'keyword']
+            if ids:
+                tagged_total += tag_events_by_ids(ids)
+        logger.info(
+            '[aggregate-history] window %s → %s: created=%d updated=%d',
+            w_start.date(), w_end.date(), created, updated,
+        )
+
+    return {
+        'windows': windows, 'created': created_total,
+        'updated': updated_total, 'tagged': tagged_total,
+    }
 
 
 # Source-day outcomes that count as "done" for resume checkpointing — the fetch
@@ -442,7 +522,9 @@ def backfill_day_chunk_task(
 ) -> dict:
     """
     Worker half of the backfill dispatcher: fetch + save + (unless dry_run)
-    NLP-process one day window across a small chunk of sources.
+    score → gate → NLP-process one day window across a small chunk of sources
+    — the same order the live pipeline uses (score stage, then
+    ARTICLE_MIN_IMPORTANCE_TO_PROCESS gate, then process stage).
 
     Relies on the heavy queue's default ~10min time limit (no per-call
     job_timeout override) plus an internal wall-clock deadline
@@ -456,11 +538,13 @@ def backfill_day_chunk_task(
     done, so blocklisted/errored/deadline source-days remain resumable.
 
     Returns {'day': ISO date str, 'sources': [...], 'fetched', 'saved',
-    'processed', 'outcomes': {source_code: outcome}}.
+    'scored', 'processed', 'outcomes': {source_code: outcome}}.
     """
+    from django.conf import settings
     import core.models as m
     from services.cache import redis_set_add
     from services.data.historical import HistoricalBackfillService
+    from services.workflow.articles import _apply_min_score_filter
 
     deadline = datetime.now(dt_timezone.utc) + timedelta(seconds=BACKFILL_CHUNK_DEADLINE_SECONDS)
 
@@ -468,9 +552,27 @@ def backfill_day_chunk_task(
     service = HistoricalBackfillService(sources=sources, top_n=top_n, delay_seconds=delay_seconds)
     result = service.fetch_and_save_day(day_start, day_end, dry_run=dry_run, deadline=deadline)
 
-    processed = 0
+    scored = processed = 0
     if not dry_run and result.saved_ids:
-        processed = process_articles(ids=result.saved_ids)
+        # Same order as the live pipeline: score → gate → process. Without
+        # this, immediately-processed backfill articles would be skipped by
+        # the 'score' stage forever (its predicate is processed_on__isnull)
+        # and the min-importance process gate would never apply.
+        if settings.ARTICLE_IMPORTANCE_SCORING_ENABLED:
+            from services.scoring import score_unscored_articles
+            try:
+                scored = score_unscored_articles(article_ids=result.saved_ids)
+            except Exception:
+                # Scoring is best-effort here — a scoring failure must not
+                # strand saved articles unprocessed (they'd stay invisible).
+                logger.exception('[backfill] scoring failed for day=%s — processing ungated', day_start.date())
+        process_qs = _apply_min_score_filter(
+            m.Article.objects.filter(id__in=result.saved_ids),
+            settings.ARTICLE_MIN_IMPORTANCE_TO_PROCESS,
+        )
+        process_ids = list(process_qs.values_list('id', flat=True))
+        if process_ids:
+            processed = process_articles(ids=process_ids)
 
     if checkpoint_key and not dry_run:
         day_iso = day_start.date().isoformat()
@@ -484,7 +586,8 @@ def backfill_day_chunk_task(
 
     return {
         'day': day_start.date().isoformat(), 'sources': source_codes,
-        'fetched': result.fetched, 'saved': result.saved, 'processed': processed,
+        'fetched': result.fetched, 'saved': result.saved,
+        'scored': scored, 'processed': processed,
         'outcomes': result.outcomes,
     }
 

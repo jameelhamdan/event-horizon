@@ -42,6 +42,8 @@ python -m tests.tests_models
 python -m tests.tests_processing
 python -m tests.tests_stages
 python -m tests.tests_topics_matcher
+python -m tests.tests_wikipedia_history
+python -m tests.tests_wayback_history
 python -m tests.tests_forecasting_routing
 DJANGO_SETTINGS_MODULE=settings.base python -m tests.tests_forecast   # slower (LightGBM roundtrip)
 
@@ -102,7 +104,14 @@ api/                       PYTHONPATH root inside Docker (/app)
     streams/               prices.py, notam.py, earthquakes.py, forex.py — BaseStream.run()
                            re-raises fetch/save failures so a broken stream surfaces as a
                            FAILED TaskRun instead of a silent success-with-0
-    data/                  DataService, rss.py (feedparser), telegram.py (Telethon)
+    data/                  DataService, rss.py (feedparser), telegram.py (Telethon),
+                           historical.py + wikipedia.py + wayback.py (historical backfill
+                           discovery: Wikipedia Current Events monthly pages are the primary
+                           path — curated per-day events with citations; per-publisher
+                           supplements are Wayback front-page mining for recency-only-sitemap
+                           publishers (wayback.py FRONTPAGES registry; paced client, optional
+                           WAYBACK_PROXY_URL) and sitemap discovery for deep-archive ones;
+                           bodies fetched live with Wayback capture fallback)
     scoring/               LLM importance scoring (batches of 30 titles) for the score stage
     workflow/              articles.py, events.py, topics.py — per-stage orchestration glue
                            (fetch/process article flow, event aggregation, topic discover/
