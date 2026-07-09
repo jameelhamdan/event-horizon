@@ -2,12 +2,10 @@
 
 A single page under ``/admin/dashboard/`` summarizing pipeline operations and
 offering POST actions. Data sources: ``api/crontab`` (upcoming runs),
-``core.models.TaskRun`` (per-queue queued/running/failed counts, linking into
-the task browser at ``/admin/core/taskrun/`` for individual task detail —
-that's our RQ-admin / Flower equivalent), Flower's ``/workers?json=1`` API
-(live worker ground truth), ``pipeline_coverage()`` (per-stage gaps), and
-forecast artifacts/rows. Registered via a ``get_urls`` shim in
-``core/admin.py``.
+Flower's ``/workers?json=1`` API (live worker ground truth — individual task
+detail lives in the task browser at ``/admin/core/taskrun/``),
+``pipeline_coverage()`` (per-stage gaps), and forecast artifacts/rows.
+Registered via a ``get_urls`` shim in ``core/admin.py``.
 """
 
 import logging
@@ -254,25 +252,6 @@ def _ok(request, msg):
 
 # ── Data gathering ───────────────────────────────────────────────────────────
 
-def _broker_depths() -> dict:
-    """Broker queue depth per queue.
-
-    Celery's default Redis transport stores pending (unclaimed) task messages
-    as a Redis list keyed by queue name, so a plain LLEN gives the queue depth
-    without needing a result backend or app.control round-trip. Shown next to
-    TaskRun's 'queued' count — the two disagreeing persistently means lost or
-    untracked messages.
-    """
-    try:
-        import redis
-        from django.conf import settings
-        conn = redis.Redis.from_url(settings.CELERY_BROKER_URL)
-        return {q: conn.llen(q) for q in ('default', 'heavy', 'bulk')}
-    except Exception as exc:
-        logger.debug('[dashboard] broker depths unavailable: %s', exc)
-        return {}
-
-
 def _upcoming():
     """Next scheduled time per task from api/crontab."""
     try:
@@ -280,45 +259,6 @@ def _upcoming():
         return upcoming_runs()
     except Exception as exc:  # noqa: BLE001
         logger.debug('[dashboard] upcoming unavailable: %s', exc)
-        return []
-
-
-def _queue_summary():
-    """Per-queue queued/running/failed-today counts, each linking into the task
-    browser (/admin/core/taskrun/) filtered to that queue+status — replaces the
-    old ad hoc in-flight table now that individual tasks live in TaskRun admin."""
-    try:
-        from django.conf import settings
-        from django.urls import reverse
-        from core.models import TaskRun
-
-        base = reverse('admin:core_taskrun_changelist')
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-        workers = getattr(settings, 'CELERY_QUEUE_WORKERS', {})
-        depths = _broker_depths()
-        rows = []
-        for q in ('default', 'heavy', 'bulk'):
-            counts = {}
-            for status in (TaskRun.Status.QUEUED, TaskRun.Status.RUNNING):
-                counts[status] = TaskRun.objects.filter(queue=q, status=status).count()
-            counts['failed'] = TaskRun.objects.filter(
-                queue=q, status=TaskRun.Status.FAILED, started_at__gte=cutoff,
-            ).count()
-            rows.append({
-                'queue': q,
-                'workers': workers.get(q),
-                'depth': depths.get(q),
-                'queued': counts[TaskRun.Status.QUEUED],
-                'queued_url': f'{base}?queue={q}&status={TaskRun.Status.QUEUED}',
-                'running': counts[TaskRun.Status.RUNNING],
-                'running_url': f'{base}?queue={q}&status={TaskRun.Status.RUNNING}',
-                'failed': counts['failed'],
-                'failed_url': f'{base}?queue={q}&status={TaskRun.Status.FAILED}',
-                'all_url': f'{base}?queue={q}',
-            })
-        return rows
-    except Exception as exc:  # noqa: BLE001
-        logger.debug('[dashboard] queue_summary unavailable: %s', exc)
         return []
 
 
@@ -514,7 +454,6 @@ def dashboard_view(request):
     fetchers = {
         'health': _health_status,
         'upcoming': _upcoming,
-        'queue_summary': _queue_summary,
         'flower': _flower_status,
         'coverage': _coverage,
         'forecast': _forecast_status,

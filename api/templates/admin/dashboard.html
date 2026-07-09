@@ -4,9 +4,9 @@
 {% block content %}
 <div class="ops">
 
-  {# ── Quick actions ───────────────────────────────────────────────── #}
+  {# ── Actions & manual task triggers ──────────────────────────────── #}
   <section class="ops-card">
-    <h2>Actions</h2>
+    <h2>Actions <span class="ops-muted" style="font-weight:normal">— pipeline actions plus every standalone crontab task, runnable without shell access</span></h2>
     <form method="post" class="ops-actions">
       {% csrf_token %}
       <button class="button" name="dashboard_action" value="run_pipeline">▶ Run full sync</button>
@@ -35,12 +35,7 @@
       <input type="date" name="end_date" required title="Range end (UTC, exclusive)">
       <button class="button" type="submit" title="Build map Events from already-backfilled articles — the live aggregate stage only looks back 168h, so run this after every article backfill">Aggregate history → Events</button>
     </form>
-  </section>
-
-  {# ── Manual task triggers (crontab tasks, one button each) ───────── #}
-  <section class="ops-card">
-    <h2>Manual task triggers <span class="ops-muted" style="font-weight:normal">— every standalone crontab task, runnable without shell access</span></h2>
-    <form method="post" class="ops-actions">
+    <form method="post" class="ops-actions" style="margin-top:8px">
       {% csrf_token %}
       <button class="button" name="dashboard_action" value="pipeline_health">Health report</button>
       <button class="button" name="dashboard_action" value="refresh_topics">Refresh topics</button>
@@ -148,58 +143,32 @@
     {% endif %}
   </section>
 
-  <div class="ops-grid">
-    {# ── Upcoming runs ─────────────────────────────────────────────── #}
-    <section class="ops-card">
-      <h2>Upcoming runs</h2>
-      <table class="ops-table">
-        <thead><tr><th>Task</th><th>Schedule</th><th>Next run (UTC)</th></tr></thead>
-        <tbody>
-        {% for u in upcoming %}
-          <tr>
-            <td>{{ u.task }}</td>
-            <td class="ops-mono">{{ u.cron }}</td>
-            <td class="ops-muted">{{ u.when|default:"—" }}</td>
-          </tr>
-        {% empty %}
-          <tr><td colspan="3" class="ops-muted">No scheduled jobs visible.</td></tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </section>
-
-    {# ── Task queues ───────────────────────────────────────────────── #}
-    <section class="ops-card">
-      <h2>Task queues</h2>
-      <table class="ops-table">
-        <thead><tr><th>Queue</th><th>Workers</th><th>Depth</th><th>Queued</th><th>Running</th><th>Failed (24h)</th></tr></thead>
-        <tbody>
-        {% for q in queue_summary %}
-          <tr>
-            <td><a href="{{ q.all_url }}">{{ q.queue }}</a></td>
-            <td class="ops-muted">{{ q.workers|default:"—" }}</td>
-            <td class="ops-muted" title="Unclaimed messages on the Redis broker — persistent disagreement with Queued means lost/untracked tasks">{{ q.depth|default_if_none:"—" }}</td>
-            <td><a href="{{ q.queued_url }}">{{ q.queued }}</a></td>
-            <td><a href="{{ q.running_url }}">{{ q.running }}</a></td>
-            <td class="{% if q.failed %}ops-warn{% endif %}"><a href="{{ q.failed_url }}">{{ q.failed }}</a></td>
-          </tr>
-        {% empty %}
-          <tr><td colspan="6" class="ops-muted">No queue data.</td></tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      <p class="ops-muted" style="margin:8px 0 0">
-        Individual tasks — args, result, status, retries, error/traceback — at
-        <a href="/admin/core/taskrun/">/admin/core/taskrun/</a>.
-        Live worker ground truth (what is actually executing right now) at
-        <a href="/flower/">/flower/</a>.
-      </p>
-    </section>
-  </div>
+  {# ── Upcoming runs ───────────────────────────────────────────────── #}
+  <section class="ops-card">
+    <h2>Upcoming runs</h2>
+    <table class="ops-table">
+      <thead><tr><th>Task</th><th>Schedule</th><th>Next run (UTC)</th></tr></thead>
+      <tbody>
+      {% for u in upcoming %}
+        <tr>
+          <td>{{ u.task }}</td>
+          <td class="ops-mono">{{ u.cron }}</td>
+          <td class="ops-muted">{{ u.when|default:"—" }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="3" class="ops-muted">No scheduled jobs visible.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
 
   {# ── Celery workers (Flower) ─────────────────────────────────────── #}
   <section class="ops-card">
     <h2>Celery workers <span class="ops-muted" style="font-weight:normal">— live from <a href="/flower/">Flower</a></span></h2>
+    <p class="ops-muted" style="margin:0 0 10px">
+      Individual tasks — args, result, status, retries, error/traceback — at
+      <a href="/admin/core/taskrun/">/admin/core/taskrun/</a>.
+    </p>
     {% if flower.available %}
     <table class="ops-table">
       <thead><tr>
@@ -299,7 +268,5 @@
 .ops-danger-btn { background:#5a2020 !important; border-color:#7a2c2c !important; }
 .ops-danger-btn:hover { background:#7a2c2c !important; }
 .ops-informational { opacity: 0.7; font-style: italic; }
-.ops-grid { display:grid; grid-template-columns: 1fr 1fr; gap:18px; }
-@media (max-width: 800px){ .ops-grid { grid-template-columns: 1fr; } }
 </style>
 {% endblock %}
