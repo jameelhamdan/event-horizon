@@ -7,68 +7,165 @@
   {# ── Actions & manual task triggers ──────────────────────────────── #}
   <section class="ops-card">
     <h2>Actions <span class="ops-muted" style="font-weight:normal">— pipeline actions plus every standalone crontab task, runnable without shell access</span></h2>
-    <form method="post" class="ops-actions">
-      {% csrf_token %}
-      <button class="button" name="dashboard_action" value="run_pipeline">▶ Run full sync</button>
-      <button class="button" name="dashboard_action" value="backfill_prices">Backfill prices</button>
-      <button class="button" name="dashboard_action" value="backfill_articles">Backfill articles</button>
-      <button class="button" name="dashboard_action" value="retrain_forecast">Retrain forecast</button>
-      <button class="button" name="dashboard_action" value="rerun_bootstrap">Re-run bootstrap</button>
-    </form>
-    <form method="post" class="ops-actions" style="margin-top:8px">
-      {% csrf_token %}
-      <input type="hidden" name="dashboard_action" value="cancel_job">
-      <input type="text" name="job_id" placeholder="Celery task id" style="width:22em">
-      <button class="button" type="submit">Cancel job</button>
-    </form>
-    <form method="post" class="ops-actions" style="margin-top:8px">
-      {% csrf_token %}
-      <input type="hidden" name="dashboard_action" value="backfill_articles_until">
-      <input type="date" name="until_date" required>
-      <input type="text" name="source_code" placeholder="Source code (blank = all)" style="width:18em">
-      <button class="button" type="submit">Backfill articles until date</button>
-    </form>
-    <form method="post" class="ops-actions" style="margin-top:8px">
-      {% csrf_token %}
-      <input type="hidden" name="dashboard_action" value="aggregate_history">
-      <input type="date" name="start_date" required title="Range start (UTC)">
-      <input type="date" name="end_date" required title="Range end (UTC, exclusive)">
-      <button class="button" type="submit" title="Build map Events from already-backfilled articles — the live aggregate stage only looks back 168h, so run this after every article backfill">Aggregate history → Events</button>
-    </form>
-    <form method="post" class="ops-actions" style="margin-top:8px">
-      {% csrf_token %}
-      <button class="button" name="dashboard_action" value="pipeline_health">Health report</button>
-      <button class="button" name="dashboard_action" value="refresh_topics">Refresh topics</button>
-      <button class="button" name="dashboard_action" value="discover_topics">Discover topics</button>
-      <button class="button" name="dashboard_action" value="cleanup_low_importance">Cleanup low-importance</button>
-      <button class="button" name="dashboard_action" value="adjust_source_weights">Adjust source weights</button>
-      <button class="button" name="dashboard_action" value="score_forecasts">Score forecasts</button>
-      <button class="button" name="dashboard_action" value="refresh_openrouter_models">Refresh OpenRouter models</button>
-    </form>
-    <form method="post" class="ops-actions" style="margin-top:8px">
-      {% csrf_token %}
-      <input type="hidden" name="dashboard_action" value="run_stream">
-      <span class="ops-muted">Streams:</span>
-      <button class="button" name="stream" value="prices">Prices</button>
-      <button class="button" name="stream" value="notam">NOTAMs</button>
-      <button class="button" name="stream" value="earthquakes">Earthquakes</button>
-      <button class="button" name="stream" value="forex">Forex</button>
-    </form>
-    <form method="post" class="ops-actions" style="margin-top:8px">
-      {% csrf_token %}
-      <input type="hidden" name="dashboard_action" value="retroactive_tag_topic">
-      <input type="text" name="topic_slug" placeholder="Topic slug" required style="width:16em">
-      <input type="number" name="lookback_hours" placeholder="Lookback h (72)" min="1" style="width:9em">
-      <button class="button" type="submit">Retro-tag topic</button>
-    </form>
-    <div class="ops-actions" style="margin-top:8px">
-      <form method="post" style="display:inline" onsubmit="return confirm('prune_stale_articles_task DELETES old low-importance articles. Run it?')">
+
+    <h3 class="ops-group-title">Pipeline</h3>
+    <div class="ops-tiles">
+      <form method="post" class="ops-tile">
         {% csrf_token %}
-        <button class="button ops-danger-btn" name="dashboard_action" value="prune_stale_articles">⚠ Prune stale articles</button>
+        <button class="button" name="dashboard_action" value="run_pipeline">▶ Run full sync</button>
+        <p class="ops-tile-desc">Dispatch every enabled pipeline stage right now (fetch → score → process → geocode repair → aggregate → tag → route), skipping the normal per-stage cadence gates.</p>
       </form>
-      <form method="post" style="display:inline" onsubmit="return confirm('generate_newsletter_task SENDS REAL EMAIL to all subscribers when it completes. Run it?')">
+      <form method="post" class="ops-tile">
         {% csrf_token %}
-        <button class="button ops-danger-btn" name="dashboard_action" value="generate_newsletter">⚠ Generate newsletter (emails subscribers)</button>
+        <button class="button" name="dashboard_action" value="pipeline_health">Health report</button>
+        <p class="ops-tile-desc">Run the freshness/staleness check now instead of waiting for its 30-min schedule. Refreshes the Health section below on next load.</p>
+      </form>
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <button class="button" name="dashboard_action" value="rerun_bootstrap">Re-run bootstrap</button>
+        <p class="ops-tile-desc">Force the first-load data seed task to run again, even though it already ran once for this deployment.</p>
+      </form>
+      <form method="post" class="ops-tile ops-tile-wide">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="cancel_job">
+        <div class="ops-tile-row">
+          <input type="text" name="job_id" placeholder="Celery task id" style="flex:1">
+          <button class="button" type="submit">Cancel job</button>
+        </div>
+        <p class="ops-tile-desc">Revoke a running Celery task by id (SIGTERM). Find ids in <a href="/admin/core/taskrun/">TaskRun</a> or <a href="/flower/">Flower</a>.</p>
+      </form>
+    </div>
+
+    <h3 class="ops-group-title">Backfill &amp; history</h3>
+    <div class="ops-tiles">
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <button class="button" name="dashboard_action" value="backfill_prices">Backfill prices</button>
+        <p class="ops-tile-desc">Enqueue a 10-year OHLC price backfill for every active market symbol. Bulk queue, no time cap.</p>
+      </form>
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <button class="button" name="dashboard_action" value="backfill_articles">Backfill articles</button>
+        <p class="ops-tile-desc">Enqueue an RSS article backfill for the last 14 days across all sources.</p>
+      </form>
+      <form method="post" class="ops-tile ops-tile-wide">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="backfill_articles_until">
+        <div class="ops-tile-row">
+          <input type="date" name="until_date" required>
+          <input type="text" name="source_code" placeholder="Source code (blank = all)" style="flex:1">
+          <button class="button" type="submit">Backfill until date</button>
+        </div>
+        <p class="ops-tile-desc">Pull articles from now back to the chosen date, for one source or (if blank) every enabled RSS source.</p>
+      </form>
+      <form method="post" class="ops-tile ops-tile-wide">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="aggregate_history">
+        <div class="ops-tile-row">
+          <input type="date" name="start_date" required title="Range start (UTC)">
+          <input type="date" name="end_date" required title="Range end (UTC, exclusive)">
+          <button class="button" type="submit">Aggregate history → Events</button>
+        </div>
+        <p class="ops-tile-desc">Build map Events from already-backfilled articles over a date range. The live aggregate stage only looks back 168h, so <strong>run this after every article backfill</strong> or the backfilled articles will never form Events.</p>
+      </form>
+    </div>
+
+    <h3 class="ops-group-title">Topics</h3>
+    <div class="ops-tiles">
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <button class="button" name="dashboard_action" value="refresh_topics">Refresh topics</button>
+        <p class="ops-tile-desc">Re-pull Wikipedia Current Events and re-run LLM enrichment for existing topics. Normally runs daily at 04:00.</p>
+      </form>
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <button class="button" name="dashboard_action" value="discover_topics">Discover topics</button>
+        <p class="ops-tile-desc">Ask the LLM to propose new topics from recent events. Normally runs daily at 05:00.</p>
+      </form>
+      <form method="post" class="ops-tile ops-tile-wide">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="retroactive_tag_topic">
+        <div class="ops-tile-row">
+          <input type="text" name="topic_slug" placeholder="Topic slug" required style="flex:1">
+          <input type="number" name="lookback_hours" placeholder="Lookback h (72)" min="1" style="width:9em">
+          <button class="button" type="submit">Retro-tag topic</button>
+        </div>
+        <p class="ops-tile-desc">Retroactively tag historical events matching an existing topic slug, looking back N hours (default 72).</p>
+      </form>
+    </div>
+
+    <h3 class="ops-group-title">Forecasting</h3>
+    <div class="ops-tiles">
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <button class="button" name="dashboard_action" value="retrain_forecast">Retrain forecast</button>
+        <p class="ops-tile-desc">Retrain the LightGBM routing/return model on current data, then immediately run it once. Bulk queue, no time cap.</p>
+      </form>
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <button class="button" name="dashboard_action" value="score_forecasts">Score forecasts</button>
+        <p class="ops-tile-desc">Grade past forecasts against actual price moves to update directional accuracy stats.</p>
+      </form>
+    </div>
+
+    <h3 class="ops-group-title">Streams <span class="ops-muted" style="font-weight:normal">— run one collector now instead of waiting for its cadence</span></h3>
+    <div class="ops-tiles">
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="run_stream">
+        <button class="button" name="stream" value="prices">Prices</button>
+        <p class="ops-tile-desc">Normal cadence: every 5 min.</p>
+      </form>
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="run_stream">
+        <button class="button" name="stream" value="notam">NOTAMs</button>
+        <p class="ops-tile-desc">Normal cadence: every 15 min.</p>
+      </form>
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="run_stream">
+        <button class="button" name="stream" value="earthquakes">Earthquakes</button>
+        <p class="ops-tile-desc">Normal cadence: every 5 min.</p>
+      </form>
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="run_stream">
+        <button class="button" name="stream" value="forex">Forex</button>
+        <p class="ops-tile-desc">Normal cadence: every 15 min. All four no-op safely if their feature flag is off.</p>
+      </form>
+    </div>
+
+    <h3 class="ops-group-title">Maintenance</h3>
+    <div class="ops-tiles">
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <button class="button" name="dashboard_action" value="cleanup_low_importance">Cleanup low-importance</button>
+        <p class="ops-tile-desc">Remove or downrank low-importance articles that passed initial scoring but weren't worth keeping around.</p>
+      </form>
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <button class="button" name="dashboard_action" value="adjust_source_weights">Adjust source weights</button>
+        <p class="ops-tile-desc">Recompute per-source importance weighting used by the score stage.</p>
+      </form>
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <button class="button" name="dashboard_action" value="refresh_openrouter_models">Refresh OpenRouter models</button>
+        <p class="ops-tile-desc">Re-pull the list of models OpenRouter currently offers, used by LLM routing.</p>
+      </form>
+    </div>
+
+    <h3 class="ops-group-title ops-danger-title">⚠ Danger zone</h3>
+    <div class="ops-tiles">
+      <form method="post" class="ops-tile ops-tile-danger" onsubmit="return confirm('prune_stale_articles_task DELETES old low-importance articles. Run it?')">
+        {% csrf_token %}
+        <button class="button ops-danger-btn" name="dashboard_action" value="prune_stale_articles">Prune stale articles</button>
+        <p class="ops-tile-desc">Permanently deletes old, low-importance articles from the database. Not reversible.</p>
+      </form>
+      <form method="post" class="ops-tile ops-tile-danger" onsubmit="return confirm('generate_newsletter_task SENDS REAL EMAIL to all subscribers when it completes. Run it?')">
+        {% csrf_token %}
+        <button class="button ops-danger-btn" name="dashboard_action" value="generate_newsletter">Generate newsletter</button>
+        <p class="ops-tile-desc">Builds today's newsletter and <strong>emails every subscriber</strong> as soon as it completes.</p>
       </form>
     </div>
   </section>
@@ -257,6 +354,17 @@
 .ops-card { margin: 0 0 18px; padding: 14px 16px; background:#1e2228; border:1px solid #2c3038; border-radius:4px; }
 .ops-card h2 { margin: 0 0 10px; font-size: 14px; color:#79aec8; }
 .ops-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.ops-group-title { margin: 18px 0 8px; padding-top: 12px; border-top: 1px solid #2c3038; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: #9aa5b1; }
+.ops-card > .ops-group-title:first-of-type { margin-top: 4px; padding-top: 0; border-top: none; }
+.ops-danger-title { color: #e05252; }
+.ops-tiles { display:grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.ops-tile { display:flex; flex-direction:column; gap:6px; padding:10px; background:#181b20; border:1px solid #2c3038; border-radius:4px; }
+.ops-tile-wide { grid-column: 1 / -1; }
+.ops-tile-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.ops-tile .button { align-self:flex-start; }
+.ops-tile-desc { margin:0; font-size:11.5px; line-height:1.4; color:#8b93a0; }
+.ops-tile-danger { border-color:#4a2626; background:#221818; }
+.ops-tile-danger .ops-tile-desc { color:#c98a8a; }
 .ops-table { width:100%; border-collapse: collapse; font-size: 12px; }
 .ops-table th, .ops-table td { text-align:left; padding:5px 8px; border-bottom:1px solid #2c3038; }
 .ops-table th { color:#999; font-weight:600; }
