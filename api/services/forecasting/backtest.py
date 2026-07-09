@@ -1,10 +1,10 @@
 """Walk-forward backtest for the forecasting layer — the headline evaluation.
 
 Rolling-origin: at each origin t_o, train on rows dated <= t_o (within the train window) and
-predict rows dated in (t_o, t_o+step]. Never peeks past the origin. Compares four arms to show
+predict rows dated in (t_o, t_o+step]. Never peeks past the origin. Compares three arms to show
 whether the news-event signal actually adds value:
 
-    naive (majority)  →  price-only  →  price + rule-routed events  →  price + LLM-routed events
+    naive (majority)  →  price-only  →  price + rule-routed events
 
 Reports directional accuracy, macro-F1, ROC-AUC, Brier score and a reliability curve per arm,
 per horizon. Writes a JSON report. Self-checks the train/predict split for leakage.
