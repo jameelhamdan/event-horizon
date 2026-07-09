@@ -5,8 +5,10 @@
 <div class="ops">
 
   {# ── Actions & manual task triggers ──────────────────────────────── #}
-  <section class="ops-card">
-    <h2>Actions <span class="ops-muted" style="font-weight:normal">— pipeline actions plus every standalone crontab task, runnable without shell access</span></h2>
+  <details class="ops-card ops-card-collapsible">
+    <summary class="ops-card-summary">
+      <h2>Actions <span class="ops-muted" style="font-weight:normal">— pipeline actions plus every standalone crontab task, runnable without shell access</span></h2>
+    </summary>
 
     <h3 class="ops-group-title">Pipeline</h3>
     <div class="ops-tiles">
@@ -168,7 +170,7 @@
         <p class="ops-tile-desc">Builds today's newsletter and <strong>emails every subscriber</strong> as soon as it completes.</p>
       </form>
     </div>
-  </section>
+  </details>
 
   {# ── Pipeline coverage ───────────────────────────────────────────── #}
   <section class="ops-card">
@@ -353,6 +355,15 @@
 .ops { max-width: 1100px; }
 .ops-card { margin: 0 0 18px; padding: 14px 16px; background:#1e2228; border:1px solid #2c3038; border-radius:4px; }
 .ops-card h2 { margin: 0 0 10px; font-size: 14px; color:#79aec8; }
+.ops-card-collapsible { padding: 0; }
+.ops-card-summary { list-style:none; cursor:pointer; padding: 14px 16px; user-select:none; }
+.ops-card-summary::-webkit-details-marker { display:none; }
+.ops-card-summary h2 { margin:0; display:flex; align-items:center; gap:8px; }
+.ops-card-summary h2::before { content:"▸"; display:inline-block; color:#79aec8; transition: transform .15s ease; }
+.ops-card-collapsible[open] > .ops-card-summary h2::before { transform: rotate(90deg); }
+.ops-card-summary:hover h2 { color:#9cc9e0; }
+.ops-card-collapsible > *:not(.ops-card-summary) { padding-left:16px; padding-right:16px; }
+.ops-card-collapsible > :last-child { padding-bottom:14px; }
 .ops-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
 .ops-group-title { margin: 18px 0 8px; padding-top: 12px; border-top: 1px solid #2c3038; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: #9aa5b1; }
 .ops-card > .ops-group-title:first-of-type { margin-top: 4px; padding-top: 0; border-top: none; }
