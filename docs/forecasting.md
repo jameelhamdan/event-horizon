@@ -1,7 +1,6 @@
-# Forecasting — event-fused symbol prediction (v2)
+# Forecasting — event-fused symbol prediction
 
-> This doc describes the **reworked** prediction layer (the prior v1 design was removed in
-> migration `0003_delete_forecast`). It predicts the **direction and magnitude** of the
+> The prediction layer forecasts the **direction and magnitude** of the
 > market-indicator panel by fusing real-world **news events** with **price time-series** —
 > framed as honest, leakage-free supervised learning, not a trading system.
 
@@ -66,8 +65,9 @@ automatically (feature columns are one-hot over `get_panel_symbols()`).
 ## Moving parts
 
 ### 1. Event → symbol routing
-Two interchangeable sources, selected via `settings.FORECAST_ROUTER` (default `'rules'`),
-both producing `Event.affected_indicators = [{symbol, weight(signed -1..1)}]`:
+One deterministic source (`settings.FORECAST_ROUTER = 'rules'` — a constant, tagged onto
+`Event`/`Forecast.router_source`), producing
+`Event.affected_indicators = [{symbol, weight(signed -1..1)}]`:
 
 ```mermaid
 flowchart LR
@@ -83,8 +83,9 @@ flowchart LR
   (see [pipeline.md](pipeline.md)).
 
 ### 2. Price history — `PriceBar`
-Daily OHLC backfilled via **yfinance** (non-crypto) and **CoinGecko** (BTC/ETH), distinct from
-the high-frequency `PriceTick` stream. Seeds both the chart and the training/label data.
+Daily OHLC backfilled via **yfinance** for all symbols (BTC-USD/ETH-USD resolve natively),
+with **CoinGecko** as a crypto fallback when yfinance returns nothing — distinct from the
+high-frequency `PriceTick` stream. Seeds both the chart and the training/label data.
 
 ### 3. Features — `services/forecasting/features.py` (leak-free, as-of `t`)
 One row per `(symbol, date)`. **No data dated after `t` may enter the row** — events cut on
@@ -110,13 +111,12 @@ loaded lazily + cached (mirrors `get_clusterer()`).
 
 ### 5. Backtest — `services/forecasting/backtest.py` (the gradeable deliverable)
 Walk-forward / rolling-origin, retrain on `[.., t]`, predict `t+h`, never peek past `t`.
-**Four ablation arms** prove the event signal's value:
+**Three ablation arms** prove the event signal's value:
 
 ```mermaid
 flowchart LR
     A[naive<br/>persistence] --> B[price-only]
     B --> C[price + rule-routed events]
-    C --> D[price + LLM-routed events]
 ```
 
 Metrics: directional accuracy, macro-F1, ROC-AUC, **Brier + reliability curve**, vs. baselines.
@@ -146,17 +146,23 @@ realized `PriceBar` close; surfaced at `/api/forecasts/accuracy/`.
 ## Commands
 
 ```bash
-python manage.py backfill_prices --years 5             # seed PriceBar (yfinance + CoinGecko)
-python manage.py route_events --router rules --hours 168 # (re)route recent events (default; --router llm for the opt-in LLM router)
+python manage.py backfill_prices --years 5             # seed PriceBar (yfinance, CoinGecko crypto fallback)
+python manage.py route_events --hours 168              # (re)route recent events (deterministic rules)
 python manage.py train_forecast                        # fit clf+reg for both horizons
 python manage.py run_forecast                          # write today's Forecast rows
 python manage.py evaluate_forecast                     # walk-forward backtest → JSON report
 python manage.py forecast_e2e --years 3 --backtest    # run the whole flow → JSON report
+python manage.py evaluate_forecasting                 # capstone eval: routing Precision@k + return MAE → eval/*.json
+python manage.py evaluate_freshness                   # capstone eval: fetch→map latency P50/P95/P99
 ```
 
-`backfill_prices --dry-run` and `route_events --router llm` are useful for checking coverage
-and building the LLM-routed ablation arm. `forecast_e2e` chains backfill→route→train→run→score
-(+ optional backtest) and writes a per-stage JSON report (mirrors `e2e_pipeline`).
+`backfill_prices --dry-run` is useful for checking coverage. `forecast_e2e` chains
+backfill→route→train→run→score (+ optional backtest) and writes a per-stage JSON report
+(mirrors `e2e_pipeline`). `evaluate_forecasting` (`services/forecasting/evaluate.py`) adds the
+two capstone headline numbers on top of the backtest: routing **Precision@k** of the rule
+router's top-k `affected_indicators` vs realized ±1σ next-bar moves (reported against the
+pooled random-routing base rate), and walk-forward **24h return MAE** vs the zero-return
+baseline. Event time is always `Event.latest_article_at`.
 
 ## Testing
 
@@ -164,30 +170,19 @@ and building the LLM-routed ablation arm. `forecast_e2e` chains backfill→route
 # Dependency-light self-tests — no Mongo needed. The ORM loaders are monkeypatched with
 # synthetic data so the REAL feature/model/backtest code paths (incl. the as-of/leakage
 # logic) are exercised. Skips the LightGBM roundtrip cleanly if lightgbm isn't installed.
-DJANGO_SETTINGS_MODULE=settings.base python -m services.forecasting.tests_forecast
+DJANGO_SETTINGS_MODULE=settings.base python -m tests.tests_forecast
+python -m tests.tests_forecasting_routing    # deterministic router unit tests
+python -m tests.tests_forecast_evaluate      # capstone evaluation unit tests
 ```
 
-`services/forecasting/tests_forecast.py` covers: `to_utc_ts` tz handling, LLM-router cleaning +
-deterministic fallback, metric correctness, **as-of leakage** (a future-dated event must not
-change the as-of feature row), forward-looking labels with non-leaking features, and the full
-train→predict roundtrip.
+`tests/tests_forecast.py` covers: `to_utc_ts` tz handling, metric correctness, **as-of
+leakage** (a future-dated event must not change the as-of feature row), forward-looking labels
+with non-leaking features, and the full train→predict roundtrip.
 
-**Verified (this build):** `manage.py check` clean; all modules import; `npm run build` green;
-the 6 self-tests pass.
-
-**Real end-to-end run** (against a live MongoDB 8 container): `migrate` applied
-`0004_forecast_v2`; **4,012 real daily OHLC bars** seeded across 8 panel symbols (2y from the
-Yahoo chart API); `forecast_e2e` ran route(61) → train(2 horizons, 3,240 samples) → run(16
-forecasts) → score → walk-forward backtest (n≈3,600/arm). Honest results on real data: directional
-accuracy ≈ **0.52** with AUC ≈ 0.52–0.53 (markets are near-random-walk — read vs. the naive
-baseline). `score_forecasts_task` verified on backdated forecasts (realized outcome filled from
-real bars, both directionally correct). API smoke (`/forecasts/latest/`, `/forecasts/accuracy/`,
-`/prices/<sym>/bars/`) all returned 200.
-
-Notes: on the dev host a TLS-intercepting proxy breaks `backfill_prices`' yfinance/CoinGecko cert
-verification (the code degrades gracefully); the real run fed the product backfill the same Yahoo
-chart endpoint with verification relaxed. CoinGecko's free `market_chart` now 401s (key required),
-so crypto bars need a key or a Yahoo fallback. Neither affects the Docker stack.
+**Evaluation status:** the evaluation suite (`evaluate_forecast` backtest,
+`evaluate_forecasting` capstone report) is implemented; final numbers are **to be determined**
+by running it where production MongoDB is reachable. Reports land as JSON under `eval/` at the
+repo root.
 
 ## Environment variables
 
@@ -197,7 +192,7 @@ so crypto bars need a key or a Yahoo fallback. Neither affects the Docker stack.
 | `FORECAST_MODEL_DIR` | `/app/forecast_models` | model artifacts |
 | `FORECAST_HORIZONS_DAYS` | `1,5` | horizons trained/served |
 | `FORECAST_TRAIN_WINDOW_DAYS` | `540` | training lookback |
-| `FORECAST_ROUTER` | `rules` | live router source (`rules`/`llm`) |
+| `FORECAST_ROUTER` | `rules` | constant in `settings/base.py` (not env) — provenance tag on `router_source` |
 
 ## Honest caveats (for the write-up & defense)
 
@@ -220,8 +215,9 @@ so crypto bars need a key or a Yahoo fallback. Neither affects the Docker stack.
 | `services/forecasting/history.py` | OHLC backfill (yfinance + CoinGecko) |
 | `services/forecasting/features.py` | as-of, leak-free feature matrix |
 | `services/forecasting/model.py` | LightGBM clf+reg train/predict per horizon |
-| `services/forecasting/backtest.py` | walk-forward backtest, 4 ablation arms |
-| `services/forecasting/tests_forecast.py` | dependency-light self-tests (leakage, fallback, roundtrip) |
-| `core/management/commands/{backfill_prices,route_events,train_forecast,run_forecast,evaluate_forecast}.py` | CLI |
-| `core/management/commands/forecast_e2e.py` | end-to-end flow runner → JSON report |
+| `services/forecasting/backtest.py` | walk-forward backtest, 3 ablation arms |
+| `services/forecasting/evaluate.py` | capstone eval: routing Precision@k + return MAE |
+| `tests/tests_forecast.py` | dependency-light self-tests (leakage, roundtrip) |
+| `core/management/commands/{backfill_prices,route_events,train_forecast,run_forecast,evaluate_forecasting,evaluate_freshness}.py` | CLI |
+| `tests/management/commands/{evaluate_forecast,forecast_e2e}.py` | backtest CLI + end-to-end flow runner → JSON report |
 </content>

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import requests
 
 from django.conf import settings
+from django.db import DatabaseError
 
 from .base import BaseStream, HEADERS_UA as HEADERS, redis_publish
 
@@ -82,9 +83,29 @@ class EarthquakeStream(BaseStream):
             and r.get('magnitude') is not None
         ]
         if new:
-            # ignore_conflicts guards against two concurrent earthquake stream runs
-            # workers racing on the same USGS page and trying to insert the same usgs_id.
-            EarthquakeRecord.objects.bulk_create(new, ignore_conflicts=True)
+            # The Mongo backend doesn't support bulk_create(ignore_conflicts=True),
+            # so guard against two concurrent stream runs racing on the same USGS
+            # page manually: on a duplicate-key failure, re-check which usgs_ids
+            # landed and insert only the remainder.
+            try:
+                EarthquakeRecord.objects.bulk_create(new)
+            except DatabaseError:
+                inserted_ids = set(
+                    EarthquakeRecord.objects.filter(
+                        usgs_id__in=[e.usgs_id for e in new]
+                    ).values_list('usgs_id', flat=True)
+                )
+                remainder = [e for e in new if e.usgs_id not in inserted_ids]
+                # Keep only records that actually landed, so the SSE count below
+                # can't include rows whose save() also failed.
+                new = []
+                for record in remainder:
+                    try:
+                        record.save()
+                    except DatabaseError:
+                        continue
+                    new.append(record)
+        if new:
             redis_publish('sse:earthquakes', {
                 'type': 'earthquake_update',
                 'new_count': len(new),

@@ -180,7 +180,7 @@ One prediction for one `(symbol, horizon_days, generated_at)`. See
 | `band_high` | float \| null | Upper bound of prediction band |
 | `confidence` | float | `\|proba_up − 0.5\| × 2` — scalar [0, 1] |
 | `current_value` | float \| null | Last close at feature cut time `t` |
-| `router_source` | str(8) | Provenance: `llm` or `rules` |
+| `router_source` | str(8) | Provenance: `rules` (only router; historical rows may carry `llm`) |
 | `model_version` | str(64) | Model identifier / version string |
 | `realized_direction` | str(8) \| null | Actual direction after horizon (scoring) |
 | `realized_change_pct` | float \| null | Actual % change after horizon (scoring) |

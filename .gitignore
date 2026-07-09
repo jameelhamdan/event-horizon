@@ -154,3 +154,8 @@ plans/*
 forecast_models/
 forecast_backtest_*.json
 forecast_e2e_*.json
+
+# Capstone submission documents (kept local)
+CAPSTONE.md
+PRESENTATION.md
+presentation.pptx

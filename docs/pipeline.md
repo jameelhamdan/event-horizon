@@ -45,7 +45,7 @@ flowchart TD
     DT["discover_topics_task<br/><i>heavy · daily 05:00</i>"] --> TL
     RT["refresh_topics_task<br/><i>heavy · daily 04:00</i>"] --> TL
     EI --> RF["run_forecast_task<br/><i>heavy · daily 05:30</i>"]
-    PT[(PriceTick)] --> RF
+    PB[(PriceBar)] --> RF
     RF --> FC[(Forecast)]
     FC --> SF["score_forecasts_task<br/><i>heavy · daily 07:00</i>"]
     EI --> GN["generate_newsletter_task<br/><i>heavy · daily 06:00</i>"]
@@ -55,7 +55,8 @@ flowchart TD
 ```
 
 Streams run independently on the `default` queue and feed `PriceTick` (and the SSE
-channels), which the forecaster reads:
+channels) for the live chart; the forecaster's training/label data comes from the separate
+daily `PriceBar` backfill, not the tick stream:
 
 ```mermaid
 flowchart LR
@@ -66,9 +67,8 @@ flowchart LR
     PT & NZ & EQR -.->|Redis pub/sub| SSE([/api/sse → browser])
 ```
 
-A stream's `fetch()`/`save()` failure propagates out of `BaseStream.run()` (it
-no longer swallows exceptions into a silent `return 0`) — a broken stream shows
-up as a FAILED `TaskRun`, not as "no new records".
+A stream's `fetch()`/`save()` failure propagates out of `BaseStream.run()` — a
+broken stream shows up as a FAILED `TaskRun`, not as "no new records".
 
 ---
 
@@ -210,8 +210,8 @@ the forecasting subsystem (see [forecasting.md](forecasting.md)).
 `score_forecasts_task` (daily 07:00). Fully documented in
 **[forecasting.md](forecasting.md)**. In brief:
 
-- For each `(indicator symbol, time t)` build an **as-of, volume-normalized** feature
-  vector from `PriceTick`s ≤ t and `Event`s with event-time ≤ t.
+- For each `(indicator symbol, time t)` build an **as-of** feature vector from daily
+  `PriceBar`s dated ≤ t and `Event`s with event-time (`latest_article_at`) ≤ t.
 - Forecast output per horizon (1 day, 5 days):
   - `direction` — up / down / neutral
   - `proba_up` — calibrated probability of an upward move

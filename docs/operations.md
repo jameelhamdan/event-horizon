@@ -3,8 +3,7 @@
 ## Configurationless deployment
 
 `docker compose up` self-seeds and self-backfills — there is **no manual
-post-deploy step** (the old `bootstrap_static_points` command is no longer required;
-static points are seeded by migration `0001`, symbols by `0006`).
+post-deploy step** (static points are seeded by migration `0001`, symbols by `0006`).
 
 On `api` container start, `start_api.sh` launches **supercronic** with `api/crontab`,
 which dispatches jobs via `manage.py run_task`. `bootstrap_initial_data_task` is

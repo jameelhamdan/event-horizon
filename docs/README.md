@@ -44,16 +44,15 @@ flowchart TD
     S2B --> EVT[(Event<br/>+ affected_indicators)]
 
     EVT --> S3
-    TICKS[(PriceTick)] --> S3
+    BARS[(PriceBar)] --> S3
     subgraph S3["Stage 3 · Predict (AI)"]
-        FEAT[as-of features] --> V1[v1 · LLM decision-support<br/>may abstain]
-        FEAT --> V2[v2 · LightGBM<br/>primary, walk-forward]
+        FEAT[as-of features] --> V2[LightGBM clf + reg<br/>walk-forward validated]
     end
-    S3 --> FC[(Forecast<br/>1h crypto · 1d · 1w)]
+    S3 --> FC[(Forecast<br/>1d · 5d)]
 
     FC --> S3C
     subgraph S3C["Stage 3c · Score"]
-        SCORE[snap to session close<br/>realized return/vol → actual buckets]
+        SCORE[realized close after horizon →<br/>realized_direction · is_correct]
     end
     S3C --> MET([metrics vs naive baselines])
 

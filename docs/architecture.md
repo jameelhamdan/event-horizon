@@ -184,7 +184,6 @@ Model overrides: set `OLLAMA_MODEL_SMALL`, `OLLAMA_MODEL_MEDIUM`, `OLLAMA_MODEL_
 | `scoring` | groq → cerebras → openrouter → ollama_small | article importance rating |
 | `historical` | groq → cerebras → openrouter → ollama_small | backfill importance rating |
 | `topics` | groq → cerebras → openrouter → ollama_medium | topic description/keyword enrichment + discovery (tagging itself is local — see below) |
-| `routing` | groq → cerebras → openrouter → ollama_small | unused by default (`FORECAST_ROUTER='rules'`); opt-in alternative to the deterministic router |
 
 **Local-model replacements** (no LLM call at all): entities (`services/processing/ner.py`,
 `dslim/bert-base-NER`), sentiment (`services/processing/vader.py`, VADER), Arabic

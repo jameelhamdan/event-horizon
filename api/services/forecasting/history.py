@@ -160,7 +160,9 @@ def backfill_symbol(symbol: str, years: int = 10, dry_run: bool = False, full: b
         logger.info('[history] %s: %d fetched, %d new (dry-run)', symbol, len(bars), len(new_bars))
         return len(new_bars)
     if new_bars:
-        PriceBar.objects.bulk_create([PriceBar(**b) for b in new_bars], ignore_conflicts=True)
+        # No ignore_conflicts — the Mongo backend rejects it, and PriceBar has no
+        # unique constraint anyway (dedup happens via the existing-dates query above).
+        PriceBar.objects.bulk_create([PriceBar(**b) for b in new_bars])
     logger.info('[history] %s: %d fetched, %d inserted', symbol, len(bars), len(new_bars))
     return len(new_bars)
 

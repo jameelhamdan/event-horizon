@@ -1,13 +1,17 @@
 # Lint config — run from api/ with `ruff check .` (ruff comes from requirements-dev.txt).
-line-length = 120
+# No line-length limit (E501 is not selected and this ceiling is effectively off).
+line-length = 320
 target-version = "py313"
 exclude = ["migrations"]
 
 [lint]
 # Pyflakes (F): real defects — unused imports/variables, redefinitions, undefined
-# names. E9/W6: syntax-level errors. Deliberately conservative: no style rules,
-# so the linter only fails on things that are actually wrong.
-select = ["F", "E9", "W6"]
+# names. E9/W6: syntax-level errors. E502: backslash line continuations are
+# banned — wrap in parentheses instead. Deliberately conservative otherwise:
+# no style rules, so the linter only fails on things that are actually wrong.
+select = ["F", "E9", "W6", "E502"]
+# E502 is preview-only; preview affects only explicitly selected rules here.
+preview = true
 
 [lint.per-file-ignores]
 # __init__.py re-exports look "unused" to F401

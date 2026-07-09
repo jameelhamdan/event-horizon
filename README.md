@@ -4,7 +4,7 @@
 
 Live geopolitical event map with a daily AI-written email briefing. Ingests news from RSS feeds and web sources, runs NLP analysis, clusters articles into geolocated events, and displays them on an interactive Leaflet map.
 
-See [project.md](project.md) for full requirements and architecture. See [CLAUDE.md](CLAUDE.md) for developer conventions and recipes.
+See [docs/](docs/README.md) for architecture, pipeline, forecasting, and operations docs. See [CLAUDE.md](CLAUDE.md) for developer conventions and recipes.
 
 ---
 
@@ -102,6 +102,9 @@ See `api/.env.example` for the full annotated list. Key variables:
 fetch            (every 10m)
   └─ feedparser (RSS) / requests → Article objects in MongoDB
 
+score            (every 60m, heavy workers)
+  └─ LLM importance rating (1–10, batches of 30 titles) — gates the process stage
+
 process          (every 30m, fan-out to heavy workers)
   └─ LLM analyzer — category/sub-category, city/country, intensity
   └─ Local NER (dslim/bert-base-NER) — entities
@@ -135,14 +138,14 @@ api/
   accounts/      Custom User model (email-based auth)
   api/           DRF serializers + APIView endpoints
   newsletter/    Subscriber + DailyNewsletter models, subscribe/confirm/unsubscribe views
-  misc/          Static pages, sitemap
+  misc/          EmailLog model
   services/
     data/        RSS + HTTP ingestion
     processing/  ArticleCleaner — LLM analyzer, local NER, VADER, FinBERT, clustering
     translation/ Local Arabic translation (MarianMT)
     forecasting/ LightGBM model, features, backtest, deterministic event router
-    topics/      Topic scraper, embedding matcher (local), LLM matcher (unused by default), dedup
-    routing/     LLM event → symbol router (unused by default — see forecasting/routing.py)
+    topics/      Topic scraper, embedding matcher (local, keyword fallback), dedup
+    routing/     Persists deterministic rule-router output (Event.affected_indicators)
     streams/     Price, NOTAM, earthquake, forex live feeds
     newsletter/  Newsletter generator
     email/       SES / SMTP email service

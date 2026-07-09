@@ -1,6 +1,6 @@
 # News Event-Fused Market Forecasting: A Real-Time Pipeline for Geolocated News Event Extraction and Financial Indicator Prediction
 
-**Repository:** `news-events-market-forcasting`
+**Repository:** https://github.com/jameelhamdan/event-horizon
 
 ---
 
@@ -15,16 +15,15 @@ indicators, and produces calibrated **directional and magnitude forecasts** over
 (1 and 5 trading days).
 
 The central methodological commitment is **leakage-free supervised learning**: the
-event→indicator association — produced, in production, by a deterministic rule router (an LLM
-router is retained as an interchangeable, opt-in alternative and as a backtest ablation arm) —
+event→indicator association — produced by a deterministic rule router —
 is treated strictly as an *input feature* — a hypothesis — while the supervised label is the
-*realized* price return between two observed price nodes. A walk-forward backtest with four
-ablation arms (naïve persistence, price-only, price + rule-routed events, price + LLM-routed
-events) quantifies whether news events add predictive value over price history alone. On real
-daily data the system attains directional accuracy of approximately **0.52** with ROC-AUC ≈
-0.52–0.53 — consistent with the near-random-walk behaviour of liquid markets — and the
-contribution is therefore framed relative to the naïve baseline rather than as a trading
-strategy. Alongside the forecasting layer, the system delivers a live geospatial event map,
+*realized* price return between two observed price nodes. A walk-forward backtest with three
+ablation arms (naïve persistence, price-only, price + rule-routed events) quantifies whether
+news events add predictive value over price history alone. Final results are **to be
+determined** — the evaluation suite is implemented but has not yet been run against the
+production data; given the near-random-walk behaviour of liquid daily markets, directional
+accuracy only slightly above the naïve baseline is expected, and the contribution is therefore
+framed relative to that baseline rather than as a trading strategy. Alongside the forecasting layer, the system delivers a live geospatial event map,
 automatic topic discovery, and a daily generated news briefing, demonstrating that a single
 ingestion-and-understanding pipeline can serve both situational-awareness and
 quantitative-forecasting use cases.
@@ -33,12 +32,11 @@ A secondary engineering contribution is a **provider-agnostic LLM orchestration 
 per-task routing, automatic fallback across self-hosted and hosted providers, and a daily
 discovery service that probes and caches currently-available free models — addressing the
 operational reality that hosted LLM availability and rate limits fluctuate continuously. A
-related, and initially counter-intuitive, engineering finding is that narrowing the LLM's scope
-— offloading entity extraction, sentiment, translation, topic tagging, and event routing to
-small specialised local models and keeping the LLM only for tasks that genuinely require
-open-ended judgement (taxonomy classification, geo naming, severity rating, free-form prose) —
-reduced both cost and latency without a perceptible quality regression, on commodity CPU-only
-hardware.
+related engineering principle is a deliberately **narrow LLM scope**: entity extraction,
+sentiment, translation, topic tagging, and event routing run on small specialised local
+models, and the LLM handles only tasks that genuinely require open-ended judgement (taxonomy
+classification, geo naming, severity rating, free-form prose) — reducing both cost and latency
+without a perceptible quality regression, on commodity CPU-only hardware.
 
 ---
 
@@ -91,15 +89,14 @@ is lagged and largely priced-in.
 1. An **end-to-end real-time pipeline** from multi-source ingestion to geolocated event
    extraction, served as a live map and an event API.
 2. An **event-fused forecasting layer** that cleanly separates the event→indicator *feature*
-   (produced, by default, by a deterministic rule router, with an LLM router kept as an
-   interchangeable alternative) from the realized-return *label*, trained per horizon with
-   calibrated LightGBM models and validated by a leakage-checked walk-forward backtest with four
-   ablation arms.
+   (produced by a deterministic rule router) from the realized-return *label*, trained per
+   horizon with calibrated LightGBM models and validated by a leakage-checked walk-forward
+   backtest with three ablation arms.
 3. A **provider-agnostic LLM orchestration layer** with per-role routing, cross-provider
    fallback, and daily dynamic discovery of available free models — paired with a deliberately
-   **narrowed LLM scope**, where entity extraction, sentiment, translation, topic tagging, and
-   event routing were migrated to specialised local models once the pipeline matured, leaving the
-   LLM responsible only for tasks that need open-ended judgement.
+   **narrow LLM scope**: entity extraction, sentiment, translation, topic tagging, and event
+   routing run on specialised local models, leaving the LLM responsible only for tasks that
+   need open-ended judgement.
 4. An **honest empirical study** reporting near-baseline predictive performance, framed as a
    research-grade signal rather than alpha.
 
@@ -116,13 +113,11 @@ or transaction-cost modelling is performed.
 The work sits at the intersection of three research areas:
 
 - **Event and entity extraction** from news, traditionally addressed with sequence-labelling
-  models (e.g. transformer-based NER). This work initially collapsed entity, category, and
-  sentiment extraction into a single LLM prompt, then — once the pipeline was operating at
-  volume — deliberately reverted entity recognition to a dedicated transformer NER model and
-  sentiment to a lexicon-based scorer, keeping only category/sub-category classification, event
-  severity rating, and geo naming on the LLM. This iteration is itself a small case study in
-  matching model capacity to task complexity rather than defaulting to the largest available
-  model for every sub-task.
+  models (e.g. transformer-based NER). This work assigns entity recognition to a dedicated
+  transformer NER model and sentiment to a lexicon-based scorer, keeping only
+  category/sub-category classification, event severity rating, and geo naming on the LLM — a
+  case study in matching model capacity to task complexity rather than defaulting to the
+  largest available model for every sub-task.
 - **Geoparsing**, the resolution of place mentions to coordinates, here handled by the LLM's
   named-location output (country/city) with gazetteer-assisted coordinate resolution.
 - **News-driven financial prediction**, a long literature relating textual sentiment and event
@@ -140,8 +135,9 @@ geospatial product and a leakage-disciplined forecasting study.
 The system is a two-tier application: a Python backend (Django 6 + Django REST Framework) with a
 document store (MongoDB) and an in-memory broker (Redis), and a single-page React 19 / Vite
 frontend rendering a Leaflet map and a markets dashboard. Asynchronous work is executed by a
-task queue (Celery) split across a *light* queue (fast I/O) and a *heavy* queue (NLP/LLM),
-scheduled by a cron daemon.
+task queue (Celery) split across a *light* queue (fast I/O), a *heavy* queue (NLP/LLM), and a
+*bulk* queue (long one-shot jobs such as price backfills and model training), scheduled by a
+cron daemon.
 
 ```
 Sources ──▶ Ingestion ──▶ NLP understanding ──▶ Event aggregation ──▶ Topic tagging
@@ -157,8 +153,8 @@ record it processes, allowing partial reprocessing and health monitoring.
 
 ## 4. Data Ingestion
 
-News is collected from two source families: RSS/Atom feeds (via a feed parser) and Telegram
-channels (via a client library). Ingested items are normalised into a common article record,
+News is collected from RSS/Atom feeds via a feed parser.
+Ingested items are normalised into a common article record,
 filtered by a minimum word count, and deduplicated by a Jaccard similarity on titles within a
 rolling window to suppress near-duplicate syndicated copies. Article identifiers are stored as
 string UUIDs. Ingestion runs on the light queue at a short cadence; downstream NLP is dispatched
@@ -180,11 +176,9 @@ its sub-task:
   stripping and robust JSON parsing are applied to every response, and the batch is idempotent
   under provider failure (each item independently falls back to a neutral default).
 - **Named-entity recognition** runs on a dedicated local transformer NER model (labelling
-  PER/ORG/LOC/MISC spans), never touching the LLM. An earlier design folded entity extraction
-  into the LLM analysis call; it was reverted once volume made the marginal LLM cost of a
-  variable-length entity list — the least reliable field to batch correctly in a JSON array —
-  outweigh the convenience of a single call, and a purpose-trained NER model matched or exceeded
-  the LLM's entity quality at a fraction of the latency.
+  PER/ORG/LOC/MISC spans), never touching the LLM: a purpose-trained NER model matches or
+  exceeds LLM entity quality at a fraction of the latency, and a variable-length entity list
+  is the least reliable field to batch correctly in a JSON array.
 - **General sentiment** is scored locally by a lexicon-based (VADER) analyser, for the same
   reason: sentiment polarity does not require the reasoning capacity of an LLM, and a rule-based
   scorer is deterministic, auditable, and effectively free to run at scale.
@@ -198,8 +192,8 @@ its sub-task:
 - **Importance scoring** (1–10) gates the pipeline: low-scoring articles are skipped before the
   expensive analysis stage and pruned after a grace period, conserving compute and LLM quota.
 
-This division reflects a cost/quality trade-off arrived at empirically rather than assumed at
-design time: the LLM is reserved for the sub-tasks that need real judgement (taxonomy
+This division reflects a deliberate cost/quality trade-off: the LLM is reserved for the
+sub-tasks that need real judgement (taxonomy
 classification, geo naming, severity rating, free-form prose), while every sub-task with a
 narrow, well-defined shape — entity recognition, general sentiment, translation — runs on a
 small, purpose-built local model. The practical effect is a large reduction in LLM call volume
@@ -235,9 +229,7 @@ problem — so it runs entirely on a local sentence-transformer embedding model 
 multilingual model used for article clustering): each event and each topic's
 name/description/keywords are embedded, and a topic is tagged when cosine similarity clears a
 threshold. A cheap keyword-overlap matcher acts as a fallback should the embedding model be
-unavailable. An LLM-based batched matcher was evaluated and is retained in the codebase as an
-interchangeable alternative, but is not used in production, since the local embedding matcher
-was found to produce comparable tagging quality without an LLM call per event batch. Topics
+unavailable. Topics
 carry a score and flags distinguishing those currently in the news cycle from those shown in the
 UI; the highest-signal topic tags (e.g. conflict, central-bank rates, inflation, energy cartels,
 bilateral-trade tensions) later serve as the **most curated feature** for forecasting.
@@ -249,19 +241,15 @@ bilateral-trade tensions) later serve as the **most curated feature** for foreca
 Routing associates each event with a signed weight in [-1, 1] per indicator on the panel,
 stored as `Event.affected_indicators`. **This is the thesis's most important conceptual
 distinction: the routed weight is a feature (a hypothesis about influence), never the
-supervised label.** Two interchangeable routers produce it, selected by configuration:
+supervised label.**
 
-- A **deterministic rule router** (production default) computes the weight as a product of
-  sub-category affinity, symbol affinity, country risk, and an asymmetric sentiment term; it
-  intersects its output with the live panel so it can never emit an off-panel symbol. Being
-  fully deterministic, it is reproducible by construction, incurs no LLM cost or latency, and is
-  used as the primary router in production and as a backtest baseline arm.
-- An **LLM router** (opt-in alternative) batches events, prompts with the panel description and
-  the event's text, category, and topic tags, and returns signed per-indicator weights; it
-  caches by event and falls back to the rule router on any error. It remains available for
-  comparison and as the fourth backtest ablation arm, but is not the production default, since
-  the deterministic router was judged to give comparable routing quality with none of the LLM
-  router's cost, latency, or non-determinism.
+The router is a **deterministic rule router**: it computes the weight as a product of
+sub-category affinity, symbol affinity, country risk, and an asymmetric sentiment term, and
+intersects its output with the live panel so it can never emit an off-panel symbol. Being
+fully deterministic, it is reproducible by construction, incurs no LLM cost or latency, and
+keeps the routing feature free of non-determinism — an application of the thesis's
+narrowed-LLM-scope principle (§10): routing is a bounded matching problem, not an open-ended
+judgement task, so it does not warrant an LLM.
 
 ---
 
@@ -309,15 +297,11 @@ provider transparently advances to the next. Per-provider timeouts are tuned to 
 latency profile (notably a short, model-size-scaled timeout for the slow CPU-bound local models
 so they fail fast as a last resort).
 
-Several roles that historically routed through this layer — entity extraction, general
-sentiment, event-to-topic tagging, and event-to-indicator routing — were migrated to local
-non-LLM models (§5, §7, §8) once the pipeline matured past its initial design. The orchestration
-layer itself is unchanged by this migration; what changed is simply how many of the pipeline's
-call sites use it, and for which sub-tasks. The remaining LLM-routed roles are the ones with
-genuinely open-ended or generative output: article category/sub-category/geo/intensity
-classification, article importance rating, topic description/keyword enrichment and discovery,
-event routing (kept as an opt-in alternative to the deterministic router), and the daily
-newsletter.
+Entity extraction, general sentiment, translation, event-to-topic tagging, and
+event-to-indicator routing run on local non-LLM models (§5, §7, §8) and never touch this
+layer. The LLM-routed roles are the ones with genuinely open-ended or generative output:
+article category/sub-category/geo/intensity classification, article importance rating, topic
+description/keyword enrichment and discovery, and the daily newsletter.
 
 Because hosted free-tier model availability and rate limits fluctuate continuously, a daily
 **discovery service** queries the provider's model catalogue, filters to free text models, probes
@@ -329,7 +313,7 @@ to consume, with a static configured list as the fallback.
 
 ## 11. System Engineering and Deployment
 
-The system is containerised with Docker Compose: an ASGI API server, separate light and heavy
+The system is containerised with Docker Compose: an ASGI API server, separate light, heavy, and bulk
 queue workers, a cron scheduler, a built frontend served behind a reverse proxy, and the Redis
 and MongoDB backing stores. Migrations are centralised; the application bootstraps without manual
 configuration. Live updates (price ticks, aviation notices, earthquakes) reach the frontend over
@@ -343,13 +327,12 @@ internationalised (English and Arabic).
 ### 12.1 Methodology
 
 Forecasting is evaluated by a **walk-forward (rolling-origin) backtest**: at each origin `t` the
-model is retrained on data up to `t` and asked to predict `t+h`, never peeking past `t`. Four
+model is retrained on data up to `t` and asked to predict `t+h`, never peeking past `t`. Three
 **ablation arms** isolate the contribution of news events:
 
 1. naïve persistence,
 2. price-only,
-3. price + rule-routed events,
-4. price + LLM-routed events.
+3. price + rule-routed events.
 
 Reported metrics are directional accuracy, macro-F1, ROC-AUC, and the Brier score with a
 reliability (calibration) curve. A built-in assertion verifies that every feature row's maximum
@@ -357,16 +340,19 @@ event/bar date does not exceed its as-of date, guaranteeing the absence of look-
 
 ### 12.2 Results
 
-On a real end-to-end run over roughly two years of daily bars across the indicator panel, with
-the model trained on thousands of `(symbol, date)` samples per horizon, the system achieves
-**directional accuracy ≈ 0.52** and **ROC-AUC ≈ 0.52–0.53**. These figures are close to the
-naïve baseline, consistent with the near-random-walk behaviour of liquid markets. The honest
-reading is that the event signal provides at most a small edge over price history alone; the
-value of the contribution lies in the leakage-disciplined methodology and the reproducible
-ablation framework, not in a large accuracy gain.
+**To be determined.** The full evaluation (walk-forward backtest over roughly two years of
+daily bars across the indicator panel, plus routing Precision@k and return-MAE reports) is
+implemented (`evaluate_forecast`, `evaluate_forecasting`) but has not yet been run against the
+production data. A preliminary development-time run of the backtest indicated directional
+accuracy and ROC-AUC only marginally above the naïve baseline, consistent with the
+near-random-walk behaviour of liquid markets; the final numbers will be reported here once the
+evaluation is executed. The honest expectation is that the event signal provides at most a
+small edge over price history alone; the value of the contribution lies in the
+leakage-disciplined methodology and the reproducible ablation framework, not in a large
+accuracy gain.
 
 *(Tables of per-arm metrics and the reliability curve are to be inserted from the backtest's
-JSON report for the final manuscript.)*
+and evaluation commands' JSON reports for the final manuscript.)*
 
 ---
 
@@ -375,11 +361,10 @@ JSON report for the final manuscript.)*
 - **News is lagged and priced-in.** The predictive ceiling for public-news features on liquid
   instruments is low by construction; results should be read against the naïve baseline.
 - **LLM non-determinism.** Where the LLM is still used (category/geo/intensity classification,
-  topic enrichment/discovery, newsletter generation, and the opt-in LLM router), its output is
-  non-deterministic; for the live system LLM-routed results are cached per event, and the
-  production-default deterministic rule router removes non-determinism from the routing feature
-  entirely. Entity extraction, sentiment, translation, and topic tagging no longer touch the LLM
-  at all, further narrowing where this concern applies.
+  topic enrichment/discovery, newsletter generation), its output is non-deterministic; the
+  deterministic rule router removes non-determinism from the routing feature entirely. Entity
+  extraction, sentiment, translation, topic tagging, and event routing never touch the LLM,
+  further narrowing where this concern applies.
 - **Coverage and source bias.** Source selection, language coverage, and feed latency bias which
   events are seen at all.
 - **Geolocation ambiguity.** Place disambiguation is imperfect; mis-geolocated events introduce
@@ -423,12 +408,12 @@ triggers a retrain because feature columns are one-hot encoded over the active p
 ```bash
 # Forecasting layer
 python manage.py backfill_prices --years 5       # seed daily OHLC bars
-python manage.py route_events --router rules     # associate events with indicators (default; --router llm for the opt-in LLM router)
+python manage.py route_events                    # associate events with indicators (deterministic rules)
 python manage.py train_forecast                  # fit calibrated clf + reg per horizon
 python manage.py run_forecast                    # write current forecasts
 python manage.py evaluate_forecast               # walk-forward backtest → JSON report
 python manage.py forecast_e2e --years 3 --backtest
 
 # Dependency-light self-tests (leakage / fallback / train-predict roundtrip)
-DJANGO_SETTINGS_MODULE=settings.base python -m services.forecasting.tests_forecast
+DJANGO_SETTINGS_MODULE=settings.base python -m tests.tests_forecast
 ```

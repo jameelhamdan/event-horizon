@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-**Event Horizon** (`eventhorizonai.dev`) — a live global-event map that ingests news from RSS/Telegram sources, runs NLP and LLM analysis on each article, clusters articles into geographic events, streams real-time market/NOTAM/earthquake data, and serves it all via a DRF API to a React + Leaflet SPA.
+**Event Horizon** (`eventhorizonai.dev`) — a live global-event map that ingests news from RSS sources, runs NLP and LLM analysis on each article, clusters articles into geographic events, streams real-time market/NOTAM/earthquake data, and serves it all via a DRF API to a React + Leaflet SPA.
 
 ## Commands
 
@@ -28,6 +28,10 @@ python manage.py test_llm --role analyzer_lite --prompt "your prompt"
 python manage.py e2e_pipeline
 python manage.py e2e_pipeline --skip-fetch --skip-process
 
+# Capstone evaluation (needs Mongo with real data; writes JSON reports to eval/)
+python manage.py evaluate_forecasting   # routing Precision@k + walk-forward 24h return MAE
+python manage.py evaluate_freshness     # fetch→map latency P50/P95/P99
+
 # Live LLM-provider connectivity test (reads .env.app, makes real calls)
 python api/tests/tests_llm_providers.py
 python api/tests/tests_llm_providers.py --provider groq
@@ -42,9 +46,11 @@ python -m tests.tests_models
 python -m tests.tests_processing
 python -m tests.tests_stages
 python -m tests.tests_topics_matcher
+python -m tests.tests_historical
 python -m tests.tests_wikipedia_history
 python -m tests.tests_wayback_history
 python -m tests.tests_forecasting_routing
+python -m tests.tests_forecast_evaluate
 DJANGO_SETTINGS_MODULE=settings.base python -m tests.tests_forecast   # slower (LightGBM roundtrip)
 
 # Lint (dev-only tooling, not in the Docker image — pip install -r requirements-dev.txt)
@@ -74,7 +80,7 @@ Copy `api/.env.example` to `api/.env` (or `.env.app` at the project root). Key s
 
 - `TASK_QUEUE_ENABLED=false` — tasks run synchronously; no Redis/worker required locally.
 - `DATABASE_URL` — MongoDB connection string (default `mongodb://root:1234@localhost:27017/radar-live?authSource=admin`).
-- LLM credentials go in env (`GROQ_API_KEYS`, `CEREBRAS_API_KEYS`, `OPENROUTER_API_KEYS`, `OLLAMA_BASE_URL`); routing logic is in `settings/base.py` `LLM_ROUTES`. The LLM only handles category/sub-category/geo/intensity classification and newsletter/topic-enrichment prose now — entities, sentiment, translation, topic tagging, and event routing all run on local models (see LLM routing below).
+- LLM credentials go in env (`GROQ_API_KEYS`, `CEREBRAS_API_KEYS`, `OPENROUTER_API_KEYS`, `OLLAMA_BASE_URL`); routing logic is in `settings/base.py` `LLM_ROUTES`. The LLM only handles category/sub-category/geo/intensity classification and newsletter/topic-enrichment prose — entities, sentiment, translation, topic tagging, and event routing all run on local models (see LLM routing below).
 
 ## Architecture
 
@@ -104,7 +110,7 @@ api/                       PYTHONPATH root inside Docker (/app)
     streams/               prices.py, notam.py, earthquakes.py, forex.py — BaseStream.run()
                            re-raises fetch/save failures so a broken stream surfaces as a
                            FAILED TaskRun instead of a silent success-with-0
-    data/                  DataService, rss.py (feedparser), telegram.py (Telethon),
+    data/                  DataService, rss.py (feedparser),
                            historical.py + wikipedia.py + wayback.py (historical backfill
                            discovery: Wikipedia Current Events monthly pages are the primary
                            path — curated per-day events with citations; per-publisher
@@ -118,7 +124,11 @@ api/                       PYTHONPATH root inside Docker (/app)
                            refresh/enrich) that doesn't belong in a single stateless module
     newsletter/            generator.py (LLM), sender.py (Markdown→HTML→SES)
     email/                 mailer.py, providers.py — SES wrapper used by newsletter + accounts
-    forecasting/           routing.py — deterministic (rules-based) event→symbol routing + LightGBM clf+reg
+    forecasting/           routing.py (deterministic rules-based event→symbol routing),
+                           features.py/model.py (as-of feature frame + LightGBM clf+reg),
+                           backtest.py (walk-forward, 3 ablation arms), history.py (PriceBar
+                           OHLC backfill), evaluate.py (capstone eval: routing Precision@k +
+                           return MAE vs zero baseline)
     routing/               __init__.py — thin wrapper around forecasting/routing.py that
                            persists Event.affected_indicators (route_events()); no LLM path
   migrations/              Centralized — all apps map here via MIGRATION_MODULES
@@ -173,7 +183,7 @@ Stream tasks run independently: prices (5m), NOTAMs (15m), earthquakes (5m), for
 
 `get_llm_service(role)` in `services/llm/__init__.py` reads `settings.LLM_ROUTES[role]` (a list of provider names) and tries each in order on failure. Providers: `groq`, `cerebras`, `openrouter`, `ollama_small/medium/large`. Strip code fences before `json.loads()` — always use `services.llm.strip_code_fences()`.
 
-Several tasks that used to go through the LLM now run on local CPU models instead — cheaper, faster, and no rate limits. When touching these areas, prefer extending the local model rather than adding LLM calls back:
+Several tasks run on local CPU models rather than the LLM — cheaper, faster, and no rate limits. When touching these areas, prefer extending the local model rather than adding LLM calls:
 
 | Task | Local replacement | Module |
 | ---- | ------------------ | ------ |

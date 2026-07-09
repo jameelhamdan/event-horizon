@@ -4,7 +4,7 @@ By accessing or using eventhorizonai.dev ("the Service"), you agree to be bound 
 
 2. Description of service
 
-eventhorizonai.dev is a real-time event intelligence platform that aggregates, processes, and displays news and information sourced from publicly available third-party outlets, RSS feeds, and Telegram channels. The Service applies automated natural language processing to classify and geolocate events. It is provided free of charge for informational purposes only.
+eventhorizonai.dev is a real-time event intelligence platform that aggregates, processes, and displays news and information sourced from publicly available third-party outlets and RSS feeds. The Service applies automated natural language processing to classify and geolocate events. It is provided free of charge for informational purposes only.
 
 3. Disclaimer — accuracy and reliability
 
