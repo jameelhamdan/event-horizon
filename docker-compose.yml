@@ -108,6 +108,20 @@ services:
     volumes:
       - ./media_data:/app/media
 
+  # Celery ground truth — live worker/task state straight from broker events
+  # (CELERY_WORKER_SEND_TASK_EVENTS), independent of TaskRun rows, which a
+  # killed worker can leave stale. No published port: reachable only through
+  # the staff-authenticated Django proxy at /flower/ (app/views.py).
+  flower:
+    <<: *api-build
+    restart: always
+    command: sh -c "celery -A app flower --address=0.0.0.0 --port=5555 --url_prefix=flower"
+    expose:
+      - "5555"
+    depends_on:
+      - redis
+    env_file: .env.app
+
   redis:
     image: redis:7-alpine
     restart: always

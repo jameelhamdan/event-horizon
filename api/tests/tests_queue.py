@@ -79,12 +79,16 @@ def test_enqueue_async_mode_delegates_to_apply_async():
     _, kwargs = task.apply_async.call_args
     assert kwargs['args'] == (42,)
     assert kwargs['queue'] == 'heavy'
-    # job_timeout=-1 means no cap — no time_limit kwarg passed through.
+    # job_timeout=-1 means no cap — no time-limit kwargs passed through.
     assert 'time_limit' not in kwargs
+    assert 'soft_time_limit' not in kwargs
     assert result is fake_result
 
 
 def test_enqueue_async_mode_applies_job_timeout():
+    """job_timeout becomes the *soft* limit (raises inside the task, so
+    task_failure fires and the TaskRun row is finalized); the hard SIGKILL
+    limit trails 30s behind as a backstop."""
     from services.queue import enqueue
 
     task, _ = _fake_task(lambda: None)
@@ -93,7 +97,8 @@ def test_enqueue_async_mode_applies_job_timeout():
         enqueue(task, queue='default', job_timeout=120)
 
     _, kwargs = task.apply_async.call_args
-    assert kwargs['time_limit'] == 120
+    assert kwargs['soft_time_limit'] == 120
+    assert kwargs['time_limit'] == 150
 
 
 def test_enqueue_async_mode_creates_task_run_before_apply_async():
@@ -136,6 +141,42 @@ def test_enqueue_async_mode_falls_back_to_queue_default_timeout():
 
     _, kwargs = task.apply_async.call_args
     assert 'time_limit' not in kwargs
+    assert 'soft_time_limit' not in kwargs
+
+
+def test_reap_stale_task_runs_marks_orphans_failed():
+    """A worker killed mid-task (hard time limit / OOM / restart) fires no
+    Celery signal, so its TaskRun row stays 'running'. The reaper must close
+    rows past their queue limit + grace as FAILED and leave live ones alone."""
+    from datetime import datetime, timedelta, timezone as dt_tz
+
+    import core.models as core_models
+    from services.queue import reap_stale_task_runs
+
+    now = datetime.now(dt_tz.utc)
+    stale = MagicMock(queue='heavy', picked_up_at=now - timedelta(hours=2),
+                      started_at=now - timedelta(hours=2))
+    fresh = MagicMock(queue='heavy', picked_up_at=now - timedelta(minutes=5),
+                      started_at=now - timedelta(minutes=5))
+
+    def fake_filter(**kw):
+        if kw.get('status') == core_models.TaskRun.Status.RUNNING:
+            return [stale, fresh]
+        return []  # the stale-queued sweep
+
+    with override_settings(
+        TASK_QUEUE_ENABLED=True, TASK_RUN_TRACKING_ENABLED=True,
+        CELERY_QUEUE_TIME_LIMITS={'default': 600, 'heavy': 600, 'bulk': None},
+    ):
+        with patch.object(core_models.TaskRun, 'objects') as objects:
+            objects.filter.side_effect = fake_filter
+            reaped = reap_stale_task_runs()
+
+    assert reaped == 1
+    assert stale.status == core_models.TaskRun.Status.FAILED
+    assert 'reaped' in stale.error
+    stale.save.assert_called_once()
+    fresh.save.assert_not_called()
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────
@@ -147,6 +188,7 @@ _TESTS = [
     test_enqueue_async_mode_applies_job_timeout,
     test_enqueue_async_mode_creates_task_run_before_apply_async,
     test_enqueue_async_mode_falls_back_to_queue_default_timeout,
+    test_reap_stale_task_runs_marks_orphans_failed,
 ]
 
 

@@ -57,6 +57,21 @@ server {
         add_header X-Content-Type-Options "nosniff" always;
     }
 
+    # Flower (Celery monitor) — proxied through Django, which enforces admin
+    # (staff) auth before forwarding to the internal flower container.
+    location /flower/ {
+        proxy_pass         http://api_backend;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection        "";
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
     # Django static files — served directly from shared volume (hashed names → safe to cache forever)
     location ^~ /django_static/ {
         root /;

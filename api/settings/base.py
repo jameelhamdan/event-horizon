@@ -348,6 +348,16 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_ACKS_LATE = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_TIMEZONE = 'UTC'
+# Broadcast task/worker events on the broker so Flower shows live ground truth
+# (what is *actually* running on each worker right now). TaskRun rows are
+# best-effort history written from worker signals — a killed worker can leave
+# them stale (see services/queue.py reap_stale_task_runs).
+CELERY_WORKER_SEND_TASK_EVENTS = True
+CELERY_TASK_SEND_SENT_EVENT = True
+
+# Flower's in-cluster address — the container publishes no port; it is only
+# reachable through the staff-authenticated Django proxy at /flower/ (app/views.py).
+FLOWER_INTERNAL_URL = config('FLOWER_INTERNAL_URL', default='http://flower:5555')
 
 # Per-queue default time limit (seconds) applied by enqueue() when a call doesn't
 # pass job_timeout explicitly. 'bulk' has no default cap (long one-shot backfills/

@@ -290,6 +290,11 @@ def pipeline_health_task() -> dict:
             )
     report['stages'] = stages_report
 
+    # Sweep TaskRun rows orphaned by killed workers (no signal fires on a
+    # SIGKILL, so the row would stay 'running' forever) — see queue.py.
+    from services.queue import reap_stale_task_runs
+    report['task_runs_reaped'] = reap_stale_task_runs()
+
     from services.cache import KEY_PIPELINE_HEALTH_LAST, cache_set
     try:
         cache_set(KEY_PIPELINE_HEALTH_LAST, {'at': now.isoformat(), 'report': report}, timeout=None)

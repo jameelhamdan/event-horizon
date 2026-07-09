@@ -11,7 +11,9 @@ never break the task it's tracking) so individual tasks — status, args/kwargs,
 result, error/traceback — are browsable at /admin/core/taskrun/ (our RQ-admin /
 Flower equivalent). A row stuck in 'running' long past its usual duration is
 the signal for a hung/deadlocked job that the task time limit didn't catch
-cleanly; a row stuck in 'queued' means nothing picked it up.
+cleanly; a row stuck in 'queued' means nothing picked it up. Both are swept
+by reap_stale_task_runs() (called from pipeline_health_task) since a killed
+worker fires no signal to finalize its own row.
 """
 import logging
 import time
@@ -42,7 +44,12 @@ def enqueue(func, *args, queue: str = 'default', job_timeout: int | None = None,
             limit = job_timeout
         else:
             limit = settings.CELERY_QUEUE_TIME_LIMITS.get(queue)
-        extra = {'time_limit': limit} if limit is not None else {}
+        # soft_time_limit raises SoftTimeLimitExceeded *inside* the task, so
+        # task_failure fires and the TaskRun row is finalized as FAILED with a
+        # traceback. The hard limit stays 30s behind as a backstop — a hard kill
+        # is a SIGKILL of the pool child, which fires no signal at all and would
+        # leave the row stuck at 'running' (see reap_stale_task_runs).
+        extra = {'soft_time_limit': limit, 'time_limit': limit + 30} if limit is not None else {}
         # Pre-generate the task id so the TaskRun row exists *before* apply_async can
         # possibly be picked up by a worker — otherwise a fast/local worker can fire
         # task_prerun/task_success before this row is created, and those signal
@@ -169,6 +176,55 @@ def _run_sync(func, args: tuple, kwargs: dict, queue: str):
         from core.models import TaskRun
         _finish_task_run(run, TaskRun.Status.SUCCESS, t0=t0, result=result, has_result=True)
     return result
+
+
+def reap_stale_task_runs() -> int:
+    """Finalize TaskRun rows orphaned by a dead worker. Returns rows reaped.
+
+    The status signals below run in the worker process — a hard time-limit
+    kill (SIGKILL of the pool child), an OOM kill, or a container restart
+    mid-task fires none of them, so the row stays 'running' forever and the
+    dashboard slowly fills with phantom running tasks. Called from
+    pipeline_health_task (every 30m).
+
+    A running row is stale once it's outlived its queue's time limit plus an
+    hour of grace (25h for uncapped queues like bulk); a queued row is stale
+    when nothing picked it up for 24h (broker flushed, or the message was
+    lost). Both are closed as FAILED so they show up in failure counts
+    instead of lingering.
+    """
+    if not settings.TASK_RUN_TRACKING_ENABLED:
+        return 0
+    from datetime import timedelta, timezone as dt_timezone
+    from django.utils import timezone
+    from core.models import TaskRun
+
+    now = timezone.now()
+
+    def _aware(dt):
+        return dt.replace(tzinfo=dt_timezone.utc) if dt.tzinfo is None else dt
+
+    reaped = 0
+    for run in TaskRun.objects.filter(status=TaskRun.Status.RUNNING):
+        limit = settings.CELERY_QUEUE_TIME_LIMITS.get(run.queue)
+        grace = timedelta(seconds=limit, hours=1) if limit else timedelta(hours=25)
+        began = _aware(run.picked_up_at or run.started_at)
+        if began < now - grace:
+            _finish_task_run(
+                run, TaskRun.Status.FAILED,
+                error=f'reaped: still marked running {now - began} after pickup — '
+                      'worker was killed mid-task (hard time limit / OOM / restart)',
+            )
+            reaped += 1
+    stale_queued = TaskRun.objects.filter(
+        status=TaskRun.Status.QUEUED, started_at__lt=now - timedelta(hours=24),
+    )
+    for run in stale_queued:
+        _finish_task_run(run, TaskRun.Status.FAILED, error='reaped: never picked up within 24h')
+        reaped += 1
+    if reaped:
+        logger.warning('[queue] reaped %d stale TaskRun row(s)', reaped)
+    return reaped
 
 
 def _find_run(job_id):
