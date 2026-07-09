@@ -24,9 +24,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# A real browser UA, not a "(compatible; ...bot)" string — several feeds
+# (TASS, Arab News, others behind Cloudflare/Akamai) return 403 to anything
+# that self-identifies as a bot.
 _HEADERS = {
     'User-Agent': (
-        'Mozilla/5.0 (compatible; NewsFetcher/1.0; +https://github.com/)'
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
     ),
 }
 

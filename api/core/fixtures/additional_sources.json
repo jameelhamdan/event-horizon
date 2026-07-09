@@ -24,7 +24,7 @@
       "url": "https://feeds.apnews.com/rss/apf-topnews",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true,
+      "is_enabled": false,
       "weight": 1.4,
       "weight_locked": true
     }
@@ -39,7 +39,7 @@
       "url": "https://www.voanews.com/api/ztmqoyeq_e",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true,
+      "is_enabled": false,
       "weight": 1.0,
       "weight_locked": false
     }
@@ -220,7 +220,7 @@
       "url": "https://blogs.worldbank.org/en/feed",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true,
+      "is_enabled": false,
       "weight": 1.1,
       "weight_locked": false
     }
@@ -247,7 +247,7 @@
       "type": "rss",
       "name": "Brookings Institution",
       "description": "Economic and policy research from the Brookings Institution.",
-      "url": "https://www.brookings.edu/feed/",
+      "url": "https://www.brookings.edu/feed/?post_type=article",
       "sitemap_url": "https://www.brookings.edu/sitemap.xml",
       "author_slug": "",
       "headers": {},
@@ -266,7 +266,7 @@
       "url": "https://www.oecd.org/newsroom/news.xml",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true,
+      "is_enabled": false,
       "weight": 1.2,
       "weight_locked": true
     }
@@ -278,7 +278,7 @@
       "type": "rss",
       "name": "The Guardian Crime",
       "description": "Crime and justice reporting from The Guardian.",
-      "url": "https://www.theguardian.com/uk/crime/rss",
+      "url": "https://www.theguardian.com/uk/ukcrime/rss",
       "author_slug": "",
       "headers": {},
       "is_enabled": true,
@@ -311,7 +311,7 @@
       "url": "https://www.interpol.int/en/News-and-Events/News/rss",
       "author_slug": "",
       "headers": {},
-      "is_enabled": true,
+      "is_enabled": false,
       "weight": 1.2,
       "weight_locked": true
     }
@@ -353,7 +353,7 @@
       "type": "rss",
       "name": "OCCRP",
       "description": "Organised Crime and Corruption Reporting Project.",
-      "url": "https://www.occrp.org/en/rss/",
+      "url": "https://www.occrp.org/en/feed",
       "author_slug": "",
       "headers": {},
       "is_enabled": true,
@@ -474,7 +474,7 @@
       "type": "rss",
       "name": "AllAfrica",
       "description": "Pan-African news aggregator covering 55 African nations.",
-      "url": "https://allafrica.com/tools/headlines/rdf/world/headlines.rdf",
+      "url": "https://allafrica.com/tools/headlines/rdf/africa/headlines.rdf",
       "sitemap_url": "https://allafrica.com/misc/sitemap/aans-urls-en.xml",
       "author_slug": "",
       "headers": {},
@@ -521,7 +521,7 @@
       "type": "rss",
       "name": "Daily Sabah",
       "description": "English-language news from Turkey covering the region and the world.",
-      "url": "https://www.dailysabah.com/rss",
+      "url": "https://www.dailysabah.com/rss/world",
       "author_slug": "",
       "headers": {},
       "is_enabled": true,

@@ -4,8 +4,9 @@ A single page under ``/admin/dashboard/`` summarizing pipeline operations and
 offering POST actions. Data sources: ``api/crontab`` (upcoming runs),
 ``core.models.TaskRun`` (per-queue queued/running/failed counts, linking into
 the task browser at ``/admin/core/taskrun/`` for individual task detail —
-that's our RQ-admin / Flower equivalent), ``pipeline_coverage()`` (per-stage
-gaps), and forecast artifacts/rows. Registered via a ``get_urls`` shim in
+that's our RQ-admin / Flower equivalent), Flower's ``/workers?json=1`` API
+(live worker ground truth), ``pipeline_coverage()`` (per-stage gaps), and
+forecast artifacts/rows. Registered via a ``get_urls`` shim in
 ``core/admin.py``.
 """
 
@@ -21,13 +22,57 @@ logger = logging.getLogger(__name__)
 
 # ── POST action handlers ─────────────────────────────────────────────────────
 
+# One-click crontab-task triggers: action value → (task name, queue, message).
+# Every standalone crontab task gets a button so any stalled stage can be
+# resumed from the dashboard without shell access. Queues mirror run_task.py's
+# authoritative map (HEAVY_TASKS / BULK_TASKS, everything else 'default').
+# The template renders 'prune_stale_articles' (deletes data) and
+# 'generate_newsletter' (sends real email to subscribers) behind an
+# are-you-sure confirm() — keep it that way if you add more destructive ones.
+_TASK_ACTIONS = {
+    'refresh_topics': ('refresh_topics_task', 'heavy', 'Topic refresh enqueued (Wikipedia current events + LLM enrichment).'),
+    'discover_topics': ('discover_topics_task', 'heavy', 'Topic discovery enqueued (LLM over recent events).'),
+    'generate_newsletter': ('generate_newsletter_task', 'heavy', 'Newsletter generation enqueued — WILL EMAIL SUBSCRIBERS when it completes.'),
+    'pipeline_health': ('pipeline_health_task', 'default', 'Health report enqueued — the Health section refreshes on next page load.'),
+    'cleanup_low_importance': ('cleanup_low_importance_articles_task', 'default', 'Low-importance article cleanup enqueued.'),
+    'prune_stale_articles': ('prune_stale_articles_task', 'default', 'Stale-article prune enqueued (deletes articles).'),
+    'adjust_source_weights': ('adjust_source_weights_task', 'default', 'Source-weight adjustment enqueued.'),
+    'score_forecasts': ('score_forecasts_task', 'default', 'Forecast scoring enqueued.'),
+    'refresh_openrouter_models': ('refresh_openrouter_models_task', 'default', 'OpenRouter model refresh enqueued.'),
+}
+
+_STREAM_NAMES = ('prices', 'notam', 'earthquakes', 'forex')
+
+
+def _resolve_task(name: str):
+    """Find a *_task function in services.tasks or newsletter.tasks — same
+    resolution rule as manage.py run_task."""
+    from newsletter import tasks as newsletter_tasks
+    from services import tasks as service_tasks
+    for module in (service_tasks, newsletter_tasks):
+        func = getattr(module, name, None)
+        if callable(func):
+            return func
+    raise ValueError(f'Unknown task {name!r}')
+
+
 def _handle_action(request):
     from services.queue import enqueue
     from services import tasks as T
 
     action = request.POST.get('dashboard_action', '')
     try:
-        if action == 'run_pipeline':
+        if action in _TASK_ACTIONS:
+            task_name, queue, msg = _TASK_ACTIONS[action]
+            enqueue(_resolve_task(task_name), queue=queue)
+            _ok(request, msg)
+        elif action == 'run_stream':
+            _handle_run_stream(request)
+        elif action == 'aggregate_history':
+            _handle_aggregate_history(request)
+        elif action == 'retroactive_tag_topic':
+            _handle_retroactive_tag(request)
+        elif action == 'run_pipeline':
             # force=True: dispatch every enabled stage with pending work,
             # skipping the per-stage cadence gates (see services/stages.py).
             enqueue(T.pipeline_tick_task, True, queue='default')
@@ -113,6 +158,76 @@ def _handle_backfill_until(request):
     else:
         enqueue(T.backfill_history_task, start_date, end_date, None, queue='bulk')
         _ok(request, f'Article backfill enqueued (all sources) back to {until}.')
+
+
+def _handle_run_stream(request):
+    """Run one stream collector now (prices/notam/earthquakes/forex). The task
+    itself no-ops when the stream's feature flag is off, so this is always safe."""
+    from services.queue import enqueue
+    from services import tasks as T
+
+    name = request.POST.get('stream', '')
+    if name not in _STREAM_NAMES:
+        messages.error(request, f'Unknown stream: {name}')
+        return
+    enqueue(T.run_stream_task, name, queue='default')
+    _ok(request, f'Stream "{name}" run enqueued.')
+
+
+def _handle_aggregate_history(request):
+    """Aggregate backfilled articles into Events over a historical date range.
+
+    The missing second half of every article backfill: the live aggregate
+    stage only looks back 168h, so backfilled articles never form Events until
+    aggregate_history_task walks their date range. Idempotent (upsert keyed on
+    location/category/day). Mirrors bootstrap_initial_data_task's usage —
+    bulk queue, no time cap.
+    """
+    from datetime import date, datetime, timezone as dt_timezone
+
+    from services.queue import enqueue
+    from services import tasks as T
+
+    parsed = []
+    for field in ('start_date', 'end_date'):
+        raw = request.POST.get(field, '').strip()
+        try:
+            d = date.fromisoformat(raw)
+        except ValueError:
+            messages.error(request, f'Invalid {field} {raw!r} — expected YYYY-MM-DD.')
+            return
+        parsed.append(datetime(d.year, d.month, d.day, tzinfo=dt_timezone.utc))
+    start_date, end_date = parsed
+    if start_date >= end_date:
+        messages.error(request, 'start_date must be before end_date.')
+        return
+    enqueue(T.aggregate_history_task, start_date, end_date, queue='bulk', job_timeout=-1)
+    _ok(request, f'Historical aggregation enqueued for {start_date.date()} → {end_date.date()} (bulk queue).')
+
+
+def _handle_retroactive_tag(request):
+    """Retroactively tag historical events for one topic (slug + lookback)."""
+    from services.queue import enqueue
+    from services import tasks as T
+    import core.models as m
+
+    slug = request.POST.get('topic_slug', '').strip()
+    if not slug:
+        messages.error(request, 'No topic slug provided.')
+        return
+    if not m.Topic.objects.filter(slug=slug).exists():
+        messages.error(request, f'Topic "{slug}" not found.')
+        return
+    raw_hours = request.POST.get('lookback_hours', '').strip() or '72'
+    try:
+        lookback_hours = int(raw_hours)
+        if lookback_hours <= 0:
+            raise ValueError
+    except ValueError:
+        messages.error(request, f'Invalid lookback hours {raw_hours!r} — expected a positive integer.')
+        return
+    enqueue(T.retroactive_tag_topic_task, slug, lookback_hours, queue='default')
+    _ok(request, f'Retroactive tagging enqueued for "{slug}" (lookback {lookback_hours}h).')
 
 
 def _handle_cancel(request):
@@ -205,6 +320,46 @@ def _queue_summary():
     except Exception as exc:  # noqa: BLE001
         logger.debug('[dashboard] queue_summary unavailable: %s', exc)
         return []
+
+
+def _flower_status():
+    """Live worker snapshot from Flower's events-based state (ground truth for
+    what is actually online/executing, unlike best-effort TaskRun rows).
+
+    ``GET {FLOWER_INTERNAL_URL}/flower/workers?json=1`` returns
+    ``{"data": [worker dicts]}`` — event counters keyed 'task-received',
+    'task-succeeded', … plus hostname/status/active/processed/loadavg. Counter
+    keys contain dashes, so normalize them here (templates can't look them up).
+    """
+    from django.conf import settings
+
+    try:
+        import requests
+        resp = requests.get(
+            f'{settings.FLOWER_INTERNAL_URL}/flower/workers',
+            params={'json': 1}, timeout=4,
+        )
+        resp.raise_for_status()
+        data = resp.json().get('data', [])
+    except Exception as exc:  # noqa: BLE001
+        logger.debug('[dashboard] flower unavailable: %s', exc)
+        return {'available': False}
+
+    workers = [
+        {
+            'hostname': w.get('hostname', '?'),
+            'online': bool(w.get('status')),
+            'active': w.get('active') or 0,
+            'processed': w.get('processed') or 0,
+            'succeeded': w.get('task-succeeded', 0),
+            'failed': w.get('task-failed', 0),
+            'retried': w.get('task-retried', 0),
+            'loadavg': w.get('loadavg'),
+        }
+        for w in data
+    ]
+    workers.sort(key=lambda w: w['hostname'])
+    return {'available': True, 'workers': workers}
 
 
 # Health report is written every 30 min (crontab) — older than 2× that means
@@ -343,26 +498,45 @@ def _llm_status():
         return []
 
 
+def _coverage():
+    from services.workflow import pipeline_coverage
+    return pipeline_coverage()
+
+
 def dashboard_view(request):
     if request.method == 'POST':
         return _handle_action(request)
 
-    from services.workflow import pipeline_coverage
-    try:
-        coverage = pipeline_coverage()
-    except Exception as exc:  # noqa: BLE001
-        logger.exception('[dashboard] coverage failed')
-        coverage = []
-        messages.warning(request, f'Coverage unavailable: {exc}')
+    # The sections are independent (Mongo, Redis, Flower HTTP, crontab file),
+    # so fetch them concurrently — page latency is the slowest source, not the
+    # sum. Threads, not an async view: every fetcher is blocking I/O and the
+    # ORM is thread-safe with per-thread connections.
+    fetchers = {
+        'health': _health_status,
+        'upcoming': _upcoming,
+        'queue_summary': _queue_summary,
+        'flower': _flower_status,
+        'coverage': _coverage,
+        'forecast': _forecast_status,
+        'llm_status': _llm_status,
+    }
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=len(fetchers)) as pool:
+        futures = {name: pool.submit(fn) for name, fn in fetchers.items()}
+    results, errors = {}, {}
+    for name, fut in futures.items():
+        try:
+            results[name] = fut.result()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception('[dashboard] %s failed', name)
+            results[name] = [] if name == 'coverage' else None
+            errors[name] = exc
+    for name, exc in errors.items():
+        messages.warning(request, f'{name} unavailable: {exc}')
 
     context = {
         **admin.site.each_context(request),
         'title': 'Operations Dashboard',
-        'health': _health_status(),
-        'upcoming': _upcoming(),
-        'queue_summary': _queue_summary(),
-        'coverage': coverage,
-        'forecast': _forecast_status(),
-        'llm_status': _llm_status(),
+        **results,
     }
     return render(request, 'admin/dashboard.html', context)

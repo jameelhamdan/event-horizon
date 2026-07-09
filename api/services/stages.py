@@ -250,6 +250,14 @@ REGISTRY: dict[str, Stage] = {s.name: s for s in [
         handler=_geocode_handler, pending_ids=_geocode_pending_ids,
         pending_count=lambda: len(_geocode_pending_ids(None)),
         error_stage_key='geocode',
+        # Repair chunks re-run the full analysis, and these are precisely the
+        # articles whose LLM pass failed before — worst case one chunk walks
+        # the whole failover chain (3 cloud providers × 2 models × 45s), and
+        # with Ollama as effective primary analyze_batch degrades to one call
+        # per article (8 walks/chunk). The heavy queue's 600s default SIGKILLed
+        # every chunk mid-flight, so no geo_failed marks were ever written and
+        # each 12h dispatch re-selected the same ids — a pass never completed.
+        job_timeout=1800,
     ),
     Stage(
         name='aggregate', label='Aggregate articles into events', model='event',

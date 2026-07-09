@@ -59,7 +59,7 @@ server {
 
     # Flower (Celery monitor) — proxied through Django, which enforces admin
     # (staff) auth before forwarding to the internal flower container.
-    location /flower/ {
+    location ^~ /flower/ {
         proxy_pass         http://api_backend;
         proxy_http_version 1.1;
         proxy_set_header   Connection        "";

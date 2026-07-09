@@ -28,6 +28,54 @@
       <input type="text" name="source_code" placeholder="Source code (blank = all)" style="width:18em">
       <button class="button" type="submit">Backfill articles until date</button>
     </form>
+    <form method="post" class="ops-actions" style="margin-top:8px">
+      {% csrf_token %}
+      <input type="hidden" name="dashboard_action" value="aggregate_history">
+      <input type="date" name="start_date" required title="Range start (UTC)">
+      <input type="date" name="end_date" required title="Range end (UTC, exclusive)">
+      <button class="button" type="submit" title="Build map Events from already-backfilled articles — the live aggregate stage only looks back 168h, so run this after every article backfill">Aggregate history → Events</button>
+    </form>
+  </section>
+
+  {# ── Manual task triggers (crontab tasks, one button each) ───────── #}
+  <section class="ops-card">
+    <h2>Manual task triggers <span class="ops-muted" style="font-weight:normal">— every standalone crontab task, runnable without shell access</span></h2>
+    <form method="post" class="ops-actions">
+      {% csrf_token %}
+      <button class="button" name="dashboard_action" value="pipeline_health">Health report</button>
+      <button class="button" name="dashboard_action" value="refresh_topics">Refresh topics</button>
+      <button class="button" name="dashboard_action" value="discover_topics">Discover topics</button>
+      <button class="button" name="dashboard_action" value="cleanup_low_importance">Cleanup low-importance</button>
+      <button class="button" name="dashboard_action" value="adjust_source_weights">Adjust source weights</button>
+      <button class="button" name="dashboard_action" value="score_forecasts">Score forecasts</button>
+      <button class="button" name="dashboard_action" value="refresh_openrouter_models">Refresh OpenRouter models</button>
+    </form>
+    <form method="post" class="ops-actions" style="margin-top:8px">
+      {% csrf_token %}
+      <input type="hidden" name="dashboard_action" value="run_stream">
+      <span class="ops-muted">Streams:</span>
+      <button class="button" name="stream" value="prices">Prices</button>
+      <button class="button" name="stream" value="notam">NOTAMs</button>
+      <button class="button" name="stream" value="earthquakes">Earthquakes</button>
+      <button class="button" name="stream" value="forex">Forex</button>
+    </form>
+    <form method="post" class="ops-actions" style="margin-top:8px">
+      {% csrf_token %}
+      <input type="hidden" name="dashboard_action" value="retroactive_tag_topic">
+      <input type="text" name="topic_slug" placeholder="Topic slug" required style="width:16em">
+      <input type="number" name="lookback_hours" placeholder="Lookback h (72)" min="1" style="width:9em">
+      <button class="button" type="submit">Retro-tag topic</button>
+    </form>
+    <div class="ops-actions" style="margin-top:8px">
+      <form method="post" style="display:inline" onsubmit="return confirm('prune_stale_articles_task DELETES old low-importance articles. Run it?')">
+        {% csrf_token %}
+        <button class="button ops-danger-btn" name="dashboard_action" value="prune_stale_articles">⚠ Prune stale articles</button>
+      </form>
+      <form method="post" style="display:inline" onsubmit="return confirm('generate_newsletter_task SENDS REAL EMAIL to all subscribers when it completes. Run it?')">
+        {% csrf_token %}
+        <button class="button ops-danger-btn" name="dashboard_action" value="generate_newsletter">⚠ Generate newsletter (emails subscribers)</button>
+      </form>
+    </div>
   </section>
 
   {# ── Pipeline coverage ───────────────────────────────────────────── #}
@@ -149,6 +197,37 @@
     </section>
   </div>
 
+  {# ── Celery workers (Flower) ─────────────────────────────────────── #}
+  <section class="ops-card">
+    <h2>Celery workers <span class="ops-muted" style="font-weight:normal">— live from <a href="/flower/">Flower</a></span></h2>
+    {% if flower.available %}
+    <table class="ops-table">
+      <thead><tr>
+        <th>Worker</th><th>Status</th><th>Active</th><th>Processed</th>
+        <th>Succeeded</th><th>Failed</th><th>Retried</th><th>Load avg</th>
+      </tr></thead>
+      <tbody>
+      {% for w in flower.workers %}
+        <tr>
+          <td class="ops-mono">{{ w.hostname }}</td>
+          <td>{% if w.online %}<span class="ops-ok">&#10003; online</span>{% else %}<span class="ops-warn">offline</span>{% endif %}</td>
+          <td>{{ w.active }}</td>
+          <td class="ops-muted">{{ w.processed }}</td>
+          <td class="ops-muted">{{ w.succeeded }}</td>
+          <td class="{% if w.failed %}ops-warn{% endif %}">{{ w.failed }}</td>
+          <td class="ops-muted">{{ w.retried }}</td>
+          <td class="ops-muted">{{ w.loadavg|join:" / "|default:"—" }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="8" class="ops-muted">Flower is up but reports no workers — are the worker containers running?</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="ops-muted">Flower unreachable at its internal URL — TaskRun counts above are the fallback. Check the <code>flower</code> compose service.</p>
+    {% endif %}
+  </section>
+
   {# ── LLM provider status ─────────────────────────────────────────── #}
   <section class="ops-card">
     <h2>LLM providers</h2>
@@ -217,6 +296,8 @@
 .ops-ok { color:#5cb85c; }
 .ops-debounced { color:#e05252; font-weight:600; }
 .ops-mono { font-family: monospace; font-size: 11px; color:#aaa; }
+.ops-danger-btn { background:#5a2020 !important; border-color:#7a2c2c !important; }
+.ops-danger-btn:hover { background:#7a2c2c !important; }
 .ops-informational { opacity: 0.7; font-style: italic; }
 .ops-grid { display:grid; grid-template-columns: 1fr 1fr; gap:18px; }
 @media (max-width: 800px){ .ops-grid { grid-template-columns: 1fr; } }

@@ -157,7 +157,10 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
         article.sub_category = features.sub_category
         article.processed_on = timezone.now()
         extra = {**(article.extra_data or {}), 'llm': features.llm_data}
-        if only_failed and not features.location:
+        # geo_failed means "the LLM answered and the article genuinely has no
+        # resolvable location" — a failed LLM call proves nothing about the
+        # article, so leave it selectable for the next repair pass.
+        if only_failed and not features.location and features.llm_error is None:
             extra['geo_failed'] = True
         article.extra_data = extra
         article.translations = features.translations

@@ -205,6 +205,7 @@ class ArticleAdmin(ImportExportModelAdmin):
     date_hierarchy = "published_on"
     list_filter = ["source_type", "source_code", "category", ArticleStageFilter, ImportanceFilter]
     search_fields = ["title", "location", "category"]
+    autocomplete_fields = ["related"]
     actions = ["reprocess_selected", "score_importance_selected"]
 
     @admin.action(description="Reprocess selected (NLP / geocode)")
@@ -227,6 +228,7 @@ class ArticleAdmin(ImportExportModelAdmin):
 
     readonly_fields = [
         "id",
+        "related_events",
         "entities",
         "sentiment",
         "location",
@@ -240,6 +242,34 @@ class ArticleAdmin(ImportExportModelAdmin):
         "created_on",
         "updated_on",
     ]
+
+    @admin.display(description="Events built from this article")
+    def related_events(self, obj):
+        from django.urls import reverse
+        from django.utils.html import format_html, format_html_join
+
+        # Event.article_ids is a JSON array of string UUIDs; Mongo equality on
+        # an array field matches membership, so this finds every containing event.
+        events = models.Event.objects.filter(article_ids=str(obj.id)).only(
+            "id", "title", "location_name", "category", "started_at"
+        )
+        rows = format_html_join(
+            "",
+            '<li><a href="{}">{}</a> — {} [{}] {}</li>',
+            (
+                (
+                    reverse("admin:core_event_change", args=[e.pk]),
+                    e.title,
+                    e.location_name,
+                    e.category,
+                    e.started_at.strftime("%Y-%m-%d %H:%M") if e.started_at else "",
+                )
+                for e in events
+            ),
+        )
+        if not rows:
+            return "— (no event references this article)"
+        return format_html('<ul style="margin:0;padding-left:1.2em">{}</ul>', rows)
 
     def changelist_view(self, request, extra_context=None):
         if request.method == "POST" and "pipeline_action" in request.POST:
