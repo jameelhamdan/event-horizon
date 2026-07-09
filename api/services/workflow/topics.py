@@ -241,12 +241,15 @@ def _apply_topic_tags(events: list, all_active_topics: list) -> int:
             event.category, event.location_name, event.topic_slugs,
             event.sub_categories or [], route_sentiment,
         )
+        event.is_routed = bool(event.affected_indicators)
         mark_stage(event, 'tag', ok=(source == 'embed'),
                    error=None if source == 'embed' else 'keyword fallback (embedding model unavailable)')
-        event.save(update_fields=[
-            'topics', 'topic_slugs', 'topics_source', 'affected_indicators', 'stage_status',
-        ])
         tagged += 1
+
+    from core.models import Event
+    Event.objects.bulk_update(events, [
+        'topics', 'topic_slugs', 'topics_source', 'affected_indicators', 'is_routed', 'stage_status',
+    ], batch_size=500)
     return tagged
 
 
@@ -451,10 +454,11 @@ def retroactive_tag_topic(slug: str, lookback_hours: int = 72) -> int:
                 event.category, event.location_name, event.topic_slugs,
                 event.sub_categories or [], route_sentiment,
             )
+            event.is_routed = bool(event.affected_indicators)
         except Exception:
             pass  # routing is best-effort; topic tags are still saved
 
-        event.save(update_fields=['topics', 'topic_slugs', 'topics_source', 'affected_indicators'])
+        event.save(update_fields=['topics', 'topic_slugs', 'topics_source', 'affected_indicators', 'is_routed'])
         tagged_count += 1
         logger.info('[topics] Retroactively tagged "%s" → %s', event.title[:60], slug)
 

@@ -226,7 +226,11 @@ TASK_RUN_TRACKING_ENABLED = config('TASK_RUN_TRACKING_ENABLED', default=True, ca
 # ── Feature flags — gates both scheduling (api/crontab) and the task function itself.
 NEWSLETTER_ENABLED = config('NEWSLETTER_ENABLED', default=True, cast=bool)
 STREAM_PRICES_ENABLED = config('STREAM_PRICES_ENABLED', default=True, cast=bool)
-STREAM_NOTAM_ENABLED = config('STREAM_NOTAM_ENABLED', default=True, cast=bool)
+# Default False: aviationweather.gov removed NOTAM data entirely (Jul 2026) — every
+# /api/data/notam request 404s. Re-enable once services/streams/notam.py is rewritten
+# against the FAA NOTAM API (external-api.faa.gov, requires client_id/client_secret,
+# per-location radius queries only — see the notam.py module docstring).
+STREAM_NOTAM_ENABLED = config('STREAM_NOTAM_ENABLED', default=False, cast=bool)
 STREAM_EARTHQUAKE_ENABLED = config('STREAM_EARTHQUAKE_ENABLED', default=True, cast=bool)
 STREAM_FOREX_ENABLED = config('STREAM_FOREX_ENABLED', default=True, cast=bool)
 
@@ -257,6 +261,10 @@ ARTICLE_MIN_IMPORTANCE_TO_PROCESS = config('ARTICLE_MIN_IMPORTANCE_TO_PROCESS', 
 ARTICLE_MIN_IMPORTANCE = config('ARTICLE_MIN_IMPORTANCE', default=4.0, cast=float)                        # below this → eligible for deletion
 ARTICLE_CLEANUP_GRACE_HOURS = 48
 ARTICLE_STALE_PROCESSED_DAYS = 7
+# Per-calendar-month retention cap, ranked by importance_score — applies retroactively
+# to every month, not just the current one. Keeps DB growth bounded over years of
+# ingest; articles referenced by any Event.article_ids are exempt from this prune.
+ARTICLE_MONTHLY_IMPORTANCE_CAP = config('ARTICLE_MONTHLY_IMPORTANCE_CAP', default=5000, cast=int)
 ARTICLE_MIN_WORD_COUNT = 30               # fetch-time filter, zero LLM cost
 ARTICLE_DEDUP_TITLE_ENABLED = True        # Jaccard dedup on titles (Redis-backed)
 ARTICLE_DEDUP_JACCARD_THRESHOLD = 0.75

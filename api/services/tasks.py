@@ -664,11 +664,11 @@ def run_forecast_task() -> int:
     symbol_meta = get_symbol_meta()
     now = datetime.now(dt_timezone.utc)
     router = settings.FORECAST_ROUTER
-    created = 0
+    rows = []
     for h in settings.FORECAST_HORIZONS_DAYS:
         for p in model.predict(fm, h):
             stream_key = symbol_meta.get(p['symbol'], ('', ''))[0]
-            core_models.Forecast.objects.create(
+            rows.append(core_models.Forecast(
                 symbol=p['symbol'], stream_key=stream_key, generated_at=now,
                 as_of_date=p['as_of_date'], horizon_days=h, direction=p['direction'],
                 proba_up=p['proba_up'], predicted_change_pct=p['predicted_change_pct'],
@@ -676,9 +676,10 @@ def run_forecast_task() -> int:
                 band_high=p['band_high'], confidence=p['confidence'],
                 current_value=p['current_value'], router_source=router,
                 model_version=p['model_version'],
-            )
-            created += 1
-    return created
+            ))
+    if rows:
+        core_models.Forecast.objects.bulk_create(rows)
+    return len(rows)
 
 
 # ── Article maintenance ───────────────────────────────────────────────────────
@@ -687,8 +688,9 @@ def run_forecast_task() -> int:
 @shared_task
 def cleanup_low_importance_articles_task() -> int:
     """
-    Delete unprocessed low-importance articles older than ARTICLE_CLEANUP_GRACE_HOURS.
-    Approximates "gate before storage" without blocking the fetch path.
+    1. Delete unprocessed low-importance articles older than ARTICLE_CLEANUP_GRACE_HOURS.
+       Approximates "gate before storage" without blocking the fetch path.
+    2. Enforce ARTICLE_MONTHLY_IMPORTANCE_CAP — see _enforce_monthly_importance_cap.
     """
     from django.conf import settings
     from core import models as core_models
@@ -704,7 +706,76 @@ def cleanup_low_importance_articles_task() -> int:
         created_on__lt=cutoff,
     ).delete()
     logger.info('[cleanup] deleted %d low-importance unprocessed articles', deleted)
+
+    deleted += _enforce_monthly_importance_cap()
     return deleted
+
+
+def _enforce_monthly_importance_cap() -> int:
+    """
+    Keep at most ARTICLE_MONTHLY_IMPORTANCE_CAP scored articles per UTC
+    calendar month, ranked by importance_score — walks every month that has
+    scored articles (oldest to newest, including historical months, not just
+    the current one) and deletes the lowest-importance excess in any month
+    over budget.
+
+    Articles referenced by any Event.article_ids are exempt: they already
+    contributed to an aggregated Event, and deleting them would silently
+    break that event's source-article list without anyone noticing.
+    """
+    from django.conf import settings
+    from core import models as core_models
+
+    cap = settings.ARTICLE_MONTHLY_IMPORTANCE_CAP
+    if not cap or cap <= 0:
+        return 0
+
+    referenced_ids = {
+        str(article_id)
+        for article_ids in core_models.Event.objects.values_list('article_ids', flat=True)
+        for article_id in (article_ids or [])
+    }
+
+    earliest = (
+        core_models.Article.objects.filter(importance_score__isnull=False)
+        .order_by('published_on')
+        .values_list('published_on', flat=True)
+        .first()
+    )
+    if earliest is None:
+        return 0
+
+    now = datetime.now(dt_timezone.utc)
+    total_deleted = 0
+    year, month = earliest.year, earliest.month
+    while (year, month) <= (now.year, now.month):
+        start = datetime(year, month, 1, tzinfo=dt_timezone.utc)
+        end = (
+            datetime(year + 1, 1, 1, tzinfo=dt_timezone.utc)
+            if month == 12
+            else datetime(year, month + 1, 1, tzinfo=dt_timezone.utc)
+        )
+        month_ids = list(
+            core_models.Article.objects.filter(
+                published_on__gte=start,
+                published_on__lt=end,
+                importance_score__isnull=False,
+            ).order_by('-importance_score').values_list('id', flat=True)
+        )
+        excess_ids = [aid for aid in month_ids[cap:] if str(aid) not in referenced_ids]
+        if excess_ids:
+            deleted, _ = core_models.Article.objects.filter(id__in=excess_ids).delete()
+            total_deleted += deleted
+            logger.info(
+                '[cleanup] %04d-%02d over monthly cap (%d scored, cap %d) — deleted %d low-importance excess',
+                year, month, len(month_ids), cap, deleted,
+            )
+
+        month += 1
+        if month == 13:
+            month, year = 1, year + 1
+
+    return total_deleted
 
 
 @shared_task
@@ -719,17 +790,11 @@ def prune_stale_articles_task() -> int:
     stale_days = settings.ARTICLE_STALE_PROCESSED_DAYS
     cutoff     = datetime.now(dt_timezone.utc) - timedelta(days=stale_days)
 
-    candidates = list(
-        core_models.Article.objects.filter(
-            location__isnull=True,
-            processed_on__lt=cutoff,
-        ).only('id', 'extra_data')
-    )
-    ids = [a.id for a in candidates if (a.extra_data or {}).get('geo_failed')]
-    if not ids:
-        return 0
-
-    deleted, _ = core_models.Article.objects.filter(id__in=ids).delete()
+    deleted, _ = core_models.Article.objects.filter(
+        location__isnull=True,
+        processed_on__lt=cutoff,
+        geo_failed=True,
+    ).delete()
     logger.info('[cleanup] pruned %d stale unlocated articles', deleted)
     return deleted
 

@@ -29,6 +29,7 @@ class ArticleCleaner:
         self,
         documents: Sequence[ArticleDocument],
         lite_flags: bool | Sequence[bool] = False,
+        skip_local: bool = False,
     ) -> list[ArticleFeatures]:
         """Enrich many documents.
 
@@ -39,14 +40,24 @@ class ArticleCleaner:
         one batched call — see ArticleAnalyzer.ANALYZE_BATCH_SIZE); entities (NER),
         sentiment (VADER), and finbert_sentiment all run locally on every document,
         independent of the LLM call.
+
+        ``skip_local``: skip NER/VADER/FinBERT entirely (returns None for those
+        three ArticleFeatures fields) — for geocode-repair, where those fields
+        already have a correct value on the article and only the LLM's
+        category/geo/intensity judgment is being retried.
         """
         if not documents:
             return []
         texts = [doc.full_text for doc in documents]
-        from services.processing import finbert, ner, vader
-        finbert_batch = finbert.score_batch(texts)
-        entities_batch = ner.extract_batch(texts)
-        sentiment_batch = vader.score_batch(texts)
+        if skip_local:
+            finbert_batch = [None] * len(documents)
+            entities_batch = [None] * len(documents)
+            sentiment_batch = [None] * len(documents)
+        else:
+            from services.processing import finbert, ner, vader
+            finbert_batch = finbert.score_batch(texts)
+            entities_batch = ner.extract_batch(texts)
+            sentiment_batch = vader.score_batch(texts)
 
         if isinstance(lite_flags, bool):
             lite_flags = [lite_flags] * len(documents)

@@ -142,13 +142,43 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
     # (no Arabic) and no banner scrape. They still geocode + categorize.
     lite_flags = [bool((a.extra_data or {}).get('backfill_day')) for a in articles]
 
-    feature_list = cleaner.clean_batch(docs, lite_flags=lite_flags)
+    # Geocode repair only retries the LLM's category/geo/intensity judgment —
+    # entities/sentiment/finbert_sentiment already have a correct value from the
+    # original process pass and don't depend on location, so skip re-running
+    # those three local models for every repair chunk.
+    feature_list = cleaner.clean_batch(docs, lite_flags=lite_flags, skip_local=only_failed)
+
+    # Banner scrapes are independent HTTP fetches (og:image) — run the whole
+    # chunk's fetches concurrently instead of serially (was up to chunk_size *
+    # 5s of blocking HTTP inside this loop, one slow/unresponsive source could
+    # stall the entire chunk).
+    banner_targets = [
+        (i, article.source_url)
+        for i, (article, lite) in enumerate(zip(articles, lite_flags))
+        if not lite and not article.banner_image_url and article.source_url.startswith('https://')
+    ]
+    banner_results: dict[int, str] = {}
+    if banner_targets:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(8, len(banner_targets))) as pool:
+            futures = {pool.submit(_fetch_og_image, url): i for i, url in banner_targets}
+            for future in futures:
+                i = futures[future]
+                try:
+                    og = future.result()
+                except Exception:
+                    og = None
+                if og:
+                    banner_results[i] = og
 
     processed = 0
-    for article, features, lite in zip(articles, feature_list, lite_flags):
-        article.entities = features.entities
-        article.sentiment = features.sentiment
-        article.finbert_sentiment = features.finbert_sentiment
+    for i, (article, features, lite) in enumerate(zip(articles, feature_list, lite_flags)):
+        if features.entities is not None:
+            article.entities = features.entities
+        if features.sentiment is not None:
+            article.sentiment = features.sentiment
+        if features.finbert_sentiment is not None:
+            article.finbert_sentiment = features.finbert_sentiment
         article.location = features.location
         article.latitude = features.latitude
         article.longitude = features.longitude
@@ -161,7 +191,7 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
         # resolvable location" — a failed LLM call proves nothing about the
         # article, so leave it selectable for the next repair pass.
         if only_failed and not features.location and features.llm_error is None:
-            extra['geo_failed'] = True
+            article.geo_failed = True
         article.extra_data = extra
         article.translations = features.translations
         article.llm_usage = features.llm_usage
@@ -178,17 +208,12 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
         update_fields = [
             'entities', 'sentiment', 'finbert_sentiment', 'location', 'latitude', 'longitude',
             'event_intensity', 'category', 'sub_category', 'processed_on',
-            'extra_data', 'translations', 'llm_usage', 'stage_status',
+            'extra_data', 'translations', 'llm_usage', 'stage_status', 'geo_failed',
         ]
-        if (
-            not lite
-            and not article.banner_image_url
-            and article.source_url and article.source_url.startswith('https://')
-        ):
-            og = _fetch_og_image(article.source_url)
-            if og:
-                article.banner_image_url = og
-                update_fields.append('banner_image_url')
+        og = banner_results.get(i)
+        if og:
+            article.banner_image_url = og
+            update_fields.append('banner_image_url')
 
         article.save(update_fields=update_fields)
         processed += 1

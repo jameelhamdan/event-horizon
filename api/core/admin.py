@@ -69,7 +69,7 @@ class EventStageFilter(admin.SimpleListFilter):
         if self.value() == "keyword":
             return queryset.filter(topics_source="keyword")
         if self.value() == "unrouted":
-            return queryset.filter(affected_indicators=[])
+            return queryset.filter(is_routed=False)
         return queryset
 
 
@@ -201,6 +201,7 @@ class ArticleAdmin(ImportExportModelAdmin):
         "location",
         "published_on",
         "processed_on",
+        "created_on",
     ]
     date_hierarchy = "published_on"
     list_filter = ["source_type", "source_code", "category", ArticleStageFilter, ImportanceFilter]
@@ -316,6 +317,7 @@ class EventAdmin(admin.ModelAdmin):
         "avg_sentiment",
         "avg_intensity",
         "published_on",
+        "created_on",
     ]
     date_hierarchy = "started_at"
     list_filter = ["category", EventStageFilter]

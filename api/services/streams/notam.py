@@ -1,6 +1,16 @@
 """
 NOTAM stream — aviationweather.gov (global ICAO coverage, no key required).
 
+BROKEN as of July 2026: aviationweather.gov removed NOTAM data entirely —
+every /api/data/notam request 404s, and their own GFA map app has no NOTAM
+layer or endpoint left. Disabled by default (STREAM_NOTAM_ENABLED=false).
+The only real successor is the FAA NOTAM API
+(https://external-api.faa.gov/notamapi/v1/notams), which requires a
+registered client_id/client_secret (request via NOTAMS@faa.gov) and only
+supports per-location radius queries (~100 NM max) — not the global bbox
+this module was built around. Fixing this means rewriting fetch() to
+iterate per-location (e.g. over StaticPoint airports), not a URL swap.
+
 Upserts NotamZone (live state) and appends NotamRecord (history) for new NOTAMs.
 """
 import logging

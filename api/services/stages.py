@@ -115,17 +115,17 @@ def _process_handler(ids: list) -> int:
     return process_articles(ids=ids)
 
 
-def _geocode_pending_ids(limit: int | None) -> list:
-    """Processed-but-unlocated articles that haven't been marked geo_failed.
-    The geo_failed flag lives inside extra_data, so the filter is Python-side —
-    bounded by a generous DB-side slice before the flag check."""
+def _geocode_pending():
     from django.db.models import Q
     from core import models as m
-    qs = m.Article.objects.filter(processed_on__isnull=False).filter(
+    return m.Article.objects.filter(processed_on__isnull=False, geo_failed=False).filter(
         Q(location__isnull=True) | Q(location='')
-    ).only('id', 'extra_data')
-    ids = [a.id for a in qs if not (a.extra_data or {}).get('geo_failed')]
-    return ids[:limit] if limit else ids
+    )
+
+
+def _geocode_pending_ids(limit: int | None) -> list:
+    qs = _geocode_pending().values_list('id', flat=True)
+    return list(qs[:limit]) if limit else list(qs)
 
 
 def _geocode_handler(ids: list) -> int:
@@ -159,7 +159,7 @@ def _route_pending():
     of everything recent, which starved never-routed events past the limit."""
     from core import models as m
     lookback = _now() - timedelta(hours=EVENT_STAGE_WINDOW_HOURS)
-    return m.Event.objects.filter(started_at__gte=lookback, affected_indicators=[])
+    return m.Event.objects.filter(started_at__gte=lookback, is_routed=False)
 
 
 def _route_ids(limit: int) -> list:
@@ -243,12 +243,18 @@ REGISTRY: dict[str, Stage] = {s.name: s for s in [
         pending_count=_count(_process_pending),
         claim=_process_claim, release=_process_release,
         error_stage_key='process',
+        # Same batch-size collapse as geocode (analyzer.py: Ollama-as-primary
+        # forces one LLM call per article instead of one per 8-article chunk) —
+        # the heavy queue's 600s default is sized for the normal single batched
+        # call and would SIGKILL a chunk mid-flight if Ollama is effective
+        # primary, silently dropping the whole chunk's progress.
+        job_timeout=1200,
     ),
     Stage(
         name='geocode', label='Processed but un-located (repair)', model='article',
         queue='heavy', chunk_size=8, limit=200, every_minutes=720,
         handler=_geocode_handler, pending_ids=_geocode_pending_ids,
-        pending_count=lambda: len(_geocode_pending_ids(None)),
+        pending_count=_count(_geocode_pending),
         error_stage_key='geocode',
         # Repair chunks re-run the full analysis, and these are precisely the
         # articles whose LLM pass failed before — worst case one chunk walks

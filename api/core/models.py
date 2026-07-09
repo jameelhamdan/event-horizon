@@ -149,6 +149,13 @@ class Article(models.Model):
     #  "prompt_tokens": 420, "completion_tokens": 180, "total_tokens": 600}
     llm_usage = models.JSONField(default=dict, blank=True)
 
+    # Set by process_articles(only_failed=True) when the LLM answered but the
+    # article genuinely has no resolvable location — excludes it from future
+    # geocode-repair passes. Real field (not extra_data-nested) so the geocode
+    # stage's pending query can filter it in Mongo instead of loading extra_data
+    # for every unlocated article into Python.
+    geo_failed = models.BooleanField(default=False)
+
     updated_on = models.DateTimeField(auto_now=True)
     created_on = models.DateTimeField(auto_now_add=True)
     extra_data = models.JSONField(default=dict, blank=True)
@@ -172,8 +179,12 @@ class Article(models.Model):
             models.Index(fields=['category']),
             models.Index(fields=['processed_on']),
             models.Index(fields=['location']),
+            models.Index(fields=['geo_failed']),
             # aggregate_events' primary query filters processed_on + published_on range.
             models.Index(fields=['processed_on', 'published_on'], name='core_article_proc_pub_idx'),
+            # Dashboard activity chart: month-range filter on published_on, then
+            # sort+limit by importance_score to fetch the top N per month.
+            models.Index(fields=['published_on', 'importance_score'], name='core_article_pub_imp_idx'),
         ]
 
     def __str__(self):
@@ -217,6 +228,11 @@ class Event(models.Model):
     affected_indicators = models.JSONField(default=list, blank=True)
     # Which router produced affected_indicators — always 'rules' (deterministic, services/forecasting/routing.py).
     router_source = models.CharField(max_length=8, default='rules', blank=True)
+    # Mirrors "affected_indicators is non-empty" as a real indexed field — the
+    # route stage's pending query used to filter affected_indicators=[] directly,
+    # which MongoDB can't serve from an index on a JSONField. Set wherever
+    # affected_indicators is set.
+    is_routed = models.BooleanField(default=False)
 
     # References
     article_ids = models.JSONField(default=list)
@@ -263,6 +279,10 @@ class Event(models.Model):
             models.Index(fields=['latest_article_at'], name='core_event_latest__idx'),
             models.Index(fields=['category']),
             models.Index(fields=['location_name']),
+            models.Index(fields=['is_routed']),
+            # Dashboard activity chart: month-range filter on started_at, then
+            # sort+limit by avg_intensity to fetch the top N per month.
+            models.Index(fields=['started_at', 'avg_intensity'], name='core_event_start_int_idx'),
         ]
 
     def __str__(self):

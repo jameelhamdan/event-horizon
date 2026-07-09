@@ -443,6 +443,191 @@ def _coverage():
     return pipeline_coverage()
 
 
+# ── Activity-per-month chart (events by category + total articles) ─────────
+
+_CHART_MONTHS_BACK = 12 * 5  # 5 years
+
+# EventCategory value -> swatch color. Legacy 'protest'/'crime' get colors too
+# since old data still carries them (see EventCategory in core/models.py).
+_CATEGORY_COLORS = {
+    'conflict': '#e05252',
+    'disaster': '#e0a052',
+    'economic': '#5cb85c',
+    'political': '#79aec8',
+    'health': '#b19cd9',
+    'general': '#8b93a0',
+    'protest': '#d9c74a',
+    'crime': '#c9648c',
+}
+_ARTICLES_LINE_COLOR = '#e8e8e8'
+
+_CHART_W, _CHART_H = 900, 260
+_CHART_PAD_L, _CHART_PAD_R, _CHART_PAD_T, _CHART_PAD_B = 40, 40, 10, 26
+
+
+def _month_buckets(months_back):
+    """[(start, end, label), ...] oldest-first UTC calendar-month ranges."""
+    now = datetime.now(timezone.utc)
+    buckets = []
+    year, month = now.year, now.month
+    for _ in range(months_back):
+        start = datetime(year, month, 1, tzinfo=timezone.utc)
+        end = (
+            datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+            if month == 12
+            else datetime(year, month + 1, 1, tzinfo=timezone.utc)
+        )
+        buckets.append((start, end, start.strftime('%b %Y')))
+        month -= 1
+        if month == 0:
+            month, year = 12, year - 1
+    buckets.reverse()
+    return buckets
+
+
+def _activity_chart():
+    """Events per month (stacked by category) plus articles per month, for
+    the last 5 years — exact counts of what's actually in the database.
+    Volume is bounded upstream by importance-score retention in the pipeline
+    (see ``services.tasks.cap_monthly_article_importance_task``), not by
+    sampling or slicing here.
+
+    Events are fetched as one ranged query (``category``, ``started_at``
+    only) and bucketed in Python — the codebase bans the ``__date`` ORM
+    lookup and has no precedent for Mongo ``$group``/``annotate(Count(...))``,
+    so per-bucket-loop-in-Python is the established pattern (see e.g.
+    evaluate_freshness.py). Articles are counted with one indexed
+    ``.count()`` per month bucket instead, since a decade of raw per-source
+    ingest is too large to pull into Python for two-field bucketing; Article
+    had no standalone index on ``published_on`` before core/migrations 0012
+    (only a compound ``(processed_on, published_on)`` one, which doesn't
+    serve a ``published_on``-only filter), so this used to be a full
+    collection scan per bucket — 0012 also adds ``(published_on,
+    importance_score)``, whose prefix now serves the plain range filter.
+    """
+    from core.models import Article, Event, EventCategory
+
+    buckets = _month_buckets(_CHART_MONTHS_BACK)
+    n = len(buckets)
+    earliest = buckets[0][0]
+
+    event_counts = [{} for _ in range(n)]
+    rows = Event.objects.filter(started_at__gte=earliest).values('category', 'started_at')
+    for row in rows:
+        ts = row['started_at']
+        if ts is None:
+            continue
+        for i, (start, end, _label) in enumerate(buckets):
+            if start <= ts < end:
+                counts = event_counts[i]
+                counts[row['category']] = counts.get(row['category'], 0) + 1
+                break
+
+    article_counts = [
+        Article.objects.filter(published_on__gte=start, published_on__lt=end).count()
+        for start, end, _label in buckets
+    ]
+
+    category_labels = dict(EventCategory.choices)
+    categories = [c for c in category_labels if any(b.get(c) for b in event_counts)]
+    labels = [label for _start, _end, label in buckets]
+    series = {c: [event_counts[i].get(c, 0) for i in range(n)] for c in categories}
+
+    return {
+        'labels': labels,
+        'categories': [
+            {
+                'key': c,
+                'label': category_labels[c],
+                'color': _CATEGORY_COLORS.get(c, '#666'),
+                'total': sum(series[c]),
+            }
+            for c in categories
+        ],
+        'articles_total': sum(article_counts),
+        'articles_color': _ARTICLES_LINE_COLOR,
+        'series': series,
+        'svg': _render_activity_chart_svg(labels, categories, series, article_counts),
+    }
+
+
+def _render_activity_chart_svg(labels, categories, series, article_counts):
+    """Server-rendered stacked-area SVG with an overlaid articles line on a
+    secondary (right) axis — no JS charting library exists anywhere in this
+    repo (the React frontend's Recharts dep doesn't reach the Django admin),
+    so this draws the chart directly in Python rather than pulling in a new
+    client-side dependency for one graph. Events and articles differ by
+    orders of magnitude in volume, hence the separate axes."""
+    import math
+    from django.utils.html import escape
+    from django.utils.safestring import mark_safe
+
+    n = len(labels)
+    if not n:
+        return mark_safe('')
+
+    def nice_max(v):
+        v = max(v, 1)
+        magnitude = 10 ** max(len(str(int(v))) - 1, 0)
+        return int(math.ceil(v / magnitude) * magnitude) or 1
+
+    event_totals = [sum(series[c][i] for c in categories) for i in range(n)] if categories else [0] * n
+    y_max = nice_max(max(event_totals))
+    y2_max = nice_max(max(article_counts) if article_counts else 0)
+
+    plot_w = _CHART_W - _CHART_PAD_L - _CHART_PAD_R
+    plot_h = _CHART_H - _CHART_PAD_T - _CHART_PAD_B
+
+    def px(i):
+        return _CHART_PAD_L + (plot_w * i / (n - 1) if n > 1 else plot_w / 2)
+
+    def py(v, scale):
+        return _CHART_PAD_T + plot_h - (plot_h * v / scale)
+
+    parts = [
+        f'<svg viewBox="0 0 {_CHART_W} {_CHART_H}" class="ops-chart-svg" '
+        f'role="img" aria-label="Events per month by category, with total articles per month">'
+    ]
+
+    # Gridlines + dual y-axis labels (0, 25%, 50%, 75%, 100%) — left = events, right = articles
+    for frac in (0, 0.25, 0.5, 0.75, 1.0):
+        gy = py(y_max * frac, y_max)
+        parts.append(
+            f'<line x1="{_CHART_PAD_L}" y1="{gy:.1f}" x2="{_CHART_W - _CHART_PAD_R}" y2="{gy:.1f}" '
+            f'class="ops-chart-gridline"/>'
+        )
+        parts.append(f'<text x="{_CHART_PAD_L - 6}" y="{gy:.1f}" class="ops-chart-axis-label" text-anchor="end" dominant-baseline="middle">{int(y_max * frac)}</text>')
+        parts.append(f'<text x="{_CHART_W - _CHART_PAD_R + 6}" y="{gy:.1f}" class="ops-chart-axis-label ops-chart-axis-label-r" text-anchor="start" dominant-baseline="middle">{int(y2_max * frac)}</text>')
+
+    # Stacked area layers, one path per category (left axis)
+    cum = [0] * n
+    for c in categories:
+        top = [cum[i] + series[c][i] for i in range(n)]
+        pts_top = [(px(i), py(top[i], y_max)) for i in range(n)]
+        pts_bottom = [(px(i), py(cum[i], y_max)) for i in range(n)][::-1]
+        path_pts = pts_top + pts_bottom
+        d = 'M ' + ' L '.join(f'{x:.1f},{y:.1f}' for x, y in path_pts) + ' Z'
+        color = _CATEGORY_COLORS.get(c, '#666')
+        parts.append(f'<path d="{d}" fill="{color}" fill-opacity="0.75" stroke="{color}" stroke-width="1"/>')
+        cum = top
+
+    # Total-articles overlay line (right axis)
+    line_pts = [(px(i), py(v, y2_max)) for i, v in enumerate(article_counts)]
+    line_d = 'M ' + ' L '.join(f'{x:.1f},{y:.1f}' for x, y in line_pts)
+    parts.append(f'<path d="{line_d}" fill="none" stroke="{_ARTICLES_LINE_COLOR}" stroke-width="2" stroke-dasharray="4 3"/>')
+
+    # X-axis labels — thin out to roughly one per year over a 10y window
+    step = max(1, n // 10)
+    for i in range(0, n, step):
+        parts.append(
+            f'<text x="{px(i):.1f}" y="{_CHART_H - 6}" class="ops-chart-axis-label" '
+            f'text-anchor="middle">{escape(labels[i])}</text>'
+        )
+
+    parts.append('</svg>')
+    return mark_safe(''.join(parts))
+
+
 def dashboard_view(request):
     if request.method == 'POST':
         return _handle_action(request)
@@ -458,6 +643,7 @@ def dashboard_view(request):
         'coverage': _coverage,
         'forecast': _forecast_status,
         'llm_status': _llm_status,
+        'activity_chart': _activity_chart,
     }
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=len(fetchers)) as pool:

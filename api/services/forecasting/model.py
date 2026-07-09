@@ -134,14 +134,14 @@ def predict(features_df, horizon: int) -> list[dict]:
     resid = artifact['resid_std']
 
     out = []
-    for i, (_, row) in enumerate(features_df.iterrows()):
+    for i, row in enumerate(features_df[['symbol', 'close', 'date']].itertuples(index=False)):
         p = float(proba_up[i])
         r = float(ret[i])
-        close = float(row['close'])
+        close = float(row.close)
         direction = 'up' if p > 0.55 else 'down' if p < 0.45 else 'neutral'
         predicted_price = close * (1 + r)
         out.append({
-            'symbol': row['symbol'],
+            'symbol': row.symbol,
             'horizon_days': horizon,
             'proba_up': round(p, 4),
             'direction': direction,
@@ -152,7 +152,7 @@ def predict(features_df, horizon: int) -> list[dict]:
             'confidence': round(abs(p - 0.5) * 2, 4),
             'current_value': round(close, 4),
             'model_version': artifact['model_version'],
-            'as_of_date': row['date'].to_pydatetime(),
+            'as_of_date': row.date.to_pydatetime(),
         })
     return out
 

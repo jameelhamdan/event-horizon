@@ -76,18 +76,19 @@ function buildEdges(
 }
 
 interface CauseEffectGraphProps {
+  mode: Mode
   events: EventSummary[]
   loading: boolean
   onSelectSymbol?: (symbol: string, streamKey: StreamKey, name: string) => void
 }
 
-// Bipartite cause→effect flow built from Event.affected_indicators (the router output):
-// causes (event categories or topics) on the left press on market indicators on the right.
-// Edge thickness = net |weight|, colour = direction. Symbol nodes select the master chart;
-// cause nodes toggle-highlight their edges. Fills the card width (ResizeObserver).
-export default function CauseEffectGraph({ events, loading, onSelectSymbol }: CauseEffectGraphProps) {
+// Bipartite event→effect flow built from Event.affected_indicators (the router output):
+// events (by category or by topic, per the `mode` prop) on the left press on market
+// indicators on the right. Edge thickness = net |weight|, colour = direction. Symbol
+// nodes select the master chart; event nodes toggle-highlight their edges. Fills the
+// card width (ResizeObserver). Render one instance per mode — no in-component toggle.
+export default function CauseEffectGraph({ mode, events, loading, onSelectSymbol }: CauseEffectGraphProps) {
   const { lang, t } = useLanguage()
-  const [mode, setMode] = useState<Mode>("categories")
   const [focusCause, setFocusCause] = useState<string | null>(null)
 
   // DB-driven indicator panel (MarketSymbol.is_forecast); hardcoded fallback offline.
@@ -137,30 +138,9 @@ export default function CauseEffectGraph({ events, loading, onSelectSymbol }: Ca
     mode === "categories" ? categoryLabel(lang, cause) : cause.replace(/-/g, " ")
   const causeCol = (cause: string) => (mode === "categories" ? categoryColor(cause) : "#c9a86a")
 
-  const modeToggle = (
-    <div className="inline-flex overflow-hidden rounded-md border border-app-border text-[0.68rem] font-semibold">
-      {(["categories", "topics"] as Mode[]).map((m) => (
-        <button
-          key={m}
-          type="button"
-          onClick={() => { setMode(m); setFocusCause(null) }}
-          aria-pressed={m === mode}
-          className={m === mode ? "bg-app-accent-blue px-2 py-0.5 text-white" : "px-2 py-0.5 text-app-text-muted hover:text-app-text-primary"}
-        >
-          {m === "categories" ? t.causeModeCategories : t.causeModeTopics}
-        </button>
-      ))}
-    </div>
-  )
-
   if (loading) return <p className="py-6 text-center text-xs text-app-text-muted">…</p>
   if (shown.length === 0)
-    return (
-      <div className="flex flex-col gap-2">
-        {modeToggle}
-        <p className="py-6 text-center text-xs text-app-text-muted">{t.causeEffectEmpty}</p>
-      </div>
-    )
+    return <p className="py-6 text-center text-xs text-app-text-muted">{t.causeEffectEmpty}</p>
 
   const visCauses = causes.filter((c) => shown.some((e) => e.cause === c))
   const syms = panel.filter((p) => shown.some((e) => e.symbol === p.symbol))
@@ -185,7 +165,6 @@ export default function CauseEffectGraph({ events, loading, onSelectSymbol }: Ca
     <div className="flex flex-col gap-2" ref={containerRef}>
       <div className="flex items-center justify-between px-2">
         <span className="text-[0.62rem] font-semibold uppercase tracking-wide text-app-text-muted">{t.causeLabel}</span>
-        {modeToggle}
         <span className="text-[0.62rem] font-semibold uppercase tracking-wide text-app-text-muted">{t.effectLabel}</span>
       </div>
       <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} role="img">

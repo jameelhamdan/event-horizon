@@ -121,6 +121,20 @@ def aggregate_events(
         logger.info('[aggregate] no located articles — nothing to do')
         return 0, 0
 
+    # Prefetch every Event already in this window once, keyed the same way the
+    # per-sub-cluster upsert below looks them up — replaces N per-sub-cluster
+    # "does this event exist" queries with a single one. .only() the upsert-key
+    # fields: every other field the update path writes (title, translations,
+    # llm_usage, ...) gets explicitly reassigned in that loop before save, so
+    # leaving them deferred here doesn't affect the eventual bulk_update.
+    existing_events: dict[tuple[str, str, str], 'Event'] = {}
+    for ev in Event.objects.filter(**{
+        'started_at__gte': window['published_on__gte'],
+        **({'started_at__lt': window['published_on__lt']} if 'published_on__lt' in window else {}),
+    }).only('location_name', 'category', 'started_at'):
+        day_key = ev.started_at.date().isoformat()
+        existing_events[(ev.location_name, ev.category, day_key)] = ev
+
     from services.processing.clustering import get_clusterer
 
     # Group by (city, country, category, N-day window) then semantic sub-cluster —
@@ -158,6 +172,7 @@ def aggregate_events(
     )
 
     created_count = updated_count = 0
+    events_to_update: dict = {}
 
     for gi, group in enumerate(sub_groups, start=1):
         if gi == 1 or gi % 25 == 0:
@@ -230,22 +245,19 @@ def aggregate_events(
                 'location_name': lang_location,
             }
 
-        # Upsert on location_name + calendar day.
-        # Use explicit datetime range — MongoDB backend does not support __date lookups.
+        # Upsert on location_name + calendar day. day_start/day_end kept only for
+        # the create-race fallback query below (MongoDB backend does not support
+        # __date lookups, so an explicit range is needed there).
         day_start = datetime(started_at.year, started_at.month, started_at.day, tzinfo=started_at.tzinfo)
         day_end = day_start + timedelta(days=1)
+        upsert_key = (location, category, started_at.date().isoformat())
 
-        event = Event.objects.filter(
-            location_name=location,
-            category=category,
-            started_at__gte=day_start,
-            started_at__lt=day_end,
-        ).first()
+        event = existing_events.get(upsert_key)
 
         created = False
         if event is None:
             try:
-                Event.objects.create(
+                event = Event.objects.create(
                     title=representative.title,
                     content=representative.content,
                     category=category,
@@ -262,11 +274,13 @@ def aggregate_events(
                     source_codes=source_codes,
                     sub_categories=sub_categories,
                     affected_indicators=affected_indicators,
+                    is_routed=bool(affected_indicators),
                     translations=event_translations,
                     llm_usage=llm_usage,
                 )
                 created = True
                 created_count += 1
+                existing_events[upsert_key] = event
                 logger.info(
                     '[aggregate] Created  %s [%s] — %d article(s) (sub-cluster %d/%d)',
                     location, category, len(group), gi, len(sub_groups),
@@ -306,14 +320,24 @@ def aggregate_events(
             event.source_codes = source_codes
             event.sub_categories = sub_categories
             event.affected_indicators = affected_indicators
+            event.is_routed = bool(affected_indicators)
             event.translations = {**(event.translations or {}), **event_translations}
             event.llm_usage = llm_usage
-            event.save()
+            event.updated_on = timezone.now()  # bulk_update below bypasses auto_now
+            events_to_update[event.pk] = event
             updated_count += 1
             logger.info(
                 '[aggregate] Updated  %s [%s] — %d article(s) (sub-cluster %d/%d)',
                 location, category, len(group), gi, len(sub_groups),
             )
+
+    if events_to_update:
+        Event.objects.bulk_update(list(events_to_update.values()), [
+            'title', 'category', 'latitude', 'longitude', 'latest_article_at',
+            'article_count', 'avg_sentiment', 'avg_finbert_sentiment', 'avg_intensity',
+            'article_ids', 'source_codes', 'sub_categories', 'affected_indicators',
+            'is_routed', 'translations', 'llm_usage', 'updated_on',
+        ], batch_size=500)
 
     logger.info(
         '[aggregate] run complete: created=%d updated=%d in %.2fs total',

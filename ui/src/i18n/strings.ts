@@ -113,13 +113,12 @@ export interface UIStrings {
   // Indicator relationship visualisations (Markets page)
   indicatorsCompare: string
   indicatorsCompareNote: string
-  causeEffectTitle: string
+  causeEffectCategoriesTitle: string
+  causeEffectTopicsTitle: string
   causeEffectNote: string
   causeEffectEmpty: string
   causeLabel: string
   effectLabel: string
-  causeModeCategories: string
-  causeModeTopics: string
   // Why-is-it-moving panel
   whyMovingTitle: string
   whyMovingNet: string
@@ -366,13 +365,12 @@ export const UI: Record<Language, UIStrings> = {
     eventCountLabel: "events",
     indicatorsCompare: "Indicator performance",
     indicatorsCompareNote: "Daily close, rebased to 0% at window start — shows how indicators move against each other.",
-    causeEffectTitle: "Cause → effect graph",
-    causeEffectNote: "How recent event categories press on each market indicator. Edge thickness = strength, colour = direction.",
+    causeEffectCategoriesTitle: "Event categories → effect",
+    causeEffectTopicsTitle: "Event topics → effect",
+    causeEffectNote: "How recent events press on each market indicator. Edge thickness = strength, colour = direction.",
     causeEffectEmpty: "No weighted events to map in this window",
-    causeLabel: "Causes",
+    causeLabel: "Events",
     effectLabel: "Effects",
-    causeModeCategories: "Categories",
-    causeModeTopics: "Topics",
     whyMovingTitle: "Why is it moving?",
     whyMovingNet: "Net news pressure",
     whyMovingUp: "pushing up",
@@ -621,13 +619,12 @@ export const UI: Record<Language, UIStrings> = {
     eventCountLabel: "أحداث",
     indicatorsCompare: "أداء المؤشرات",
     indicatorsCompareNote: "الإغلاق اليومي، معاد ضبطه إلى ٪٠ في بداية الفترة — يوضح كيف تتحرك المؤشرات مقابل بعضها.",
-    causeEffectTitle: "رسم السبب ← الأثر",
-    causeEffectNote: "كيف تضغط فئات الأحداث الأخيرة على كل مؤشر سوقي. سماكة الخط = القوة، اللون = الاتجاه.",
+    causeEffectCategoriesTitle: "فئات الأحداث ← الأثر",
+    causeEffectTopicsTitle: "مواضيع الأحداث ← الأثر",
+    causeEffectNote: "كيف تضغط الأحداث الأخيرة على كل مؤشر سوقي. سماكة الخط = القوة، اللون = الاتجاه.",
     causeEffectEmpty: "لا توجد أحداث مرجّحة لرسمها في هذه الفترة",
-    causeLabel: "الأسباب",
+    causeLabel: "الأحداث",
     effectLabel: "الآثار",
-    causeModeCategories: "الفئات",
-    causeModeTopics: "المواضيع",
     whyMovingTitle: "لماذا يتحرك؟",
     whyMovingNet: "صافي ضغط الأخبار",
     whyMovingUp: "يدفع للأعلى",

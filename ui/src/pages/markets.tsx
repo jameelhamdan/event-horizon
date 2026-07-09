@@ -204,14 +204,26 @@ export default function MarketsPage() {
               <Panel title={t.indicatorsCompare}>
                 <IndicatorsLineChart days={rangeDays} />
               </Panel>
-              <Panel title={t.causeEffectTitle}>
-                <p className="mb-3 text-[0.7rem] leading-snug text-app-text-muted">{t.causeEffectNote}</p>
-                <CauseEffectGraph
-                  events={panelEvents.events}
-                  loading={panelEvents.loading}
-                  onSelectSymbol={handleSelect}
-                />
-              </Panel>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <Panel title={t.causeEffectCategoriesTitle}>
+                  <p className="mb-3 text-[0.7rem] leading-snug text-app-text-muted">{t.causeEffectNote}</p>
+                  <CauseEffectGraph
+                    mode="categories"
+                    events={panelEvents.events}
+                    loading={panelEvents.loading}
+                    onSelectSymbol={handleSelect}
+                  />
+                </Panel>
+                <Panel title={t.causeEffectTopicsTitle}>
+                  <p className="mb-3 text-[0.7rem] leading-snug text-app-text-muted">{t.causeEffectNote}</p>
+                  <CauseEffectGraph
+                    mode="topics"
+                    events={panelEvents.events}
+                    loading={panelEvents.loading}
+                    onSelectSymbol={handleSelect}
+                  />
+                </Panel>
+              </div>
               <details
                 className="rounded-lg border border-app-border bg-app-surface"
                 onToggle={(e) => setScatterOpen((e.target as HTMLDetailsElement).open)}
