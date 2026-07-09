@@ -11,6 +11,12 @@ import SymbolDetail from "../components/markets/SymbolDetail";
 import MoversStrip from "../components/markets/MoversStrip";
 import SymbolBrowser from "../components/markets/SymbolBrowser";
 import ForecastInfo from "../components/markets/ForecastInfo";
+import WhyMoving from "../components/markets/WhyMoving";
+import PressurePane from "../components/markets/PressurePane";
+import TrackRecord from "../components/markets/TrackRecord";
+import PressureGauge from "../components/markets/PressureGauge";
+import SentimentScatter from "../components/markets/SentimentScatter";
+import { usePanelEvents, useSymbolEvents } from "../hooks/useMarketEvents";
 import { useSSE } from "../hooks/useSSE";
 import { useLanguage } from "../contexts/LanguageContext";
 import type { UIStrings } from "../i18n/strings";
@@ -94,6 +100,7 @@ export default function MarketsPage() {
 
   // Page-level date range (calendar days back from today) driving the time-based panels.
   const [rangeDays, setRangeDays] = useState(90);
+  const [scatterOpen, setScatterOpen] = useState(false);
 
   // Master-detail selection: the watchlist / movers strip drive the central chart.
   const [selected, setSelected] = useState<{ symbol: string; streamKey: StreamKey; name?: string }>(
@@ -109,6 +116,12 @@ export default function MarketsPage() {
 
   const handleSelect = (symbol: string, streamKey: StreamKey, name: string) =>
     setSelected({ symbol, streamKey, name });
+
+  // News-event data: capped at 90d — the 500-event API page covers at most a few
+  // months, so longer ranges would silently truncate and mislead.
+  const eventDays = Math.min(rangeDays, 90);
+  const panelEvents = usePanelEvents(eventDays);
+  const symbolEvents = useSymbolEvents(selected.symbol, eventDays);
 
   const [latestPriceTick, setLatestPriceTick] = useState<{
     symbol: string;
@@ -137,7 +150,10 @@ export default function MarketsPage() {
           {/* Page toolbar: title + global date-range selector */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h1 className="text-lg font-semibold text-app-text-heading">{t.navMarkets}</h1>
-            <RangeSelector value={rangeDays} onChange={setRangeDays} />
+            <div className="flex flex-wrap items-center gap-3">
+              <PressureGauge events={panelEvents.events} />
+              <RangeSelector value={rangeDays} onChange={setRangeDays} />
+            </div>
           </div>
 
           {/* Movers summary strip */}
@@ -160,21 +176,60 @@ export default function MarketsPage() {
               </Panel>
             </div>
 
-            {/* Center: focused symbol chart + indicator relationships */}
+            {/* Center: focused symbol chart + news-pressure insights */}
             <div className="flex min-w-0 flex-col gap-4">
               <SymbolDetail
                 symbol={selected.symbol}
                 streamKey={selected.streamKey}
                 name={selected.name}
                 days={rangeDays}
+                events={symbolEvents.events}
               />
+              <Panel title={t.pressureTitle}>
+                <p className="mb-2 text-[0.7rem] leading-snug text-app-text-muted">{t.pressureNote}</p>
+                <PressurePane
+                  symbol={selected.symbol}
+                  events={symbolEvents.events}
+                  loading={symbolEvents.loading}
+                  days={rangeDays}
+                />
+              </Panel>
+              <Panel title={t.whyMovingTitle}>
+                <WhyMoving
+                  symbol={selected.symbol}
+                  events={symbolEvents.events}
+                  loading={symbolEvents.loading}
+                />
+              </Panel>
               <Panel title={t.indicatorsCompare}>
                 <IndicatorsLineChart days={rangeDays} />
               </Panel>
               <Panel title={t.causeEffectTitle}>
                 <p className="mb-3 text-[0.7rem] leading-snug text-app-text-muted">{t.causeEffectNote}</p>
-                <CauseEffectGraph days={rangeDays} />
+                <CauseEffectGraph
+                  events={panelEvents.events}
+                  loading={panelEvents.loading}
+                  onSelectSymbol={handleSelect}
+                />
               </Panel>
+              <details
+                className="rounded-lg border border-app-border bg-app-surface"
+                onToggle={(e) => setScatterOpen((e.target as HTMLDetailsElement).open)}
+              >
+                <summary className="cursor-pointer px-3 py-2 text-[0.8rem] font-semibold text-app-text-heading">
+                  {t.scatterTitle}
+                </summary>
+                <div className="p-3 pt-0">
+                  {/* Mounted only once opened, so the collapsed panel costs no fetches. */}
+                  {scatterOpen && (
+                    <SentimentScatter
+                      symbol={selected.symbol}
+                      events={symbolEvents.events}
+                      days={eventDays}
+                    />
+                  )}
+                </div>
+              </details>
             </div>
 
             {/* Forecasts & insights — drops below center on md, sidebar on xl */}
@@ -182,6 +237,9 @@ export default function MarketsPage() {
               <ForecastInfo />
               <Panel title={t.marketForecasts}>
                 <ForecastPanel embedded />
+              </Panel>
+              <Panel title={t.trackRecordTitle}>
+                <TrackRecord />
               </Panel>
             </div>
           </div>

@@ -62,6 +62,7 @@ class EventSerializer(serializers.ModelSerializer):
             'latitude',
             'longitude',
             'started_at',
+            'latest_article_at',
             'article_count',
             'avg_sentiment',
             'avg_finbert_sentiment',

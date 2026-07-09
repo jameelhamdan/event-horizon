@@ -89,7 +89,8 @@ def _envelope(results, **extra) -> dict:
 class EventListView(APIView):
     """
     GET /api/events/
-    Query params: category, start, end, limit (max 500), bbox (lat_min,lng_min,lat_max,lng_max)
+    Query params: category, topic, symbol, start, end, limit (max 500),
+    bbox (lat_min,lng_min,lat_max,lng_max)
     """
 
     def get(self, request):
@@ -106,6 +107,13 @@ class EventListView(APIView):
 
         if topic_slug := request.query_params.get('topic'):
             qs = qs.filter(topic_slugs=topic_slug)
+
+        # Events routed to a given market symbol (affected_indicators is a list of
+        # {symbol, weight} dicts; the key transform compiles to the Mongo dot-path
+        # 'affected_indicators.symbol', which matches inside arrays).
+        symbol = request.query_params.get('symbol')
+        if symbol:
+            qs = qs.filter(affected_indicators__symbol=symbol)
 
         qs, err = _apply_date_range(qs, 'started_at', request)
         if err:

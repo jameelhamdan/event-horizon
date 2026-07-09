@@ -101,10 +101,13 @@ export async function fetchForecasts(
 }
 
 export async function fetchForecastAccuracy(
-  symbol?: string
+  symbol?: string,
+  opts: { history?: boolean; recent?: number } = {},
 ): Promise<ForecastAccuracyResponse> {
   const params = new URLSearchParams()
   if (symbol) params.set("symbol", symbol)
+  if (opts.history) params.set("history", "1")
+  if (opts.recent) params.set("recent", String(opts.recent))
   const res = await fetch(`${BASE_URL}/forecasts/accuracy/?${params}`)
   if (!res.ok) throw new Error(`API error ${res.status}`)
   return res.json()

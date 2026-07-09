@@ -118,6 +118,40 @@ export interface UIStrings {
   causeEffectEmpty: string
   causeLabel: string
   effectLabel: string
+  causeModeCategories: string
+  causeModeTopics: string
+  // Why-is-it-moving panel
+  whyMovingTitle: string
+  whyMovingNet: string
+  whyMovingUp: string
+  whyMovingDown: string
+  whyMovingEmpty: string
+  whyMovingArticles: string
+  // News-pressure pane + gauge
+  pressureTitle: string
+  pressureNote: string
+  pressureEmpty: string
+  pressureRangeCap: string
+  pressureNet: string
+  pressureSentiment: string
+  gaugeTitle: string
+  gaugeQuiet: string
+  gaugeNormal: string
+  gaugeElevated: string
+  gaugeIntense: string
+  // Forecast track record
+  trackRecordTitle: string
+  trackRecordBaseline: string
+  trackRecordRecent: string
+  trackRecordNote: string
+  trackRecordBrier: string
+  trackRecordScored: string
+  // Sentiment vs return scatter
+  scatterTitle: string
+  scatterNote: string
+  scatterNotEnough: string
+  // Price-chart event markers
+  markerLegend: string
   // Date range filter
   rangeLabel: string
   range1d: string
@@ -337,6 +371,35 @@ export const UI: Record<Language, UIStrings> = {
     causeEffectEmpty: "No weighted events to map in this window",
     causeLabel: "Causes",
     effectLabel: "Effects",
+    causeModeCategories: "Categories",
+    causeModeTopics: "Topics",
+    whyMovingTitle: "Why is it moving?",
+    whyMovingNet: "Net news pressure",
+    whyMovingUp: "pushing up",
+    whyMovingDown: "pushing down",
+    whyMovingEmpty: "No significant news pressure on this indicator in this window.",
+    whyMovingArticles: "articles",
+    pressureTitle: "News pressure vs price",
+    pressureNote: "Daily net event weight routed to this indicator (bars) and financial sentiment (line), on the same timeline as the price chart above.",
+    pressureEmpty: "No routed news events for this indicator in this window.",
+    pressureRangeCap: "Shown for the most recent 90 days.",
+    pressureNet: "Net weight",
+    pressureSentiment: "Sentiment",
+    gaugeTitle: "News pressure",
+    gaugeQuiet: "Quiet",
+    gaugeNormal: "Normal",
+    gaugeElevated: "Elevated",
+    gaugeIntense: "Intense",
+    trackRecordTitle: "Forecast track record",
+    trackRecordBaseline: "coin-flip baseline",
+    trackRecordRecent: "Recent forecasts",
+    trackRecordNote: "Forecasts measure the news→market link — they are not investment advice.",
+    trackRecordBrier: "Brier score (lower = better calibrated)",
+    trackRecordScored: "scored",
+    scatterTitle: "Sentiment vs return",
+    scatterNote: "Weekly financial sentiment of routed events vs the realized weekly return. A weak fit is the honest, expected finding.",
+    scatterNotEnough: "Not enough overlapping event and price history yet.",
+    markerLegend: "▲▼ news events routed to this indicator",
     rangeLabel: "Range",
     range1d: "1D",
     range1w: "1W",
@@ -563,6 +626,35 @@ export const UI: Record<Language, UIStrings> = {
     causeEffectEmpty: "لا توجد أحداث مرجّحة لرسمها في هذه الفترة",
     causeLabel: "الأسباب",
     effectLabel: "الآثار",
+    causeModeCategories: "الفئات",
+    causeModeTopics: "المواضيع",
+    whyMovingTitle: "لماذا يتحرك؟",
+    whyMovingNet: "صافي ضغط الأخبار",
+    whyMovingUp: "يدفع للأعلى",
+    whyMovingDown: "يدفع للأسفل",
+    whyMovingEmpty: "لا يوجد ضغط أخبار ملموس على هذا المؤشر في هذه الفترة.",
+    whyMovingArticles: "مقالات",
+    pressureTitle: "ضغط الأخبار مقابل السعر",
+    pressureNote: "صافي وزن الأحداث الموجّهة إلى هذا المؤشر يوميًا (أعمدة) والمشاعر المالية (خط)، على نفس الخط الزمني لمخطط السعر أعلاه.",
+    pressureEmpty: "لا توجد أحداث إخبارية موجّهة إلى هذا المؤشر في هذه الفترة.",
+    pressureRangeCap: "يُعرض لآخر ٩٠ يومًا كحد أقصى.",
+    pressureNet: "الوزن الصافي",
+    pressureSentiment: "المشاعر",
+    gaugeTitle: "ضغط الأخبار",
+    gaugeQuiet: "هادئ",
+    gaugeNormal: "طبيعي",
+    gaugeElevated: "مرتفع",
+    gaugeIntense: "شديد",
+    trackRecordTitle: "سجل دقة التوقعات",
+    trackRecordBaseline: "خط الأساس العشوائي",
+    trackRecordRecent: "أحدث التوقعات",
+    trackRecordNote: "التوقعات تقيس العلاقة بين الأخبار والأسواق — وليست نصيحة استثمارية.",
+    trackRecordBrier: "درجة براير (الأقل = معايرة أفضل)",
+    trackRecordScored: "مُقيَّمة",
+    scatterTitle: "المشاعر مقابل العائد",
+    scatterNote: "المشاعر المالية الأسبوعية للأحداث الموجّهة مقابل العائد الأسبوعي المحقق. الارتباط الضعيف هو النتيجة الصادقة المتوقعة.",
+    scatterNotEnough: "لا توجد بيانات أحداث وأسعار متداخلة كافية بعد.",
+    markerLegend: "▲▼ أحداث إخبارية موجّهة إلى هذا المؤشر",
     rangeLabel: "الفترة",
     range1d: "يوم",
     range1w: "أسبوع",

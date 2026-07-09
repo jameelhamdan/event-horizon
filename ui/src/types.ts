@@ -47,8 +47,10 @@ export interface EventSummary {
   source_codes: string[]
   source_names: string[]
   started_at: string
+  latest_article_at?: string | null
   topics?: Record<string, number>
   topic_slugs?: string[]
+  avg_sentiment?: number | null
   avg_finbert_sentiment?: number | null
   affected_indicators?: AffectedIndicator[]
 }
@@ -73,6 +75,8 @@ export interface EventFilters {
   limit?: number
   bbox?: string
   topic?: string
+  /** Only events routed to this market symbol (affected_indicators membership). */
+  symbol?: string
 }
 
 export interface EventsResponse {
@@ -226,6 +230,7 @@ export type ForecastDirection = "up" | "down" | "neutral"
 
 // Model-backed, event-fused forecast (one per symbol + horizon).
 export interface Forecast {
+  id?: string
   symbol: string
   stream_key: string
   generated_at: string
@@ -260,9 +265,19 @@ export interface ForecastAccuracy {
   brier: number | null
 }
 
+export interface ForecastAccuracyWeek {
+  week: string
+  scored: number
+  accuracy: number | null
+}
+
 export interface ForecastAccuracyResponse {
   results: ForecastAccuracy[]
   count: number
+  /** Weekly accuracy series per horizon (key = horizon days as string); present with history=1. */
+  history?: Record<string, ForecastAccuracyWeek[]>
+  /** Last N scored forecasts (predicted vs realized); present with recent=N. */
+  recent?: Forecast[]
 }
 
 export interface PriceBar {

@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react"
 import {
-  ResponsiveContainer, ComposedChart, Area, Line, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
+  ResponsiveContainer, ComposedChart, Area, Line, Bar, Scatter, XAxis, YAxis, Tooltip, CartesianGrid,
 } from "recharts"
 import { fetchPriceHistory, fetchPriceBars } from "../../api/streams"
 import { useLanguage } from "../../contexts/LanguageContext"
-import type { StreamKey, PricePoint } from "../../types"
+import { eventTime, symbolWeight } from "../../lib/pressure"
+import type { StreamKey, PricePoint, EventSummary } from "../../types"
 
 function fmtValue(v: number, streamKey: StreamKey): string {
   if (streamKey === "forex") return v.toFixed(4)
@@ -21,12 +22,72 @@ interface SymbolDetailProps {
   name?: string
   /** Page-level range in calendar days back from today. */
   days: number
+  /** Routed events for this symbol — rendered as ▲▼ markers on the price line. */
+  events?: EventSummary[]
+}
+
+interface EventMarker {
+  t: number
+  value: number
+  weight: number
+  title: string
+  size: number
+}
+
+// TradingView-style news flags: each routed event pinned on the price line at its event time,
+// green ▲ / red ▼ by weight sign, sized by |weight| × intensity. Capped to the strongest 40.
+function buildMarkers(events: EventSummary[], symbol: string, data: PricePoint[], lang: string): EventMarker[] {
+  if (data.length === 0) return []
+  const t0 = data[0].t
+  const t1 = data[data.length - 1].t
+  const markers: EventMarker[] = []
+  for (const e of events) {
+    const weight = symbolWeight(e, symbol)
+    if (weight === 0) continue
+    const t = eventTime(e)
+    if (t < t0 || t > t1) continue
+    // Price at the nearest plotted point, so the marker sits on the line.
+    let lo = 0
+    let hi = data.length - 1
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1
+      if (data[mid].t <= t) lo = mid
+      else hi = mid
+    }
+    const nearest = Math.abs(data[lo].t - t) <= Math.abs(data[hi].t - t) ? data[lo] : data[hi]
+    const intensity = e.avg_intensity ?? 0.5
+    markers.push({
+      t,
+      value: nearest.value,
+      weight,
+      title: (lang === "ar" && e.title_ar ? e.title_ar : e.title) + ` (${weight >= 0 ? "+" : ""}${weight.toFixed(2)})`,
+      size: 4 + Math.min(Math.abs(weight) * (0.5 + intensity), 1.5) * 4,
+    })
+  }
+  return markers.sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight)).slice(0, 40)
+}
+
+function MarkerShape(props: { cx?: number; cy?: number; payload?: EventMarker }) {
+  const { cx, cy, payload } = props
+  if (cx == null || cy == null || !payload) return <g />
+  const s = payload.size
+  const up = payload.weight >= 0
+  // Triangle above the line pointing up (green) or below pointing down (red).
+  const y = up ? cy - 6 : cy + 6
+  const points = up
+    ? `${cx},${y - s} ${cx - s * 0.9},${y} ${cx + s * 0.9},${y}`
+    : `${cx},${y + s} ${cx - s * 0.9},${y} ${cx + s * 0.9},${y}`
+  return (
+    <polygon points={points} fill={up ? "#52c8a0" : "#e05252"} fillOpacity={0.85} stroke="#0f0f13" strokeWidth={0.5}>
+      <title>{payload.title}</title>
+    </polygon>
+  )
 }
 
 // Master-detail chart driven by the page range selector. Short ranges (≤7d) use the high-frequency
 // intraday PriceTick history; longer ranges use the daily PriceBar substrate (panel symbols). Each
 // source falls back to the other when empty, so non-panel symbols still render whatever exists.
-export default function SymbolDetail({ symbol, streamKey, name, days }: SymbolDetailProps) {
+export default function SymbolDetail({ symbol, streamKey, name, days, events = [] }: SymbolDetailProps) {
   const { t, lang } = useLanguage()
   const [data, setData] = useState<PricePoint[]>([])
   const [resolvedName, setResolvedName] = useState<string | undefined>(name)
@@ -92,6 +153,7 @@ export default function SymbolDetail({ symbol, streamKey, name, days }: SymbolDe
   const lineColor = up ? "#52c8a0" : "#e05252"
   const hasVolume = data.some((p) => p.volume != null && p.volume > 0)
   const gradientId = `grad-${symbol.replace(/[^a-zA-Z0-9]/g, "")}`
+  const markers = useMemo(() => buildMarkers(events, symbol, data, lang), [events, symbol, data, lang])
 
   return (
     <section className="flex min-w-0 flex-col overflow-hidden rounded-lg border border-app-border bg-app-surface">
@@ -136,7 +198,7 @@ export default function SymbolDetail({ symbol, streamKey, name, days }: SymbolDe
           <div className="flex h-[340px] items-center justify-center text-xs text-app-text-muted">{t.priceNoHistory}</div>
         ) : (
           <ResponsiveContainer width="100%" height={340}>
-            <ComposedChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 8 }}>
+            <ComposedChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 8 }} syncId="market-detail" syncMethod="value">
               <defs>
                 <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor={lineColor} stopOpacity={0.25} />
@@ -163,6 +225,12 @@ export default function SymbolDetail({ symbol, streamKey, name, days }: SymbolDe
                 yAxisId="price" type="monotone" dataKey="value" stroke={lineColor}
                 strokeWidth={1.75} dot={false} isAnimationActive={false}
               />
+              {markers.length > 0 && (
+                <Scatter
+                  yAxisId="price" data={markers} dataKey="value"
+                  shape={MarkerShape} isAnimationActive={false}
+                />
+              )}
               <Tooltip
                 contentStyle={{ background: "#0f0f13", border: "1px solid #2a2a35", borderRadius: 6, fontSize: "0.72rem" }}
                 labelStyle={{ color: "#888899" }}
@@ -176,6 +244,9 @@ export default function SymbolDetail({ symbol, streamKey, name, days }: SymbolDe
               />
             </ComposedChart>
           </ResponsiveContainer>
+        )}
+        {markers.length > 0 && (
+          <p className="mt-1 px-1 text-[0.65rem] text-app-text-muted">{t.markerLegend}</p>
         )}
       </div>
     </section>
