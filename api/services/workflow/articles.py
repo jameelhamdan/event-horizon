@@ -202,8 +202,7 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
         # in stage_status. Surface the real outcome so it shows up in
         # pipeline_coverage()'s error_sample instead of hiding degraded data.
         mark_stage(article, 'process', ok=features.llm_error is None, error=features.llm_error)
-        mark_stage(article, 'geocode', ok=bool(features.location),
-                   error=None if features.location else 'no location resolved')
+        mark_stage(article, 'geocode', ok=bool(features.location), error=None if features.location else 'no location resolved')
 
         update_fields = [
             'entities', 'sentiment', 'finbert_sentiment', 'location', 'latitude', 'longitude',

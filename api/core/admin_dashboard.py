@@ -445,7 +445,7 @@ def _coverage():
 
 # ── Activity-per-month chart (events by category + total articles) ─────────
 
-_CHART_MONTHS_BACK = 12 * 5  # 5 years
+_CHART_MONTHS_BACK = 12 * 10  # 10 years
 
 # EventCategory value -> swatch color. Legacy 'protest'/'crime' get colors too
 # since old data still carries them (see EventCategory in core/models.py).
@@ -487,7 +487,7 @@ def _month_buckets(months_back):
 
 def _activity_chart():
     """Events per month (stacked by category) plus articles per month, for
-    the last 5 years — exact counts of what's actually in the database.
+    the last 10 years — exact counts of what's actually in the database.
     Volume is bounded upstream by importance-score retention in the pipeline
     (see ``services.tasks.cap_monthly_article_importance_task``), not by
     sampling or slicing here.
@@ -547,17 +547,23 @@ def _activity_chart():
         'articles_total': sum(article_counts),
         'articles_color': _ARTICLES_LINE_COLOR,
         'series': series,
-        'svg': _render_activity_chart_svg(labels, categories, series, article_counts),
+        'svg': _render_activity_chart_svg(labels, categories, series, article_counts, category_labels),
     }
 
 
-def _render_activity_chart_svg(labels, categories, series, article_counts):
+def _render_activity_chart_svg(labels, categories, series, article_counts, category_labels):
     """Server-rendered stacked-area SVG with an overlaid articles line on a
     secondary (right) axis — no JS charting library exists anywhere in this
     repo (the React frontend's Recharts dep doesn't reach the Django admin),
     so this draws the chart directly in Python rather than pulling in a new
     client-side dependency for one graph. Events and articles differ by
-    orders of magnitude in volume, hence the separate axes."""
+    orders of magnitude in volume, hence the separate axes.
+
+    Per-month hover: a transparent full-height rect per bucket carries the
+    month's breakdown in a data-tooltip attribute; the tiny JS snippet in
+    dashboard.html just positions a div from that attribute on mousemove —
+    still no charting library, just enough JS to place a tooltip.
+    """
     import math
     from django.utils.html import escape
     from django.utils.safestring import mark_safe
@@ -622,6 +628,25 @@ def _render_activity_chart_svg(labels, categories, series, article_counts):
         parts.append(
             f'<text x="{px(i):.1f}" y="{_CHART_H - 6}" class="ops-chart-axis-label" '
             f'text-anchor="middle">{escape(labels[i])}</text>'
+        )
+
+    # Per-month hover targets (drawn last so they sit on top) — one
+    # transparent rect per bucket, spanning the midpoints to its neighbors,
+    # each carrying the month's breakdown as plain text for the tooltip JS.
+    plot_left, plot_right = _CHART_PAD_L, _CHART_W - _CHART_PAD_R
+    for i in range(n):
+        x_left = plot_left if i == 0 else (px(i - 1) + px(i)) / 2
+        x_right = plot_right if i == n - 1 else (px(i) + px(i + 1)) / 2
+        lines = [labels[i]]
+        for c in categories:
+            v = series[c][i]
+            if v:
+                lines.append(f'{category_labels[c]}: {v}')
+        lines.append(f'Articles: {article_counts[i]}')
+        tooltip = escape('\n'.join(lines))
+        parts.append(
+            f'<rect x="{x_left:.1f}" y="{_CHART_PAD_T}" width="{(x_right - x_left):.1f}" '
+            f'height="{plot_h:.1f}" class="ops-chart-hover" data-tooltip="{tooltip}"/>'
         )
 
     parts.append('</svg>')

@@ -325,6 +325,16 @@ class OllamaLLMService(BaseLLMService):
                     'messages': messages,
                     'stream': False,
                     'think': kwargs.get('think', False),
+                    # Without this Ollama defaults to keeping the model resident
+                    # for 5 minutes after the last call. LLM_ROUTES has three
+                    # tiers (ollama_small/medium/large); if a cloud-provider
+                    # outage pushes several roles onto Ollama at once, all three
+                    # multi-GB models can end up loaded simultaneously within
+                    # that window. A short keep_alive bounds how long an idle
+                    # tier stays resident — it does NOT bound concurrent peak
+                    # (that needs OLLAMA_MAX_LOADED_MODELS set on the Ollama
+                    # server itself; this app has no server-side control over it).
+                    'keep_alive': '30s',
                     **(({'options': options}) if options else {}),
                 },
                 timeout=self._timeout,

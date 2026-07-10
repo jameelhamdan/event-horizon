@@ -352,9 +352,12 @@
 
   {# ── Activity over time ──────────────────────────────────────────── #}
   <section class="ops-card">
-    <h2>Activity over time <span class="ops-muted" style="font-weight:normal">— events per month by category vs. total articles ingested, last 5 years</span></h2>
+    <h2>Activity over time <span class="ops-muted" style="font-weight:normal">— events per month by category vs. total articles ingested, last 10 years</span></h2>
     {% if activity_chart.labels %}
-    <div class="ops-chart-wrap">{{ activity_chart.svg }}</div>
+    <div class="ops-chart-wrap">
+      {{ activity_chart.svg }}
+      <div class="ops-chart-tooltip"></div>
+    </div>
     <div class="ops-chart-legend">
       {% for c in activity_chart.categories %}
       <span class="ops-chart-legend-item"><i style="background:{{ c.color }}"></i>{{ c.label }} <span class="ops-muted">({{ c.total }})</span></span>
@@ -403,14 +406,49 @@
 .ops-danger-btn { background:#5a2020 !important; border-color:#7a2c2c !important; }
 .ops-danger-btn:hover { background:#7a2c2c !important; }
 .ops-informational { opacity: 0.7; font-style: italic; }
-.ops-chart-wrap { width:100%; }
+.ops-chart-wrap { width:100%; position:relative; }
 .ops-chart-svg { width:100%; height:auto; display:block; }
 .ops-chart-gridline { stroke:#2c3038; stroke-width:1; }
 .ops-chart-axis-label { fill:#888; font-size:10px; }
 .ops-chart-axis-label-r { fill:#a9a9a9; }
+.ops-chart-hover { fill:transparent; }
+.ops-chart-hover:hover { fill:#79aec8; fill-opacity:0.06; }
+.ops-chart-tooltip {
+  position:absolute; display:none; pointer-events:none; z-index:10;
+  background:#12151a; border:1px solid #2c3038; border-radius:4px;
+  padding:6px 8px; font-size:11px; line-height:1.5; color:#ddd;
+  white-space:nowrap; box-shadow:0 2px 6px rgba(0,0,0,.4);
+}
 .ops-chart-legend { display:flex; flex-wrap:wrap; gap:12px 16px; margin-top:10px; font-size:12px; }
 .ops-chart-legend-item { display:flex; align-items:center; gap:6px; }
 .ops-chart-legend-item i { display:inline-block; width:10px; height:10px; border-radius:2px; }
 .ops-chart-legend-line i { border-radius:0; height:2px; }
 </style>
+<script>
+(function () {
+  document.querySelectorAll('.ops-chart-wrap').forEach(function (wrap) {
+    var tip = wrap.querySelector('.ops-chart-tooltip');
+    if (!tip) return;
+    wrap.querySelectorAll('.ops-chart-hover').forEach(function (rect) {
+      rect.addEventListener('mousemove', function (e) {
+        var wrapRect = wrap.getBoundingClientRect();
+        tip.textContent = '';
+        rect.getAttribute('data-tooltip').split('\n').forEach(function (line, i) {
+          if (i > 0) tip.appendChild(document.createElement('br'));
+          tip.appendChild(document.createTextNode(line));
+        });
+        var x = e.clientX - wrapRect.left + 12;
+        var y = e.clientY - wrapRect.top + 12;
+        if (x + 160 > wrapRect.width) x = e.clientX - wrapRect.left - 172;
+        tip.style.left = x + 'px';
+        tip.style.top = y + 'px';
+        tip.style.display = 'block';
+      });
+      rect.addEventListener('mouseleave', function () {
+        tip.style.display = 'none';
+      });
+    });
+  });
+})();
+</script>
 {% endblock %}

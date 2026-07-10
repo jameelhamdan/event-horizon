@@ -68,7 +68,11 @@ services:
   worker-heavy:
     <<: *api-build
     restart: always
-    command: sh -c "celery -A app worker -Q heavy --concurrency=4 --pool=prefork -O fair --max-tasks-per-child=200 -n heavy@%h"
+    # max-memory-per-child (KB) recycles a child once its own RSS crosses ~2.4GB
+    # (above the ~1.5-2GB warm-model baseline, so normal operation never trips
+    # it) — a tighter, per-process complement to max-tasks-per-child that
+    # catches a leak by memory instead of task count.
+    command: sh -c "celery -A app worker -Q heavy --concurrency=4 --pool=prefork -O fair --max-tasks-per-child=200 --max-memory-per-child=2400000 -n heavy@%h"
     environment:
       # Celery's prefork pool forks per-task worker processes — safety default
       # in case anything ever loads an HF tokenizer in the parent (its background
@@ -82,31 +86,53 @@ services:
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
+    # 4 children x ~1.5-2GB warm ML models (MiniLM + FinBERT + NER + MarianMT)
+    # = ~6-8GB baseline; this caps the container well above that so a slow
+    # per-task leak gets OOM-killed (and restarted) before it can pressure the
+    # host, instead of growing unbounded.
+    deploy:
+      resources:
+        limits:
+          memory: 10g
 
   # Fast I/O (fetchers, stream collectors, dispatchers) — 4 workers.
   worker-light:
     <<: *api-build
     restart: always
-    command: sh -c "celery -A app worker -Q default --concurrency=4 --pool=prefork -O fair -n light@%h"
+    command: sh -c "celery -A app worker -Q default --concurrency=4 --pool=prefork -O fair --max-tasks-per-child=500 --max-memory-per-child=600000 -n light@%h"
     depends_on:
       - mongo
       - redis
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
+    # No ML models on this queue (fetch/stream/dispatch I/O only) — small cap.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
 
   # Long one-shot jobs (multi-year backfills, model training) — 1 worker, isolated
   # so a hours-long job never blocks the live pipeline on the heavy queue.
   worker-bulk:
     <<: *api-build
     restart: always
-    command: sh -c "celery -A app worker -Q bulk --concurrency=1 --pool=prefork -O fair -n bulk@%h"
+    # max-memory-per-child is checked between tasks, not mid-task, so it can't
+    # interrupt a single hours-long backfill/training run — it only guards
+    # against a leak accumulating across several sequential bulk jobs.
+    command: sh -c "celery -A app worker -Q bulk --concurrency=1 --pool=prefork -O fair --max-memory-per-child=4000000 -n bulk@%h"
     depends_on:
       - mongo
       - redis
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
+    # Single worker, but jobs (backfills, LightGBM training over the full
+    # symbol panel) can legitimately use several GB transiently.
+    deploy:
+      resources:
+        limits:
+          memory: 6g
 
   # Celery ground truth — live worker/task state straight from broker events
   # (CELERY_WORKER_SEND_TASK_EVENTS), independent of TaskRun rows, which a
@@ -121,6 +147,25 @@ services:
     depends_on:
       - redis
     env_file: .env.app
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # Daily forced restart of api + the Celery workers — a backstop against slow
+  # memory growth the per-service `deploy.resources.limits.memory` caps alone
+  # don't prevent from recurring (a container that hits its limit gets
+  # OOM-killed and restarted, but a slow leak just climbs back up between
+  # kills). Restarts by compose-service label via the mounted Docker socket,
+  # so no host cron/systemd access is needed. See deploy/restarter/restart.sh.
+  restarter:
+    build: ./deploy/restarter
+    restart: always
+    environment:
+      - RESTART_HOUR_UTC=4
+      - RESTART_SERVICES=api worker-heavy worker-light worker-bulk
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
   redis:
     image: redis:7-alpine
