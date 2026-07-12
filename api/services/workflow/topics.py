@@ -420,17 +420,28 @@ def retroactive_tag_topic(slug: str, lookback_hours: int = 72) -> int:
         return 0
 
     lookback = timezone.now() - timedelta(hours=lookback_hours)
-    events = list(Event.objects.filter(started_at__gte=lookback))
-    events = [e for e in events if slug not in (e.topic_slugs or [])]
-
-    if not events:
-        logger.info('[topics] retroactive_tag_topic: no events to process for %s', slug)
-        return 0
+    # Stream with .iterator() and load only the fields match()/routing/save touch:
+    # the lookback can span the whole history, so materializing full Event rows
+    # (translations, article_ids, llm_usage, ...) would scale memory with the
+    # collection. The slug-already-present pre-filter is folded into the loop.
+    events = (
+        Event.objects.filter(started_at__gte=lookback)
+        .only(
+            'title', 'location_name', 'topics', 'topic_slugs', 'topics_source',
+            'category', 'sub_categories', 'avg_finbert_sentiment', 'avg_sentiment',
+            'affected_indicators', 'is_routed',
+        )
+        .iterator(chunk_size=2000)
+    )
 
     matcher = TopicMatcher()
     tagged_count = 0
+    scanned = 0
 
     for event in events:
+        scanned += 1
+        if slug in (event.topic_slugs or []):
+            continue
         result = matcher.match(event, [topic])
         if not result:
             continue
@@ -464,7 +475,7 @@ def retroactive_tag_topic(slug: str, lookback_hours: int = 72) -> int:
 
     logger.info(
         '[topics] retroactive_tag_topic(%s) done — %d/%d event(s) tagged',
-        slug, tagged_count, len(events),
+        slug, tagged_count, scanned,
     )
     return tagged_count
 

@@ -12,7 +12,6 @@ back to ``settings.OPENROUTER_MODELS`` when the cache is empty/unreachable.
 
 import json
 import logging
-import os
 import time
 
 import requests
@@ -34,13 +33,17 @@ _PROBE = [{'role': 'user', 'content': 'Reply with exactly the word: OK'}]
 
 
 def _redis():
-    import redis as redis_lib
-    return redis_lib.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379/0'))
+    # Reuse the shared Redis client (services.cache) rather than a second
+    # from_url() with its own config source — keeps one source of truth for the
+    # broker/cache connection. Raw client is fine: we store a plain JSON string.
+    from services.cache import get_redis_client
+    return get_redis_client(write=True)
 
 
 def _keys() -> list[str]:
     from django.conf import settings
-    return [k.strip() for k in (settings.OPENROUTER_API_KEYS or '').split(',') if k.strip()]
+    from services.llm import _parse_csv
+    return _parse_csv(settings.OPENROUTER_API_KEYS or '')
 
 
 def _is_free_text(model: dict) -> bool:

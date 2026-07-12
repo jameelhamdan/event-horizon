@@ -96,15 +96,17 @@ def aggregate_events(
             hours, min_articles, window['published_on__gte'],
         )
 
-    # defer('content'): the week-wide window can be thousands of rows and only
-    # each sub-cluster's representative article's content is ever read (a
-    # deferred-field load per event — cheap next to carrying every body around).
+    # defer('content', 'entities'): the week-wide window can be tens of thousands
+    # of rows. Only the representative article's content is ever read (a deferred
+    # per-event load, cheap next to carrying every body around), and entities (NER
+    # JSON) is never read here at all — deferring both keeps the biggest recurring
+    # in-memory load off the two heaviest Article fields.
     articles = list(
         Article.objects.filter(
             processed_on__isnull=False,
             location__isnull=False,
             **window,
-        ).exclude(location='').defer('content')
+        ).exclude(location='').defer('content', 'entities')
     )
     logger.info('[aggregate] fetched %d located article(s) in window', len(articles))
 
@@ -173,6 +175,10 @@ def aggregate_events(
 
     created_count = updated_count = 0
     events_to_update: dict = {}
+    # bulk_update field list, derived from common_fields on first update so it
+    # can't drift from what the update branch actually writes (+ the two fields
+    # handled specially there). Captured in-loop; only read when non-empty.
+    update_field_names: list[str] = []
 
     for gi, group in enumerate(sub_groups, start=1):
         if gi == 1 or gi % 25 == 0:
@@ -245,6 +251,29 @@ def aggregate_events(
                 'location_name': lang_location,
             }
 
+        # Fields written on BOTH create and update, defined once so the two paths
+        # (and the bulk_update field list below) can't silently drift apart.
+        # Excluded on purpose: content/location_name/started_at (set-once, only on
+        # create) and translations/updated_on (update merges rather than replaces —
+        # handled explicitly in each branch).
+        common_fields = {
+            'title': representative.title,
+            'category': category,
+            'latitude': lat,
+            'longitude': lng,
+            'latest_article_at': latest_article_at,
+            'article_count': len(group),
+            'avg_sentiment': avg_sentiment,
+            'avg_finbert_sentiment': avg_finbert_sentiment,
+            'avg_intensity': avg_intensity,
+            'article_ids': article_ids,
+            'source_codes': source_codes,
+            'sub_categories': sub_categories,
+            'affected_indicators': affected_indicators,
+            'is_routed': bool(affected_indicators),
+            'llm_usage': llm_usage,
+        }
+
         # Upsert on location_name + calendar day. day_start/day_end kept only for
         # the create-race fallback query below (MongoDB backend does not support
         # __date lookups, so an explicit range is needed there).
@@ -258,25 +287,11 @@ def aggregate_events(
         if event is None:
             try:
                 event = Event.objects.create(
-                    title=representative.title,
+                    **common_fields,
                     content=representative.content,
-                    category=category,
                     location_name=location,
-                    latitude=lat,
-                    longitude=lng,
                     started_at=started_at,
-                    latest_article_at=latest_article_at,
-                    article_count=len(group),
-                    avg_sentiment=avg_sentiment,
-                    avg_finbert_sentiment=avg_finbert_sentiment,
-                    avg_intensity=avg_intensity,
-                    article_ids=article_ids,
-                    source_codes=source_codes,
-                    sub_categories=sub_categories,
-                    affected_indicators=affected_indicators,
-                    is_routed=bool(affected_indicators),
                     translations=event_translations,
-                    llm_usage=llm_usage,
                 )
                 created = True
                 created_count += 1
@@ -307,23 +322,12 @@ def aggregate_events(
                     )
 
         if not created and event is not None:
-            event.title = representative.title
-            event.category = category
-            event.latitude = lat
-            event.longitude = lng
-            event.latest_article_at = latest_article_at
-            event.article_count = len(group)
-            event.avg_sentiment = avg_sentiment
-            event.avg_finbert_sentiment = avg_finbert_sentiment
-            event.avg_intensity = avg_intensity
-            event.article_ids = article_ids
-            event.source_codes = source_codes
-            event.sub_categories = sub_categories
-            event.affected_indicators = affected_indicators
-            event.is_routed = bool(affected_indicators)
+            for field, value in common_fields.items():
+                setattr(event, field, value)
             event.translations = {**(event.translations or {}), **event_translations}
-            event.llm_usage = llm_usage
             event.updated_on = timezone.now()  # bulk_update below bypasses auto_now
+            if not update_field_names:
+                update_field_names = list(common_fields) + ['translations', 'updated_on']
             events_to_update[event.pk] = event
             updated_count += 1
             logger.info(
@@ -332,12 +336,9 @@ def aggregate_events(
             )
 
     if events_to_update:
-        Event.objects.bulk_update(list(events_to_update.values()), [
-            'title', 'category', 'latitude', 'longitude', 'latest_article_at',
-            'article_count', 'avg_sentiment', 'avg_finbert_sentiment', 'avg_intensity',
-            'article_ids', 'source_codes', 'sub_categories', 'affected_indicators',
-            'is_routed', 'translations', 'llm_usage', 'updated_on',
-        ], batch_size=500)
+        Event.objects.bulk_update(
+            list(events_to_update.values()), update_field_names, batch_size=500,
+        )
 
     logger.info(
         '[aggregate] run complete: created=%d updated=%d in %.2fs total',

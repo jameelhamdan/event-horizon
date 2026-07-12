@@ -28,7 +28,7 @@ _SUB_CATEGORIES: dict[str, set[str]] = {
 # classification, geo naming, severity rating). Entities and sentiment are handled
 # locally (services.processing.ner, services.processing.vader — see cleaner.py);
 # Arabic is generated locally too, from the English fields below by
-# services.translation (MarianMT) — see _add_arabic_translations.
+# services.translation (MarianMT) — see add_arabic_translations.
 _OBJECT_SCHEMA = """\
 {
   "category": conflict|disaster|economic|political|health|general,
@@ -279,7 +279,7 @@ class ArticleAnalyzer:
             for i in range(len(texts))
         ]
         if translate:
-            self._add_arabic_translations(results)
+            self.add_arabic_translations(results)
         return results
 
     @staticmethod
@@ -304,10 +304,14 @@ class ArticleAnalyzer:
         return shares
 
     @staticmethod
-    def _add_arabic_translations(results: list[ArticleAnalysis]) -> None:
+    def add_arabic_translations(results: list[ArticleAnalysis]) -> None:
         """Add a locally-generated ('ar') translation block to each result's
         translations dict, derived from the LLM's ('en') block. Batches every
         field across every result into a single translation-model call.
+
+        Public because ArticleCleaner drives it directly: it runs one EN-only
+        analyze_batch over a whole chunk, then adds Arabic only for the non-lite
+        subset (see services.processing.cleaner.ArticleCleaner.clean_batch).
         """
         from services.translation import translate_en_ar_batch
 

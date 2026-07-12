@@ -41,3 +41,33 @@ def mark_stage(record, stage: str, ok: bool, error: str | None = None) -> dict:
     }
     record.stage_status = status
     return status
+
+
+def map_concurrent(items, fn, *, max_workers: int = 8, default=None) -> list:
+    """Apply ``fn`` to each item on a bounded thread pool, returning a list of
+    results aligned 1:1 with ``items`` (input order preserved).
+
+    Any per-item exception is swallowed and yields ``default`` in that slot — for
+    best-effort I/O fan-out (e.g. HTTP fetches) where one failure must not sink
+    the whole batch. Returns ``[]`` for empty input without spawning a pool.
+
+    ``fn`` runs on worker threads, so it must be thread-safe and must NOT touch
+    the Django ORM — do DB work in the calling thread with the returned results.
+    Pass an immutable ``default`` (None, a tuple): the same object fills every
+    failed slot.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    items = list(items)
+    if not items:
+        return []
+    results = [default] * len(items)
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(items))) as pool:
+        futures = {pool.submit(fn, item): i for i, item in enumerate(items)}
+        for future in futures:
+            i = futures[future]
+            try:
+                results[i] = future.result()
+            except Exception:
+                results[i] = default
+    return results

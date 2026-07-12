@@ -69,7 +69,7 @@ class ArticleCleaner:
         analyses = self._analyzer.analyze_batch(texts, translate=False)
         full_idxs = [i for i, lf in enumerate(lite_flags) if not lf]
         if full_idxs:
-            self._analyzer._add_arabic_translations([analyses[i] for i in full_idxs])
+            self._analyzer.add_arabic_translations([analyses[i] for i in full_idxs])
 
         results = []
         for doc, finbert_sentiment, entities, sentiment, analysis in zip(

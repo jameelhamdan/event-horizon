@@ -289,7 +289,12 @@ GROQ_MODEL = 'llama-3.1-8b-instant'
 # NB: very low request quota (5 req/min, 150/hour, 2,400/day; 30k tokens/min) —
 # use as a fast *secondary*, or primary only for low-volume roles (newsletter).
 CEREBRAS_API_KEYS = config('CEREBRAS_API_KEYS', default='')
-CEREBRAS_MODEL = 'gemma-4-31b'
+# 'gemma-4-31b' was not a model Cerebras serves (Gemma is Google's; Cerebras has
+# no gemma-4/31b), so the cerebras leg silently failed over on every call and
+# never contributed. llama-3.3-70b is a generally-available Cerebras model; keep
+# it env-overridable so the operator can swap it without a redeploy when the
+# served roster changes. Confirm with: manage.py test_llm --role scoring.
+CEREBRAS_MODEL = config('CEREBRAS_MODEL', default='llama-3.3-70b')
 
 # Per-request LLM timeout. Cloud providers (Groq/Cerebras) are fast-inference
 # chips — a stuck/degraded request should fail and fall back quickly rather

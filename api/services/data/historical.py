@@ -62,7 +62,6 @@ mid-recursion through a sitemap index, so one dead source can't burn the
 whole task's time budget one candidate URL at a time.
 """
 import datetime
-import html as _html
 import logging
 import re
 import time
@@ -75,6 +74,17 @@ import requests
 
 from services.cache import Blocklist, Counter, key_backfill_empty_streak, key_backfill_source_block
 from services.data.base import ArticleDatum, ClientServiceException
+# Body/title hydration lives in services.data.bodies; re-exported here so existing
+# importers (services.data.wayback, tests) keep their historical.* import paths.
+from services.data.bodies import (  # noqa: F401
+    HTTP_HEADERS as _HTTP_HEADERS,
+    HTTP_TIMEOUT as _HTTP_TIMEOUT,
+    _extract_title_and_text,
+    fetch_article_body,
+    fetch_article_page,
+    fetch_wayback_page,
+    is_junk_page_title,
+)
 
 if TYPE_CHECKING:
     import core.models
@@ -159,6 +169,14 @@ class DayResult:
         return len(self.saved_ids)
 
 
+@dataclass
+class _PendingSave:
+    """One not-yet-stored article awaiting body hydration + write."""
+    source_code: str
+    source_type: str
+    fields: dict
+
+
 class HistoricalServiceError(ClientServiceException):
     code = 'historical_error'
 
@@ -184,8 +202,6 @@ def iter_days(
 
 _SITEMAP_NS = 'http://www.sitemaps.org/schemas/sitemap/0.9'
 _NEWS_NS = 'http://www.google.com/schemas/sitemap-news/0.9'
-_HTTP_HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; HistoricalBackfiller/1.0)'}
-_HTTP_TIMEOUT = 15
 
 
 def _strip_feed_subdomain(netloc: str) -> str:
@@ -566,6 +582,11 @@ class HistoricalBackfillService:
       backfill_day — ISO date string of the day window the article was found in
     """
 
+    # Concurrency for the live body-fetch phase (_hydrate_bodies). Bounded so a
+    # day-chunk can't open an unreasonable number of sockets at once; the Wayback
+    # fallback stays serial regardless (shared paced client).
+    _HYDRATE_WORKERS = 8
+
     def __init__(
         self,
         sources: list,
@@ -730,7 +751,11 @@ class HistoricalBackfillService:
             key = (datum.pop('_source_code'), datum.pop('_source_type'))
             by_source.setdefault(key, []).append(datum)
 
-        saved_ids = []
+        # Collect the new (not-yet-stored) datums across every source into one
+        # flat list, then hydrate bodies for all of them in a single parallel
+        # pass before writing. Body fetches are the dominant cost and are pure
+        # network wait, so fanning them out is the big backfill speedup.
+        to_save: list[_PendingSave] = []
         for (source_code, source_type), source_batch in by_source.items():
             urls = [d['source_url'] for d in source_batch]
             existing = set(
@@ -742,40 +767,80 @@ class HistoricalBackfillService:
                 if datum['source_url'] in existing:
                     continue
                 fields = dict(datum)
-                past_deadline = deadline is not None and datetime.datetime.now(datetime.timezone.utc) >= deadline
-                if self.fetch_body and not past_deadline:
-                    page_title, body = fetch_article_page(datum['source_url'], source_code=source_code)
-                    if (not body or is_junk_page_title(page_title)) and not (
-                        deadline is not None and datetime.datetime.now(datetime.timezone.utc) >= deadline
-                    ):
-                        # Dead, JS-only, or paywalled (junk <title> = the body
-                        # is paywall chrome too) — the capture closest to the
-                        # backfill day usually still has the real text. The
-                        # fallback is 2 paced Wayback requests, so re-check the
-                        # deadline first (the pre-loop check predates the live
-                        # fetch above).
-                        wb_title, wb_body = fetch_wayback_page(datum['source_url'], around=day_start)
-                        if wb_body:
-                            page_title, body = wb_title, wb_body
-                    if body:
-                        fields['content'] = body
-                    if (page_title and not is_junk_page_title(page_title)
-                            and datum.get('extra_data', {}).get('title_from_slug')):
-                        # Discovery only had a slug/event-sentence title; the
-                        # article page's own <title> is strictly better —
-                        # unless it's paywall/interstitial junk.
-                        fields['title'] = page_title[:200]
                 fields['extra_data'] = {
                     **datum.get('extra_data', {}), 'backfill_day': day_start.date().isoformat(),
                 }
-                article, created = m.Article.objects.get_or_create(
-                    source_code=source_code, source_type=source_type,
-                    source_url=datum['source_url'], defaults=fields,
-                )
-                if created:
-                    saved_ids.append(article.id)
+                to_save.append(_PendingSave(source_code, source_type, fields))
+
+        if self.fetch_body:
+            self._hydrate_bodies(to_save, around=day_start, deadline=deadline)
+
+        saved_ids = []
+        for item in to_save:
+            article, created = m.Article.objects.get_or_create(
+                source_code=item.source_code, source_type=item.source_type,
+                source_url=item.fields['source_url'], defaults=item.fields,
+            )
+            if created:
+                saved_ids.append(article.id)
 
         return saved_ids
+
+    def _hydrate_bodies(
+        self,
+        to_save: list['_PendingSave'],
+        around: datetime.datetime,
+        deadline: datetime.datetime | None,
+    ) -> None:
+        """Fetch each pending article's body/title, mutating its ``fields`` in place.
+
+        Two phases:
+          1. Live publisher fetches, fanned out across a thread pool — these hit
+             many different domains and are pure network wait, so concurrency is
+             the big win over the old one-article-at-a-time loop. Bounded by the
+             per-request HTTP timeout.
+          2. Wayback fallback for pages that came back empty or paywall-junk —
+             kept SERIAL because those requests share one politely-paced client
+             (services.data.wayback); parallelising them would just trip
+             archive.org's rate limits.
+
+        ``deadline`` is honoured between phases and per Wayback item: past it,
+        remaining articles are still saved (title-only) rather than risking
+        Celery's hard kill mid-save.
+        """
+        from services.utils import map_concurrent
+
+        def _past_deadline() -> bool:
+            return deadline is not None and datetime.datetime.now(datetime.timezone.utc) >= deadline
+
+        if not to_save or _past_deadline():
+            return
+
+        # Phase 1 — parallel live fetches.
+        live = map_concurrent(
+            to_save,
+            lambda item: fetch_article_page(item.fields['source_url'], item.source_code),
+            max_workers=self._HYDRATE_WORKERS,
+            default=(None, None),
+        )
+
+        # Phase 2 — serial Wayback fallback + title/body assignment.
+        for i, item in enumerate(to_save):
+            page_title, body = live[i]
+            if (not body or is_junk_page_title(page_title)) and not _past_deadline():
+                # Dead, JS-only, or paywalled (junk <title> = the body is paywall
+                # chrome too) — the capture closest to the backfill day usually
+                # still has the real text.
+                wb_title, wb_body = fetch_wayback_page(item.fields['source_url'], around=around)
+                if wb_body:
+                    page_title, body = wb_title, wb_body
+            if body:
+                item.fields['content'] = body
+            if (page_title and not is_junk_page_title(page_title)
+                    and item.fields.get('extra_data', {}).get('title_from_slug')):
+                # Discovery only had a slug/event-sentence title; the article
+                # page's own <title> is strictly better — unless it's junk.
+                item.fields['title'] = page_title[:200]
 
 
 # ---------------------------------------------------------------------------
@@ -822,117 +887,6 @@ def _parse_sitemap_date(value: str) -> datetime.datetime | None:
     return dt
 
 
-_BODY_MAX_CHARS = 4000
-_SCRIPT_STYLE_RE = re.compile(r'(?is)<(script|style|noscript)[^>]*>.*?</\1>')
-_PARAGRAPH_RE = re.compile(r'(?is)<p[^>]*>(.*?)</p>')
-_TAG_RE = re.compile(r'(?s)<[^>]+>')
-_TITLE_RE = re.compile(r'(?is)<title[^>]*>(.*?)</title>')
-
-# Paywall / interstitial / error page titles — never worth adopting as an
-# article title, and a signal the page body is chrome too (verified live:
-# FT's paywall serves <title>Subscribe to read</title>, which the smoke test
-# turned into Events literally titled "Subscribe to read").
-_JUNK_TITLE_RE = re.compile(
-    r'^\s*(subscribe|sign.?in|log.?in|register)\b'
-    r'|\b(access denied|forbidden|page not found|are you a robot'
-    r'|attention required|just a moment|enable (javascript|cookies)|captcha)\b'
-    r'|^\s*(404|403|401)\b',
-    re.IGNORECASE,
-)
-
-
-def is_junk_page_title(title: str | None) -> bool:
-    return bool(title) and bool(_JUNK_TITLE_RE.search(title))
-
-_WAYBACK_AVAILABILITY_URL = 'https://archive.org/wayback/available'
-
-
-def _extract_title_and_text(page_html: str) -> tuple[str | None, str | None]:
-    """(<title> text, paragraph text capped at _BODY_MAX_CHARS) from raw HTML."""
-    # Cap before regex work: the backreference pattern degrades O(N) per unclosed
-    # <script>/<style> tag; 200 KB is ample for any news article's paragraph text.
-    page_html = page_html[:200_000]
-    title_m = _TITLE_RE.search(page_html)
-    title = _html.unescape(re.sub(r'\s+', ' ', title_m.group(1))).strip() if title_m else None
-    html = _SCRIPT_STYLE_RE.sub(' ', page_html)
-    paragraphs = _PARAGRAPH_RE.findall(html)
-    text = ' '.join(_TAG_RE.sub(' ', p) for p in paragraphs)
-    text = _html.unescape(re.sub(r'\s+', ' ', text)).strip()
-    return title or None, text[:_BODY_MAX_CHARS] or None
-
-
-def fetch_article_page(
-    url: str, source_code: str | None = None, timeout: int = _HTTP_TIMEOUT,
-) -> tuple[str | None, str | None]:
-    """Best-effort (page title, plain-text body) for a historical article URL.
-
-    Backfill candidates arrive title-only (sitemap entries / Wikipedia event
-    sentences); without body text the NLP step can't geocode them, so they'd
-    never aggregate into Events (and never hit the map). This pulls the page
-    and extracts <title> + paragraph text — good enough for geocoding +
-    category. Returns (None, None) on any failure (the caller falls back to
-    the Wayback Machine, then to the discovery title).
-
-    source_code: when given, participates in the same timeout blocklist as sitemap
-    discovery (skipped if already blocked; a Timeout here blocks it too) — a source
-    whose article pages are timing out is treated the same as one whose sitemap is.
-
-    Called inline from HistoricalBackfillService._save_day_batch (one day-window's
-    worth of articles at a time, not fanned out further — see module docstring).
-    """
-    if source_code and _is_source_blocked(source_code):
-        return None, None
-    try:
-        resp = requests.get(url, headers=_HTTP_HEADERS, timeout=timeout)
-        resp.raise_for_status()
-    except requests.Timeout:
-        if source_code:
-            _block_source(source_code, f'article body timeout: {url}')
-        return None, None
-    except requests.RequestException as exc:
-        logger.debug('body fetch failed url=%r: %s', url, exc)
-        return None, None
-    return _extract_title_and_text(resp.text)
-
-
-def fetch_article_body(url: str, source_code: str | None = None, timeout: int = _HTTP_TIMEOUT) -> str | None:
-    """Body-only convenience wrapper around fetch_article_page."""
-    return fetch_article_page(url, source_code=source_code, timeout=timeout)[1]
-
-
-def fetch_wayback_page(
-    url: str, around: datetime.datetime | None = None, timeout: int = _HTTP_TIMEOUT,
-) -> tuple[str | None, str | None]:
-    """(title, body) for *url* from the Wayback Machine capture closest to
-    ``around`` — the fallback when the live page is dead, paywalled, or
-    JS-only (historical cited URLs frequently are).
-
-    Uses the availability API to find the closest capture, then fetches the
-    ``id_`` variant (original HTML, no archive toolbar). Both requests go
-    through services.data.wayback's polite shared client (module-wide pacing,
-    optional proxy) with a single retry each — a backfill flood of dead URLs
-    must not hammer Wayback, and a miss just means the caller saves the
-    article with its discovery title.
-    """
-    from services.data.wayback import _wayback_get
-
-    params = {'url': url}
-    if around is not None:
-        params['timestamp'] = around.strftime('%Y%m%d')
-    resp = _wayback_get(_WAYBACK_AVAILABILITY_URL, params=params, retries=1, timeout=timeout)
-    if resp is None:
-        return None, None
-    try:
-        snapshot = (resp.json().get('archived_snapshots') or {}).get('closest') or {}
-    except ValueError:
-        return None, None
-    if not snapshot.get('available') or not snapshot.get('timestamp'):
-        return None, None
-    archive_url = f'https://web.archive.org/web/{snapshot["timestamp"]}id_/{url}'
-    resp = _wayback_get(archive_url, retries=1, timeout=timeout)
-    if resp is None:
-        return None, None
-    return _extract_title_and_text(resp.text)
 
 
 def _slug_from_url(url: str) -> str:

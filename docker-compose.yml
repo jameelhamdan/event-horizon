@@ -72,7 +72,7 @@ services:
     # (above the ~1.5-2GB warm-model baseline, so normal operation never trips
     # it) — a tighter, per-process complement to max-tasks-per-child that
     # catches a leak by memory instead of task count.
-    command: sh -c "celery -A app worker -Q heavy --concurrency=4 --pool=prefork -O fair --max-tasks-per-child=200 --max-memory-per-child=2400000 -n heavy@%h"
+    command: sh -c "celery -A app worker -Q heavy --concurrency=6 --pool=prefork -O fair --max-tasks-per-child=200 --max-memory-per-child=2400000 -n heavy@%h"
     environment:
       # Celery's prefork pool forks per-task worker processes — safety default
       # in case anything ever loads an HF tokenizer in the parent (its background
@@ -180,10 +180,6 @@ services:
     volumes:
       - /tank/event-horizon/mongo/data:/data/db
       - /tank/event-horizon/mongo/config:/data/configdb
-    deploy:
-      resources:
-        limits:
-          memory: 1g
 
 volumes:
   static_data:

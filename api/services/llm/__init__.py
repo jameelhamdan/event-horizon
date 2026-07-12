@@ -3,6 +3,7 @@ import logging
 import re
 import threading
 import time as _time
+from typing import Callable
 import requests
 from openai import OpenAI
 from django.conf import settings
@@ -195,7 +196,7 @@ class OpenAICompatLLMService(BaseLLMService):
         self,
         base_url: str,
         api_keys: str | list[str],
-        model: str | list[str],
+        model: str | list[str] | Callable[[], list[str]],
         provider_name: str = 'unknown',
     ) -> None:
         if not base_url:
@@ -206,17 +207,36 @@ class OpenAICompatLLMService(BaseLLMService):
         self._base_url = base_url
         self._provider = provider_name
 
-        self._models = _Cycle(
-            [model] if isinstance(model, str) else list(model),
-            redis_key=key_llm_cycle(provider_name, 'models'),
-        )
-        if not self._models:
+        # ``model`` may be a callable (OpenRouter passes ``discovery.get_models``)
+        # so the daily-discovered free-model list is read live on each call rather
+        # than snapshotted at construction — a backend cached in _backend_cache
+        # would otherwise serve a frozen list until the worker process recycled,
+        # nullifying the daily refresh. Static providers pass a str/list and the
+        # callable path is a no-op.
+        self._model_fn = model if callable(model) else None
+        initial = list(model()) if self._model_fn else ([model] if isinstance(model, str) else list(model))
+        self._models = _Cycle(initial, redis_key=key_llm_cycle(provider_name, 'models'))
+        if not self._models and self._model_fn is None:
             raise LLMError('OpenAICompatLLMService requires at least one model')
 
         keys = _parse_csv(api_keys) if isinstance(api_keys, str) else list(api_keys)
         if not keys:
             keys = [_NO_KEY]
         self._keys = _Cycle(keys, redis_key=key_llm_cycle(provider_name, 'keys'))
+
+    def _refresh_models(self) -> None:
+        """Re-read a dynamically-sourced model list (OpenRouter's daily-discovered
+        picks in Redis). No-op for static providers. The _Cycle's Redis rotation
+        counter is keyed by provider, so swapping ``_items`` preserves cross-worker
+        round-robin position (the modulo tolerates a length change)."""
+        if self._model_fn is None:
+            return
+        try:
+            latest = list(self._model_fn() or [])
+        except Exception:
+            return
+        if latest and latest != self._models._items:
+            self._models._items = latest
 
     @property
     def _model(self) -> str:
@@ -248,6 +268,9 @@ class OpenAICompatLLMService(BaseLLMService):
 
         kwargs.pop('think', None)
 
+        self._refresh_models()
+        if not self._models:
+            raise LLMError(f'No models available for provider {self._provider!r}')
         result = self._pick_key_and_models()
         if result is None:
             raise LLMError(
@@ -302,13 +325,20 @@ class OpenAICompatLLMService(BaseLLMService):
 class OllamaLLMService(BaseLLMService):
     """Ollama-backed LLM client. Strips <think>...</think> reasoning blocks."""
 
-    def __init__(self, base_url: str, model: str, timeout: float | None = None) -> None:
+    def __init__(
+        self, base_url: str, model: str, timeout: float | None = None,
+        provider_name: str = 'ollama',
+    ) -> None:
         if not base_url:
             raise LLMError('OllamaLLMService requires a base_url (OLLAMA_BASE_URL)')
         self._base_url = base_url.rstrip('/')
         self._model = model
         self._timeout = float(timeout) if timeout else _OLLAMA_TIMEOUT
-        self._provider = 'ollama'
+        # Route/tier name (ollama_small|medium|large), NOT a bare 'ollama' — so
+        # per-tier call stats + token usage land under the same provider key the
+        # admin dashboard reads (it enumerates providers from LLM_ROUTES, which
+        # only ever names the tiers). Recording under 'ollama' orphaned the stats.
+        self._provider = provider_name
 
     def chat_with_usage(self, messages: list[dict], **kwargs) -> tuple[str, dict]:
         options = {}
@@ -346,11 +376,11 @@ class OllamaLLMService(BaseLLMService):
             if not result:
                 raise LLMError(f'Ollama model {self._model} returned empty content')
             latency = int((_time.monotonic() - t0) * 1000)
-            _record_llm_call('ollama', True, latency)
+            _record_llm_call(self._provider, True, latency)
             prompt_tokens = body.get('prompt_eval_count') or 0
             completion_tokens = body.get('eval_count') or 0
             usage = {
-                'provider': 'ollama',
+                'provider': self._provider,
                 'model': body.get('model') or self._model,
                 'prompt_tokens': prompt_tokens,
                 'completion_tokens': completion_tokens,
@@ -358,14 +388,14 @@ class OllamaLLMService(BaseLLMService):
             }
             return result, usage
         except LLMError:
-            _record_llm_call('ollama', False, int((_time.monotonic() - t0) * 1000))
+            _record_llm_call(self._provider, False, int((_time.monotonic() - t0) * 1000))
             raise
         except requests.HTTPError as e:
-            _record_llm_call('ollama', False, int((_time.monotonic() - t0) * 1000))
+            _record_llm_call(self._provider, False, int((_time.monotonic() - t0) * 1000))
             logger.error('Ollama %s: %s', e.response.status_code, e.response.text[:200])
             raise LLMError(f'Ollama request failed ({e.response.status_code})') from e
         except Exception as e:
-            _record_llm_call('ollama', False, int((_time.monotonic() - t0) * 1000))
+            _record_llm_call(self._provider, False, int((_time.monotonic() - t0) * 1000))
             logger.error('OllamaLLMService error: %s', e)
             raise LLMError(str(e)) from e
 
@@ -402,8 +432,30 @@ class FallbackLLMService(BaseLLMService):
 
 # ── Provider registry ─────────────────────────────────────────────────────────
 
+_specs_cache: dict[str, dict] | None = None
+
+
 def _provider_specs() -> dict[str, dict]:
-    """Provider definitions. Available providers: openrouter, ollama, groq, cerebras."""
+    """Provider definitions, memoized per process. Available providers: openrouter,
+    ollama, groq, cerebras.
+
+    Derived entirely from ``settings`` (static within a process — the same
+    assumption ``_backend_cache`` already bakes in), so it is built once and
+    reused: callers previously rebuilt this whole dict, re-parsing every API-key
+    CSV, on every ``get_llm_service()`` call. The one dynamic value —
+    OpenRouter's discovered model list — is passed as the ``discovery.get_models``
+    callable (read live per LLM call), so caching the dict doesn't freeze it.
+    """
+    global _specs_cache
+    if _specs_cache is not None:
+        return _specs_cache
+    with _backend_lock:
+        if _specs_cache is None:
+            _specs_cache = _build_provider_specs()
+        return _specs_cache
+
+
+def _build_provider_specs() -> dict[str, dict]:
     from services.llm import discovery
 
     # Per-tier Ollama timeouts. Tunable via settings.OLLAMA_TIMEOUTS.
@@ -413,8 +465,11 @@ def _provider_specs() -> dict[str, dict]:
         'openrouter': {
             'base_url': 'https://openrouter.ai/api/v1',
             'api_keys': _parse_csv(getattr(settings, 'OPENROUTER_API_KEYS', '')),
-            # Dynamic free-model list refreshed daily; falls back to OPENROUTER_MODELS.
-            'model': discovery.get_models(),
+            # Pass the accessor (not its result) so the cached backend re-reads the
+            # daily-discovered list live per call; falls back to OPENROUTER_MODELS.
+            # This also drops a per-get_llm_service() Redis GET for every other role,
+            # whose backend never consumed this value anyway.
+            'model': discovery.get_models,
         },
         'ollama':        {'base_url': ollama, 'model': settings.OLLAMA_MODEL_LARGE,  'timeout': ot.get('large')},
         'ollama_small':  {'base_url': ollama, 'model': settings.OLLAMA_MODEL_SMALL,  'timeout': ot.get('small')},
@@ -439,7 +494,9 @@ _backend_lock = threading.Lock()
 
 def _build_backend(name: str, spec: dict) -> BaseLLMService:
     if name.startswith('ollama'):
-        return OllamaLLMService(spec['base_url'], spec['model'], timeout=spec.get('timeout'))
+        return OllamaLLMService(
+            spec['base_url'], spec['model'], timeout=spec.get('timeout'), provider_name=name,
+        )
     return OpenAICompatLLMService(
         spec['base_url'],
         spec['api_keys'],

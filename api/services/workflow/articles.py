@@ -159,17 +159,9 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
     ]
     banner_results: dict[int, str] = {}
     if banner_targets:
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=min(8, len(banner_targets))) as pool:
-            futures = {pool.submit(_fetch_og_image, url): i for i, url in banner_targets}
-            for future in futures:
-                i = futures[future]
-                try:
-                    og = future.result()
-                except Exception:
-                    og = None
-                if og:
-                    banner_results[i] = og
+        from services.utils import map_concurrent
+        ogs = map_concurrent(banner_targets, lambda t: _fetch_og_image(t[1]), max_workers=8)
+        banner_results = {banner_targets[k][0]: og for k, og in enumerate(ogs) if og}
 
     processed = 0
     for i, (article, features, lite) in enumerate(zip(articles, feature_list, lite_flags)):

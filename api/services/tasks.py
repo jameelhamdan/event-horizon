@@ -730,9 +730,17 @@ def _enforce_monthly_importance_cap() -> int:
     if not cap or cap <= 0:
         return 0
 
+    # .iterator(): this scans every Event's article_ids to build the "don't delete
+    # a referenced article" guard set. Streaming avoids holding the full queryset
+    # result cache alongside the set. NOTE: the set still grows with the total
+    # event count — bounding it (scope references to the months being trimmed)
+    # needs a list-membership query the Mongo backend doesn't yet use; tracked
+    # separately.
     referenced_ids = {
         str(article_id)
-        for article_ids in core_models.Event.objects.values_list('article_ids', flat=True)
+        for article_ids in core_models.Event.objects.values_list(
+            'article_ids', flat=True,
+        ).iterator(chunk_size=5000)
         for article_id in (article_ids or [])
     }
 
@@ -813,14 +821,15 @@ def adjust_source_weights_task() -> int:
     if not sources:
         return 0
 
-    # Load all article IDs referenced by recent events once — avoid per-source DB round-trips.
-    event_article_ids_raw = list(
-        core_models.Event.objects.filter(started_at__gte=cutoff)
-        .values_list('article_ids', flat=True)
-    )
+    # Load all article IDs referenced by recent events once — avoid per-source DB
+    # round-trips. .iterator() streams the scan so the full queryset result cache
+    # isn't held alongside the set being built (the window is 30d-bounded, so the
+    # set itself stays modest).
     all_event_article_ids: set[str] = {
         str(aid)
-        for article_ids in event_article_ids_raw
+        for article_ids in core_models.Event.objects.filter(started_at__gte=cutoff)
+        .values_list('article_ids', flat=True)
+        .iterator(chunk_size=5000)
         for aid in (article_ids or [])
     }
 
