@@ -156,6 +156,13 @@ class Article(models.Model):
     # for every unlocated article into Python.
     geo_failed = models.BooleanField(default=False)
 
+    # Set on articles saved by a fetch-only backfill (BACKFILL_LLM_ENABLED=False):
+    # they are fetched + stored but not scored/processed, and the live score/process
+    # pipeline stages skip them (via .exclude(annotation_deferred=True)) so a large
+    # historical backfill doesn't flood the LLM. annotate_deferred_articles_task
+    # scores + processes them later and clears this flag.
+    annotation_deferred = models.BooleanField(default=False)
+
     updated_on = models.DateTimeField(auto_now=True)
     created_on = models.DateTimeField(auto_now_add=True)
     extra_data = models.JSONField(default=dict, blank=True)
@@ -180,6 +187,9 @@ class Article(models.Model):
             models.Index(fields=['processed_on']),
             models.Index(fields=['location']),
             models.Index(fields=['geo_failed']),
+            # annotate_deferred_articles_task selects the (small) deferred set;
+            # the live score/process stages exclude it from their pending queries.
+            models.Index(fields=['annotation_deferred'], name='core_article_annot_defer_idx'),
             # aggregate_events' primary query filters processed_on + published_on range.
             models.Index(fields=['processed_on', 'published_on'], name='core_article_proc_pub_idx'),
             # Dashboard activity chart: month-range filter on published_on, then
@@ -689,6 +699,43 @@ class TaskRun(models.Model):
 
     def __str__(self):
         return f'{self.task_name} [{self.status}] {self.started_at:%Y-%m-%d %H:%M}'
+
+
+class RuntimeConfig(models.Model):
+    """Singleton runtime configuration, editable live from the admin dashboard's
+    Actions section so operators can flip pipeline behaviour without a redeploy or
+    worker restart. Read at execution time (via services/runtime_config.py), so a
+    change takes effect on the next tick / next backfill chunk — including an
+    already-dispatched, in-flight backfill.
+
+    Deliberately a single row: use RuntimeConfig.load() (never construct rows
+    directly) so there is always exactly one to read and mutate.
+    """
+
+    # Master LLM switches. When off, the corresponding pipeline pauses its
+    # LLM-consuming work (the articles simply accumulate as pending and resume
+    # when re-enabled) — see services/stages.py (live) and backfill_day_chunk_task.
+    live_llm_enabled = models.BooleanField(default=True)       # live score/process/geocode stages
+    backfill_llm_enabled = models.BooleanField(default=True)   # historical backfill annotation
+
+    created_on = models.DateTimeField(auto_now_add=True)
+    updated_on = models.DateTimeField(auto_now=True)
+
+    objects = models.Manager()
+
+    @classmethod
+    def load(cls) -> 'RuntimeConfig':
+        """Return the singleton row, creating it (with field defaults) on first use."""
+        obj = cls.objects.order_by('created_on').first()
+        if obj is None:
+            obj = cls.objects.create()
+        return obj
+
+    def __str__(self):
+        return (
+            f'RuntimeConfig(live_llm={self.live_llm_enabled}, '
+            f'backfill_llm={self.backfill_llm_enabled})'
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -560,6 +560,23 @@ class TaskRunAdmin(admin.ModelAdmin):
         self.message_user(request, f"Cancel requested for {cancelled} task(s).")
 
 
+@admin.register(models.RuntimeConfig)
+class RuntimeConfigAdmin(admin.ModelAdmin):
+    """Singleton runtime config (LLM master switches). Normally toggled from the
+    operations dashboard's Actions section; also editable here for audit/direct
+    access. Adding a second row is blocked — RuntimeConfig.load() reads the
+    oldest, so extra rows would be ignored and just cause confusion."""
+
+    list_display = ["__str__", "live_llm_enabled", "backfill_llm_enabled", "updated_on"]
+    readonly_fields = ["created_on", "updated_on"]
+
+    def has_add_permission(self, request):
+        return not models.RuntimeConfig.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(models.StaticPoint)
 class StaticPointAdmin(admin.ModelAdmin):
     list_display = ["code", "point_type", "name", "country", "country_code", "is_active"]

@@ -85,6 +85,10 @@ def _handle_action(request):
             _ok(request, 'Article backfill enqueued (weighted per-source, all sources).')
         elif action == 'backfill_articles_until':
             _handle_backfill_until(request)
+        elif action == 'annotate_deferred':
+            limit = _int_or(request.POST.get('limit'), 2000)
+            enqueue(T.annotate_deferred_articles_task, limit=limit, queue='bulk', job_timeout=-1)
+            _ok(request, f'Deferred-article annotation enqueued (up to {limit}; re-run until remaining=0).')
         elif action == 'retrain_forecast':
             enqueue(T.train_forecast_model_task, queue='bulk', job_timeout=-1)
             enqueue(T.run_forecast_task, queue='bulk', job_timeout=-1)
@@ -94,6 +98,8 @@ def _handle_action(request):
             _ok(request, 'First-load bootstrap re-triggered (force).')
         elif action == 'reprocess':
             _handle_reprocess(request)
+        elif action == 'set_llm_flag':
+            _handle_set_llm_flag(request)
         elif action == 'cancel_job':
             _handle_cancel(request)
         else:
@@ -118,6 +124,24 @@ def _handle_reprocess(request):
         return
     enqueue(T.dispatch_stage_task, stage, queue='default')
     _ok(request, f'Stage "{stage}" dispatch enqueued.')
+
+
+def _handle_set_llm_flag(request):
+    """Flip a live LLM master switch (RuntimeConfig) — 'live' or 'backfill'.
+
+    Takes effect on the next tick / next backfill chunk (services stages and
+    backfill_day_chunk_task read RuntimeConfig at execution time), including an
+    already-dispatched, in-flight backfill — no restart."""
+    from services.runtime_config import set_llm_flag
+
+    flag = request.POST.get('flag', '')
+    enabled = request.POST.get('enabled', '').lower() == 'true'
+    try:
+        label = set_llm_flag(flag, enabled)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+        return
+    _ok(request, f'{label} LLM {"enabled" if enabled else "disabled"}.')
 
 
 def _handle_backfill_until(request):
@@ -250,6 +274,13 @@ def _ok(request, msg):
     messages.success(request, msg)
 
 
+def _int_or(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 # ── Data gathering ───────────────────────────────────────────────────────────
 
 def _upcoming():
@@ -347,6 +378,16 @@ def _health_status():
         }
         for name, info in (report.get('stages') or {}).items()
     ]
+    providers = [
+        {
+            'name': name,
+            'err_total': info.get('err_total'),
+            'last_ok': info.get('last_ok'),
+            'last_err': info.get('last_err'),
+            'ok': info.get('ok', False),
+        }
+        for name, info in (report.get('providers') or {}).items()
+    ]
     return {
         'available': True,
         'at': at,
@@ -354,6 +395,7 @@ def _health_status():
         'freshness': freshness,
         'current_topics': report.get('current_topics'),
         'stages': stages,
+        'providers': providers,
     }
 
 
@@ -441,6 +483,12 @@ def _llm_status():
 def _coverage():
     from services.workflow import pipeline_coverage
     return pipeline_coverage()
+
+
+def _llm_flags():
+    """Current live/backfill LLM master-switch states for the Actions toggles."""
+    from services.runtime_config import llm_flags
+    return llm_flags()
 
 
 # ── Activity-per-month chart (events by category + total articles) ─────────
@@ -668,6 +716,7 @@ def dashboard_view(request):
         'coverage': _coverage,
         'forecast': _forecast_status,
         'llm_status': _llm_status,
+        'llm_flags': _llm_flags,
         'activity_chart': _activity_chart,
     }
     from concurrent.futures import ThreadPoolExecutor

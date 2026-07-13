@@ -174,12 +174,30 @@ services:
   mongo:
     image: mongo:8.2
     restart: always
+    # mongod auto-sizes its WiredTiger cache from *host* RAM (~50% of total)
+    # unless told otherwise. On this 30GB shared box, with no container memory
+    # limit, that meant a ~15GB cache target — mongod grew toward it until the
+    # kernel OOM-killed it, and `restart: always` looped that every ~30s (1600+
+    # unclean restarts in 13h). Two guards, both required:
+    #   1. Cap the container so a runaway mongod can't starve the host. 4g is
+    #      conservative but comfortably covers the working set for this dataset
+    #      alongside worker-heavy (10g), llm-api/ollama, and ~20 other containers.
+    #   2. Size the WiredTiger cache to fit *inside* that cap rather than the
+    #      host — Mongo's own guidance is ~50% of (RAM − 1GB) → 1.5GB here,
+    #      leaving ~2.5GB headroom for connections, journal, and other mongod
+    #      overhead. Host auto-detection ignores the cgroup limit, so this must
+    #      be set explicitly.
+    command: mongod --wiredTigerCacheSizeGB 1.5
     ports:
       - "27017:27017"
     env_file: .env.db
     volumes:
       - /tank/event-horizon/mongo/data:/data/db
       - /tank/event-horizon/mongo/config:/data/configdb
+    deploy:
+      resources:
+        limits:
+          memory: 4g
 
 volumes:
   static_data:

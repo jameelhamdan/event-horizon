@@ -322,6 +322,87 @@ class OpenAICompatLLMService(BaseLLMService):
         raise LLMError(f'OpenAICompatLLMService error: {last_error}') from last_error
 
 
+# ── Ollama concurrency guard ──────────────────────────────────────────────────
+
+class _OllamaSlots:
+    """Cross-worker cap on concurrent Ollama requests.
+
+    Ollama here is CPU-only (OLLAMA_NUM_PARALLEL=1) and serves one generation at
+    a time, but worker-heavy's prefork processes can each fall back to it at
+    once. This bounds concurrency to ``size`` slots shared across all workers via
+    Redis (one key per slot, ``SET NX EX`` — self-healing: a crashed holder's
+    slot frees when its TTL lapses). ``acquire()`` waits up to ``acquire_timeout``
+    for a free slot, then returns None so the caller can *fast-reject* rather than
+    queue behind Ollama's own internal queue and burn the full read timeout.
+
+    Falls back to a per-process ``threading.Semaphore`` when Redis is unavailable
+    (local dev) — imperfect across processes, but the prod path always has Redis.
+    """
+
+    def __init__(self, size: int) -> None:
+        self._size = max(1, size)
+        self._sem = threading.Semaphore(self._size)
+
+    @staticmethod
+    def _slot_key(i: int) -> str:
+        return f'llm:ollama:slot:{i}'
+
+    def _redis(self):
+        try:
+            from services.cache import get_redis_client
+            return get_redis_client(write=True)
+        except Exception:
+            return None
+
+    def acquire(self, acquire_timeout: float, slot_ttl: int) -> object | None:
+        """Return a release token (slot index or the local semaphore), or None if
+        no slot became free within ``acquire_timeout``."""
+        rc = self._redis()
+        deadline = _time.monotonic() + max(0.0, acquire_timeout)
+        if rc is not None:
+            token = f'{_time.time()}'
+            while True:
+                for i in range(self._size):
+                    try:
+                        if rc.set(self._slot_key(i), token, nx=True, ex=slot_ttl):
+                            return i
+                    except Exception:
+                        return self._acquire_local(acquire_timeout)
+                if _time.monotonic() >= deadline:
+                    return None
+                _time.sleep(0.1)
+        return self._acquire_local(acquire_timeout)
+
+    def _acquire_local(self, acquire_timeout: float):
+        return self._sem if self._sem.acquire(timeout=max(0.0, acquire_timeout)) else None
+
+    def release(self, token: object) -> None:
+        if token is None:
+            return
+        if token is self._sem:
+            self._sem.release()
+            return
+        rc = self._redis()
+        if rc is not None:
+            try:
+                rc.delete(self._slot_key(int(token)))
+            except Exception:
+                pass
+
+
+_ollama_slots: _OllamaSlots | None = None
+
+
+def _get_ollama_slots() -> _OllamaSlots:
+    global _ollama_slots
+    if _ollama_slots is None:
+        with _backend_lock:
+            if _ollama_slots is None:
+                size = int(getattr(settings, 'OLLAMA_MAX_CONCURRENCY', 1))
+                _ollama_slots = _OllamaSlots(size)
+    return _ollama_slots
+
+
 class OllamaLLMService(BaseLLMService):
     """Ollama-backed LLM client. Strips <think>...</think> reasoning blocks."""
 
@@ -347,6 +428,18 @@ class OllamaLLMService(BaseLLMService):
         if kwargs.get('max_tokens') is not None:
             options['num_predict'] = kwargs['max_tokens']
         t0 = _time.monotonic()
+        # Bound concurrent Ollama requests across all workers. Wait briefly for a
+        # free slot; if none frees, fail fast (LLMError) instead of blocking on
+        # Ollama's internal queue for the full read timeout — Ollama is the last
+        # tier in every route, so a fast reject just skips it for this call.
+        slots = _get_ollama_slots()
+        token = slots.acquire(
+            float(getattr(settings, 'OLLAMA_ACQUIRE_SECONDS', 2.0)),
+            slot_ttl=int(self._timeout) + 10,
+        )
+        if token is None:
+            _record_llm_call(self._provider, False, int((_time.monotonic() - t0) * 1000))
+            raise LLMError(f'Ollama busy ({self._provider}): no free slot')
         try:
             response = requests.post(
                 f'{self._base_url}/api/chat',
@@ -398,6 +491,8 @@ class OllamaLLMService(BaseLLMService):
             _record_llm_call(self._provider, False, int((_time.monotonic() - t0) * 1000))
             logger.error('OllamaLLMService error: %s', e)
             raise LLMError(str(e)) from e
+        finally:
+            slots.release(token)
 
 
 class FallbackLLMService(BaseLLMService):

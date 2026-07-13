@@ -67,7 +67,14 @@ def _fetch_handler(codes: list) -> int:
 
 def _score_pending():
     from core import models as m
-    return m.Article.objects.filter(processed_on__isnull=True, importance_score__isnull=True)
+    # exclude(annotation_deferred=True): fetch-only backfill articles
+    # (BACKFILL_LLM_ENABLED=False) wait for annotate_deferred_articles_task, not
+    # the live pipeline. exclude() matches False-or-unset, so pre-migration rows
+    # (which have no such field) are still included.
+    return (
+        m.Article.objects.filter(processed_on__isnull=True, importance_score__isnull=True)
+        .exclude(annotation_deferred=True)
+    )
 
 
 def _score_ids(limit: int) -> list:
@@ -79,9 +86,17 @@ def _score_handler(ids: list) -> int:
     return score_unscored_articles(article_ids=ids)
 
 
+def _live_llm_enabled() -> bool:
+    """Dashboard-editable master switch for the live pipeline's LLM stages
+    (score/process/geocode). Off ⇒ those stages don't dispatch; articles keep
+    being fetched and accumulate as pending until it's turned back on."""
+    from services.runtime_config import is_live_llm_enabled
+    return is_live_llm_enabled()
+
+
 def _score_enabled() -> bool:
     from django.conf import settings
-    return bool(settings.ARTICLE_IMPORTANCE_SCORING_ENABLED)
+    return bool(settings.ARTICLE_IMPORTANCE_SCORING_ENABLED) and _live_llm_enabled()
 
 
 def _process_pending():
@@ -93,6 +108,9 @@ def _process_pending():
     qs = m.Article.objects.filter(processed_on__isnull=True)
     # Skip articles whose earlier dispatch is still (presumably) in flight.
     qs = qs.filter(Q(process_queued_at__isnull=True) | Q(process_queued_at__lt=claim_cutoff))
+    # Fetch-only backfill articles (BACKFILL_LLM_ENABLED=False) are annotated by
+    # annotate_deferred_articles_task, not the live pipeline.
+    qs = qs.exclude(annotation_deferred=True)
     return _apply_min_score_filter(qs, settings.ARTICLE_MIN_IMPORTANCE_TO_PROCESS)
 
 
@@ -242,6 +260,7 @@ REGISTRY: dict[str, Stage] = {s.name: s for s in [
         handler=_process_handler, pending_ids=_process_ids,
         pending_count=_count(_process_pending),
         claim=_process_claim, release=_process_release,
+        enabled=_live_llm_enabled,   # dashboard master switch for live LLM
         error_stage_key='process',
         # Same batch-size collapse as geocode (analyzer.py: Ollama-as-primary
         # forces one LLM call per article instead of one per 8-article chunk) —
@@ -255,6 +274,7 @@ REGISTRY: dict[str, Stage] = {s.name: s for s in [
         queue='heavy', chunk_size=8, limit=200, every_minutes=720,
         handler=_geocode_handler, pending_ids=_geocode_pending_ids,
         pending_count=_count(_geocode_pending),
+        enabled=_live_llm_enabled,   # geocode-repair re-runs the LLM analyzer
         error_stage_key='geocode',
         # Repair chunks re-run the full analysis, and these are precisely the
         # articles whose LLM pass failed before — worst case one chunk walks

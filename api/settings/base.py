@@ -275,6 +275,24 @@ ARTICLE_DEDUP_HOURS = 24
 # Wayback rate-limits per IP; leave empty to go direct.
 WAYBACK_PROXY_URL = config('WAYBACK_PROXY_URL', default='')
 
+# LLM master switches. These are only the *seed defaults* — the live values are
+# stored in core.RuntimeConfig and edited from the admin dashboard's Actions
+# section (see services/runtime_config.py), so an operator can flip either
+# without a redeploy/restart and it takes effect on the next tick / backfill
+# chunk. They're read at execution time, so a change also applies to an
+# already-dispatched, in-flight backfill. These env vars only decide the initial
+# value the first time RuntimeConfig is created (fail-open fallback if Mongo read
+# ever fails).
+#
+# LIVE_LLM_ENABLED gates the live score/process/geocode stages. When off, the
+# live pipeline keeps fetching but stops LLM annotation — articles accumulate as
+# pending and resume when re-enabled.
+# BACKFILL_LLM_ENABLED gates historical backfill annotation. When off,
+# backfill_day_chunk_task fetches + saves and defers annotation
+# (annotation_deferred=True) for a later annotate_deferred_articles_task pass.
+LIVE_LLM_ENABLED = config('LIVE_LLM_ENABLED', default=True, cast=bool)
+BACKFILL_LLM_ENABLED = config('BACKFILL_LLM_ENABLED', default=True, cast=bool)
+
 # Ollama (self-hosted, no key) — three model tiers for different task complexities.
 OLLAMA_BASE_URL = config('OLLAMA_BASE_URL', default='http://localhost:11434')
 OLLAMA_MODEL_SMALL  = 'qwen3:4b'
@@ -308,6 +326,19 @@ LLM_TIMEOUT_SECONDS = 45
 # fallback when a tier isn't listed in OLLAMA_TIMEOUTS.
 OLLAMA_TIMEOUT_SECONDS = 20
 OLLAMA_TIMEOUTS = {'small': 15, 'medium': 25, 'large': 45}
+# The self-hosted Ollama box is CPU-only with OLLAMA_NUM_PARALLEL=1 /
+# OLLAMA_MAX_LOADED_MODELS=1 — it genuinely serves one generation at a time.
+# worker-heavy runs several prefork processes that can each fall back to Ollama
+# at once; without a cross-worker cap, N-1 of them block on Ollama's internal
+# queue and burn their full read timeout before getting a slot (the server logs
+# `aborting completion request due to client closing the connection`). This
+# guard (services/llm/__init__.py) bounds concurrent Ollama requests across all
+# workers to OLLAMA_MAX_CONCURRENCY and *fast-rejects* once no slot frees within
+# OLLAMA_ACQUIRE_SECONDS, so a blocked heavy worker fails out quickly instead of
+# sitting idle. Keep OLLAMA_MAX_CONCURRENCY == the Ollama server's
+# OLLAMA_NUM_PARALLEL; raise both together only if the box has the RAM/CPU.
+OLLAMA_MAX_CONCURRENCY = config('OLLAMA_MAX_CONCURRENCY', default=1, cast=int)
+OLLAMA_ACQUIRE_SECONDS = config('OLLAMA_ACQUIRE_SECONDS', default=2.0, cast=float)
 
 # Routing: role -> provider name OR ordered fallback list (tried in order on failure).
 # Unconfigured providers are silently skipped; unknown roles fall back to 'default'.

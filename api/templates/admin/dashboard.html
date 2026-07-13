@@ -38,6 +38,26 @@
       </form>
     </div>
 
+    <h3 class="ops-group-title">LLM switches</h3>
+    <div class="ops-tiles">
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="set_llm_flag">
+        <input type="hidden" name="flag" value="live">
+        <input type="hidden" name="enabled" value="{% if llm_flags.live %}false{% else %}true{% endif %}">
+        <button class="button" type="submit">{% if llm_flags.live %}Disable{% else %}Enable{% endif %} live-pipeline LLM</button>
+        <p class="ops-tile-desc">Currently <strong>{% if llm_flags.live %}ON{% else %}OFF{% endif %}</strong>. Master switch for the live pipeline's LLM stages (score → process → geocode repair). When OFF, articles keep being fetched and pile up as pending, then resume annotating when re-enabled. Applies on the next tick — no restart.</p>
+      </form>
+      <form method="post" class="ops-tile">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="set_llm_flag">
+        <input type="hidden" name="flag" value="backfill">
+        <input type="hidden" name="enabled" value="{% if llm_flags.backfill %}false{% else %}true{% endif %}">
+        <button class="button" type="submit">{% if llm_flags.backfill %}Disable{% else %}Enable{% endif %} historical-backfill LLM</button>
+        <p class="ops-tile-desc">Currently <strong>{% if llm_flags.backfill %}ON{% else %}OFF{% endif %}</strong>. When OFF, historical backfill fetches + saves articles but defers annotation (no scoring/processing) — including the in-flight backfill, on its next chunk. Annotate them later with <em>Annotate deferred</em> below.</p>
+      </form>
+    </div>
+
     <h3 class="ops-group-title">Backfill &amp; history</h3>
     <div class="ops-tiles">
       <form method="post" class="ops-tile">
@@ -69,6 +89,15 @@
           <button class="button" type="submit">Aggregate history → Events</button>
         </div>
         <p class="ops-tile-desc">Build map Events from already-backfilled articles over a date range. The live aggregate stage only looks back 168h, so <strong>run this after every article backfill</strong> or the backfilled articles will never form Events.</p>
+      </form>
+      <form method="post" class="ops-tile ops-tile-wide">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="annotate_deferred">
+        <div class="ops-tile-row">
+          <input type="number" name="limit" min="1" placeholder="Max articles (default 2000)" style="flex:1">
+          <button class="button" type="submit">Annotate deferred</button>
+        </div>
+        <p class="ops-tile-desc">Score + process articles a fetch-only backfill deferred (saved while historical-backfill LLM was OFF). Bulk queue, re-run until the task reports <code>remaining=0</code>, then <strong>Aggregate history</strong> above.</p>
       </form>
     </div>
 
@@ -233,6 +262,13 @@
           <td>Stage: {{ s.name }}</td>
           <td>{% if s.ok %}<span class="ops-ok">&#10003; ok</span>{% else %}<span class="ops-warn">stuck — pending work, no recent dispatch</span>{% endif %}</td>
           <td class="ops-muted">{{ s.pending }} pending · last dispatch {{ s.last_dispatch|default:"never" }}</td>
+        </tr>
+      {% endfor %}
+      {% for p in health.providers %}
+        <tr>
+          <td>LLM provider: {{ p.name }}</td>
+          <td>{% if p.ok %}<span class="ops-ok">&#10003; ok</span>{% else %}<span class="ops-warn">outage — attempted, no recent success</span>{% endif %}</td>
+          <td class="ops-muted">last ok {{ p.last_ok|default:"never" }} · last err {{ p.last_err|default:"never" }}</td>
         </tr>
       {% endfor %}
       </tbody>

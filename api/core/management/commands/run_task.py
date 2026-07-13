@@ -39,6 +39,7 @@ BULK_TASKS = frozenset({
     'backfill_prices_task',
     'train_forecast_model_task',
     'run_forecast_task',
+    'annotate_deferred_articles_task',
 })
 
 

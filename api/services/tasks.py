@@ -290,6 +290,52 @@ def pipeline_health_task() -> dict:
             )
     report['stages'] = stages_report
 
+    # LLM provider health: a provider that is still being *attempted* but hasn't
+    # returned a single success recently is an upstream outage (e.g. Cerebras
+    # serving no completions, or Groq erroring hard) that the provider table on
+    # the dashboard shows only as a quiet stat. Surfaced here so it fires a
+    # warning like stage staleness does, rather than being buried. Uses the
+    # per-provider Redis call stats written by services.llm._record_llm_call.
+    window_h = getattr(settings, 'LLM_PROVIDER_HEALTH_WINDOW_HOURS', 3)
+    providers_report: dict = {}
+    try:
+        from services.cache import get_redis_client, key_llm_req_stat
+        rc = get_redis_client(write=False)
+
+        provider_names: set[str] = set()
+        for route in settings.LLM_ROUTES.values():
+            provider_names.update([route] if isinstance(route, str) else route)
+
+        def _ts(provider, field):
+            raw = rc.get(key_llm_req_stat(provider, field))
+            return datetime.fromtimestamp(int(raw), tz=dt_timezone.utc) if raw else None
+
+        cutoff = now - timedelta(hours=window_h)
+        for provider in sorted(provider_names):
+            err = int(rc.get(key_llm_req_stat(provider, 'err')) or 0)
+            last_ok = _ts(provider, 'last_ok')
+            last_err = _ts(provider, 'last_err')
+            # Attempted recently (last_err within window) but no success within
+            # window (last_ok missing or stale) ⇒ upstream outage.
+            attempted = last_err is not None and last_err >= cutoff
+            succeeded = last_ok is not None and last_ok >= cutoff
+            unhealthy = attempted and not succeeded
+            providers_report[provider] = {
+                'err_total': err,
+                'last_ok': last_ok.isoformat() if last_ok else None,
+                'last_err': last_err.isoformat() if last_err else None,
+                'ok': not unhealthy,
+            }
+            if unhealthy:
+                log.warning(
+                    '[health] LLM provider %r unhealthy — no success in %dh, '
+                    'last_ok=%s, last_err=%s',
+                    provider, window_h, last_ok, last_err,
+                )
+    except Exception:  # noqa: BLE001 — no Redis in dev; skip provider health
+        log.debug('[health] LLM provider health check skipped (no Redis)')
+    report['providers'] = providers_report
+
     # Sweep TaskRun rows orphaned by killed workers (no signal fires on a
     # SIGKILL, so the row would stay 'running' forever) — see queue.py.
     from services.queue import reap_stale_task_runs
@@ -558,7 +604,24 @@ def backfill_day_chunk_task(
     result = service.fetch_and_save_day(day_start, day_end, dry_run=dry_run, deadline=deadline)
 
     scored = processed = 0
-    if not dry_run and result.saved_ids:
+    # Backfill LLM switch OFF: fetch/save only — stop before the LLM-dependent
+    # score + process (annotation) steps and leave the saved articles for a later
+    # dedicated annotate + aggregate pass. Read from RuntimeConfig at execution
+    # time (dashboard-editable), so flipping it applies to this already-dispatched,
+    # in-flight backfill on the next chunk — no re-dispatch or restart.
+    from services.runtime_config import is_backfill_llm_enabled
+    llm_enabled = is_backfill_llm_enabled()
+    if not dry_run and not llm_enabled and result.saved_ids:
+        # Flag them so the live score/process stages skip them too (they'd
+        # otherwise annotate these on the next tick, since their created_on is
+        # recent). annotate_deferred_articles_task picks them up on demand.
+        m.Article.objects.filter(id__in=result.saved_ids).update(annotation_deferred=True)
+        logger.info(
+            '[backfill] backfill LLM switch OFF — saved %d article(s) for day=%s '
+            'with annotation deferred; run annotate_deferred_articles_task later',
+            len(result.saved_ids), day_start.date(),
+        )
+    if not dry_run and llm_enabled and result.saved_ids:
         # Same order as the live pipeline: score → gate → process. Without
         # this, immediately-processed backfill articles would be skipped by
         # the 'score' stage forever (its predicate is processed_on__isnull)
@@ -593,8 +656,70 @@ def backfill_day_chunk_task(
         'day': day_start.date().isoformat(), 'sources': source_codes,
         'fetched': result.fetched, 'saved': result.saved,
         'scored': scored, 'processed': processed,
+        'annotated': llm_enabled,
         'outcomes': result.outcomes,
     }
+
+
+@shared_task(**_RETRY_KW)
+def annotate_deferred_articles_task(limit: int = 1000, batch_size: int = 50) -> dict:
+    """Annotate articles a fetch-only backfill deferred (annotation_deferred=True,
+    saved with BACKFILL_LLM_ENABLED=False): score → min-importance gate → process,
+    the same order the live pipeline and backfill use, then clear the flag.
+
+    Run this after a fetch-only backfill to annotate the saved articles, then
+    aggregate them with aggregate_history_task over the same date range. Bounded
+    to ``limit`` articles per call and re-runnable — returns ``remaining`` so you
+    can loop until it hits 0. Long job → run on bulk queue or --sync:
+
+        python manage.py run_task annotate_deferred_articles_task limit=2000 --sync
+
+    Returns {'selected', 'scored', 'processed', 'remaining'}.
+    """
+    from django.conf import settings
+    import core.models as m
+    from services.workflow.articles import _apply_min_score_filter
+
+    def _remaining() -> int:
+        return m.Article.objects.filter(
+            annotation_deferred=True, processed_on__isnull=True,
+        ).count()
+
+    ids = list(
+        m.Article.objects.filter(annotation_deferred=True, processed_on__isnull=True)
+        .order_by('created_on').values_list('id', flat=True)[:limit]
+    )
+
+    scored = processed = 0
+    for i in range(0, len(ids), batch_size):
+        batch = ids[i:i + batch_size]
+        if settings.ARTICLE_IMPORTANCE_SCORING_ENABLED:
+            from services.scoring import score_unscored_articles
+            try:
+                scored += score_unscored_articles(article_ids=batch)
+            except Exception:
+                # Best-effort, mirroring backfill_day_chunk_task: a scoring
+                # failure must not strand the batch — process it ungated.
+                logger.exception('[annotate-deferred] scoring failed for a batch — processing ungated')
+        process_ids = list(
+            _apply_min_score_filter(
+                m.Article.objects.filter(id__in=batch),
+                settings.ARTICLE_MIN_IMPORTANCE_TO_PROCESS,
+            ).values_list('id', flat=True)
+        )
+        if process_ids:
+            processed += process_articles(ids=process_ids)
+        # Clear the flag for the whole batch — including below-gate articles that
+        # won't be processed — so re-runs make forward progress and the set
+        # rejoins normal pipeline/cleanup handling.
+        m.Article.objects.filter(id__in=batch).update(annotation_deferred=False)
+
+    result = {
+        'selected': len(ids), 'scored': scored,
+        'processed': processed, 'remaining': _remaining(),
+    }
+    logger.info('annotate_deferred_articles_task: %s', result)
+    return result
 
 
 def _parse_backfill_date(value) -> datetime:
