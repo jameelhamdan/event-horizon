@@ -98,9 +98,9 @@ def aggregate_events(
 
     # defer('content', 'entities'): the week-wide window can be tens of thousands
     # of rows. Only the representative article's content is ever read (a deferred
-    # per-event load, cheap next to carrying every body around), and entities (NER
-    # JSON) is never read here at all — deferring both keeps the biggest recurring
-    # in-memory load off the two heaviest Article fields.
+    # per-event load, cheap next to carrying every body around); entities is an
+    # unused always-empty field, never read here — deferring both keeps the
+    # biggest recurring in-memory load off these Article fields.
     articles = list(
         Article.objects.filter(
             processed_on__isnull=False,

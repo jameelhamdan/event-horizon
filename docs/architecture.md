@@ -9,7 +9,7 @@
 | Task queue | Celery + Redis — three queues: `default` (light I/O), `heavy` (NLP/LLM), `bulk` (long one-shot jobs) |
 | Scheduling | supercronic + `api/crontab` → `manage.py run_task` (runs in `api` container) |
 | Ingestion | feedparser (RSS) + requests |
-| NLP | LLM (category/sub-category · geo naming · intensity) · local NER (`dslim/bert-base-NER`, entities) · VADER (sentiment, rule-based) · sentence-transformers (clustering + topic matching) · **FinBERT** (financial sentiment) · MarianMT (Arabic translation) · geonamescache (geocode) |
+| NLP | LLM (category/sub-category · geo naming · intensity) · VADER (sentiment, rule-based) · sentence-transformers (clustering + topic matching) · **FinBERT** (financial sentiment) · MarianMT (Arabic translation) · geonamescache (geocode) |
 | LLM | Multi-provider via `services/llm/` — Groq/Cerebras/OpenRouter (free-tier cloud, primary) with Ollama (local, CPU) as last-resort fallback; per-use-case routing + fallback chains (`settings.LLM_ROUTES`) |
 | Forecasting | as-of feature engineering + **LightGBM** (optional dep) |
 | Frontend | React 19 + Vite + react-router-dom + react-leaflet (TypeScript) |
@@ -115,7 +115,7 @@ api/
                          + run_stage_chunk_task execute every stage in stages.py
     workflow/            articles.py (fetch/process), events.py (aggregate + coverage),
                          topics.py (tag/discover/refresh)
-    processing/         analyzer (LLM), ner (local), vader (local), finbert (local), cleaner, clustering
+    processing/         analyzer (LLM), vader (local), finbert (local), cleaner, clustering
     translation/        local EN→AR (MarianMT)
     forecasting/        features, buckets, routing (deterministic), calibration, service, model, metrics
     routing/            thin wrapper persisting Event.affected_indicators from forecasting/routing.py
@@ -133,7 +133,7 @@ ui/            React 19 + Vite SPA (TypeScript)
 
 1. **Ingestion** writes raw `Article` documents.
 2. **Processing** enriches each `Article` in place: LLM (category, sub-category, geo,
-   intensity, English title/summary), local NER (entities), local VADER + FinBERT
+   intensity, English title/summary), local VADER + FinBERT
    (sentiment ×2), local MarianMT (Arabic translation).
 3. **Aggregation** rolls articles up into `Event` documents and attaches
    `affected_indicators`.
@@ -179,14 +179,13 @@ Model overrides: set `OLLAMA_MODEL_SMALL`, `OLLAMA_MODEL_MEDIUM`, `OLLAMA_MODEL_
 | Role | Chain | Used for |
 |------|-------|----------|
 | `default` | groq → cerebras → openrouter → ollama_medium | fallback for unlisted roles |
-| `analyzer_lite` | groq → cerebras → openrouter → ollama_medium | article category/sub-category/geo/intensity + EN translation (entities/sentiment are local — see below) |
+| `analyzer_lite` | groq → cerebras → openrouter → ollama_medium | article category/sub-category/geo/intensity + EN translation (sentiment is local — see below) |
 | `newsletter` | cerebras → openrouter → ollama_large | daily newsletter prose |
 | `scoring` | groq → cerebras → openrouter → ollama_small | article importance rating |
 | `historical` | groq → cerebras → openrouter → ollama_small | backfill importance rating |
 | `topics` | groq → cerebras → openrouter → ollama_medium | topic description/keyword enrichment + discovery (tagging itself is local — see below) |
 
-**Local-model replacements** (no LLM call at all): entities (`services/processing/ner.py`,
-`dslim/bert-base-NER`), sentiment (`services/processing/vader.py`, VADER), Arabic
+**Local-model replacements** (no LLM call at all): sentiment (`services/processing/vader.py`, VADER), Arabic
 translation (`services/translation/`, MarianMT), event→topic tagging
 (`services/topics/matcher.py::EmbeddingTopicMatcher`, sentence-transformer cosine
 similarity), and event→symbol routing (`services/forecasting/routing.py`, deterministic

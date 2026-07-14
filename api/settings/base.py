@@ -351,9 +351,9 @@ OLLAMA_ACQUIRE_SECONDS = config('OLLAMA_ACQUIRE_SECONDS', default=2.0, cast=floa
 #     fast calls per minute then 429s and cascades; it only *leads* the
 #     low-volume daily newsletter, where 5 rpm + its 31B model are ideal.
 #   - OpenRouter is the mid fallback; Ollama is always last.
-# NB: article analysis is category/sub-category/geo/intensity only — entities
-# (NER), sentiment (VADER), and Arabic translation (MarianMT) all run locally,
-# never through the LLM. See CLAUDE.md "LLM routing" for the full local-model map.
+# NB: article analysis is category/sub-category/geo/intensity only — sentiment
+# (VADER) and Arabic translation (MarianMT) run locally, never through the LLM.
+# See CLAUDE.md "LLM routing" for the full local-model map.
 LLM_ROUTES = {
     'default':       ['groq', 'cerebras', 'openrouter', 'ollama_medium'],
     'analyzer_lite': ['groq', 'cerebras', 'openrouter', 'ollama_medium'],  # article analysis (EN-only LLM output)

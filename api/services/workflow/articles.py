@@ -105,8 +105,8 @@ def _fetch_og_image(url: str) -> str | None:
 
 def process_articles(ids: list, only_failed: bool = False) -> int:
     """Run NLP on exactly these article ids. LLM analyzer extracts category and
-    location; local NER/VADER add entities and sentiment; FinBERT adds financial
-    sentiment. Returns the number of articles processed.
+    location; local VADER adds sentiment; FinBERT adds financial sentiment.
+    Returns the number of articles processed.
 
     Selection lives with the callers — the stage predicates in services/stages.py
     (``_process_pending`` / ``_geocode_pending_ids``) are the single source of
@@ -165,8 +165,6 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
 
     processed = 0
     for i, (article, features, lite) in enumerate(zip(articles, feature_list, lite_flags)):
-        if features.entities is not None:
-            article.entities = features.entities
         if features.sentiment is not None:
             article.sentiment = features.sentiment
         if features.finbert_sentiment is not None:

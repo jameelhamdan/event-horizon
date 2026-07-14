@@ -78,7 +78,7 @@ Raw news item from one source, enriched **in place** by the processing stage.
 | `content` | text | Body text |
 | `published_on` | datetime | Publish timestamp (UTC); drives all as-of cuts |
 | `related` | FK→self | Optional link to a related article |
-| `entities` | `[]` | Local NER entities `[{text, label}]` (`dslim/bert-base-NER`, no LLM call) |
+| `entities` | `[]` | Unused — retained for schema stability; not populated |
 | `sentiment` | float \| null | Local VADER polarity [-1, 1] (rule-based, no LLM call) |
 | `finbert_sentiment` | float \| null | **FinBERT** signed sentiment [-1, 1] — news-domain (new) |
 | `location` | str(255) \| null | `City, Country` from LLM analysis |
@@ -315,5 +315,5 @@ Defined in `core/models.py` for the processing pipeline:
 | DTO | Key fields |
 |-----|-----------|
 | `ArticleDocument` | `id, title, content, source_code, published_on` + `full_text` property |
-| `ArticleFeatures` | `entities, sentiment, finbert_sentiment, location, lat/lon, event_intensity, category, sub_category, llm_data, translations` |
+| `ArticleFeatures` | `sentiment, finbert_sentiment, location, lat/lon, event_intensity, category, sub_category, llm_data, translations` |
 </content>

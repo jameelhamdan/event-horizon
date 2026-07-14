@@ -107,7 +107,7 @@ cross-source corroboration bonus + category floor. Gated by
 
 ## Stage: process
 
-**Code:** `services/processing/` (`cleaner.py` drives it; `analyzer.py`, `ner.py`,
+**Code:** `services/processing/` (`cleaner.py` drives it; `analyzer.py`,
 `vader.py`, `finbert.py` are called within, plus `services/translation/` for
 Arabic). Chunks of 8 articles = one batched LLM analysis call
 (`ArticleAnalyzer.ANALYZE_BATCH_SIZE`).
@@ -116,7 +116,6 @@ Per article, enrich in place:
 
 | Field | How |
 |-------|-----|
-| Entities | Local NER (`dslim/bert-base-NER`) — no LLM call |
 | Locations (country/city) | LLM-named, resolved to lat/lng via geonamescache |
 | Category + **sub-category** | LLM, two-level taxonomy (see below) |
 | Intensity | LLM-rated newsworthiness/severity [0, 1] |

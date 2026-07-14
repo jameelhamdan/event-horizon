@@ -16,7 +16,7 @@ See [docs/](docs/README.md) for architecture, pipeline, forecasting, and operati
 | Task queue | Redis + Celery |
 | Storage | MongoDB 8 |
 | Ingestion | feedparser (RSS) + requests |
-| NLP | LLM category/geo/intensity + local NER (entities) + VADER (sentiment) + sentence-transformers (clustering + topic matching) + FinBERT + MarianMT (Arabic translation) + geonamescache geocoding |
+| NLP | LLM category/geo/intensity + VADER (sentiment) + sentence-transformers (clustering + topic matching) + FinBERT + MarianMT (Arabic translation) + geonamescache geocoding |
 | Email | AWS SES (prod) / SMTP (dev) |
 | Newsletter | LLM-generated daily briefing → subscriber list |
 | Frontend | React 19 + Vite + react-leaflet |
@@ -107,7 +107,6 @@ score            (every 60m, heavy workers)
 
 process          (every 30m, fan-out to heavy workers)
   └─ LLM analyzer — category/sub-category, city/country, intensity
-  └─ Local NER (dslim/bert-base-NER) — entities
   └─ Local VADER — general sentiment [-1, 1]
   └─ FinBERT — financial sentiment [-1, 1]
   └─ Local MarianMT — Arabic translation (from the LLM's English title/summary)
@@ -141,7 +140,7 @@ api/
   misc/          EmailLog model
   services/
     data/        RSS + HTTP ingestion
-    processing/  ArticleCleaner — LLM analyzer, local NER, VADER, FinBERT, clustering
+    processing/  ArticleCleaner — LLM analyzer, VADER, FinBERT, clustering
     translation/ Local Arabic translation (MarianMT)
     forecasting/ LightGBM model, features, backtest, deterministic event router
     topics/      Topic scraper, embedding matcher (local, keyword fallback), dedup

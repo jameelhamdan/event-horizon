@@ -9,11 +9,11 @@ not been copied into the image yet.
 # at runtime, when this same file is loaded as scripts.init_models from inside /app.
 try:
     from settings.model_names import (
-        CLUSTER_MODEL_NAME, FINBERT_MODEL_NAME, TRANSLATION_MODEL_NAME, NER_MODEL_NAME,
+        CLUSTER_MODEL_NAME, FINBERT_MODEL_NAME, TRANSLATION_MODEL_NAME,
     )
 except ImportError:
     from model_names import (
-        CLUSTER_MODEL_NAME, FINBERT_MODEL_NAME, TRANSLATION_MODEL_NAME, NER_MODEL_NAME,
+        CLUSTER_MODEL_NAME, FINBERT_MODEL_NAME, TRANSLATION_MODEL_NAME,
     )
 
 
@@ -34,12 +34,6 @@ def download_models() -> None:
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
     AutoTokenizer.from_pretrained(TRANSLATION_MODEL_NAME)
     AutoModelForSeq2SeqLM.from_pretrained(TRANSLATION_MODEL_NAME)
-
-    print(f"Downloading {NER_MODEL_NAME}...")
-    # transformers>=5.3's TokenClassificationPipeline doesn't accept truncation/
-    # max_length kwargs at all — it truncates automatically using the model's
-    # own tokenizer.model_max_length.
-    pipeline("ner", model=NER_MODEL_NAME, aggregation_strategy="simple")
 
     # VADER (services.processing.vader) is rule-based — ships with the
     # vaderSentiment package, no model weights to pre-fetch.

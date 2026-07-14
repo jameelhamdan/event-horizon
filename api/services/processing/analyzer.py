@@ -25,8 +25,8 @@ _SUB_CATEGORIES: dict[str, set[str]] = {
 }
 
 # English-only schema — covers only the fields that need real judgment (taxonomy
-# classification, geo naming, severity rating). Entities and sentiment are handled
-# locally (services.processing.ner, services.processing.vader — see cleaner.py);
+# classification, geo naming, severity rating). Sentiment is handled
+# locally (services.processing.vader — see cleaner.py);
 # Arabic is generated locally too, from the English fields below by
 # services.translation (MarianMT) — see add_arabic_translations.
 _OBJECT_SCHEMA = """\
@@ -225,8 +225,8 @@ class ArticleAnalyzer:
         per input text, in order — failures fall back to _empty() per-item or per-chunk.
 
         The LLM call itself only ever produces English output (category, geo,
-        intensity, EN translation) — entities and sentiment are handled separately
-        by NER + VADER in cleaner.py, on every document regardless of this flag.
+        intensity, EN translation) — sentiment is handled separately by VADER in
+        cleaner.py, on every document regardless of this flag.
         translate=True additionally adds a locally-generated ('ar') translation
         block via services.translation (MarianMT); translate=False skips that local
         translation step (used for backfilled articles where Arabic localization

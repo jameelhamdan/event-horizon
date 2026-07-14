@@ -80,7 +80,7 @@ Copy `api/.env.example` to `api/.env` (or `.env.app` at the project root). Key s
 
 - `TASK_QUEUE_ENABLED=false` — tasks run synchronously; no Redis/worker required locally.
 - `DATABASE_URL` — MongoDB connection string (default `mongodb://root:1234@localhost:27017/radar-live?authSource=admin`).
-- LLM credentials go in env (`GROQ_API_KEYS`, `CEREBRAS_API_KEYS`, `OPENROUTER_API_KEYS`, `OLLAMA_BASE_URL`); routing logic is in `settings/base.py` `LLM_ROUTES`. The LLM only handles category/sub-category/geo/intensity classification and newsletter/topic-enrichment prose — entities, sentiment, translation, topic tagging, and event routing all run on local models (see LLM routing below).
+- LLM credentials go in env (`GROQ_API_KEYS`, `CEREBRAS_API_KEYS`, `OPENROUTER_API_KEYS`, `OLLAMA_BASE_URL`); routing logic is in `settings/base.py` `LLM_ROUTES`. The LLM only handles category/sub-category/geo/intensity classification and newsletter/topic-enrichment prose — sentiment, translation, topic tagging, and event routing all run on local models (see LLM routing below).
 
 ## Architecture
 
@@ -99,8 +99,8 @@ api/                       PYTHONPATH root inside Docker (/app)
     tasks.py               All task functions — plain Python, no decorator
     queue.py               enqueue() helper — sync fallback when TASK_QUEUE_ENABLED=False
     llm/                   LLM client — provider abstraction + round-robin key rotation
-    processing/            analyzer.py (LLM: category/sub-category/geo/intensity), ner.py (local NER,
-                           entities), vader.py (local, sentiment), finbert.py (local, financial
+    processing/            analyzer.py (LLM: category/sub-category/geo/intensity),
+                           vader.py (local, sentiment), finbert.py (local, financial
                            sentiment), cleaner.py (orchestrates all of the above), clustering.py
     translation/           Local EN→AR translation (MarianMT) — replaces LLM-generated translations
     topics/                matcher.py (EmbeddingTopicMatcher — local, default, semantic;
@@ -164,7 +164,7 @@ pipeline_tick_task (every 10m) — dispatches due stages from services/stages.py
   score     (60m, heavy)    — LLM importance scoring, batches of 30 titles
   process   (30m, heavy)    — chunks of 8 = one batched LLM call
                               — LLM: category/sub-category/geo/intensity + EN translation
-                              — local: NER (entities), VADER (sentiment), FinBERT (financial
+                              — local: VADER (sentiment), FinBERT (financial
                                 sentiment), MarianMT (EN→AR translation)
   geocode   (12h, heavy)    — repair: reprocess processed-but-unlocated articles
   aggregate (30m, heavy)    — singleton: cluster + upsert Events, routes inline
@@ -187,7 +187,6 @@ Several tasks run on local CPU models rather than the LLM — cheaper, faster, a
 
 | Task | Local replacement | Module |
 | ---- | ------------------ | ------ |
-| Named entities | `dslim/bert-base-NER` (transformers) | `services/processing/ner.py` |
 | Article sentiment | VADER (rule-based) | `services/processing/vader.py` |
 | Arabic translation | `Helsinki-NLP/opus-mt-en-ar` (MarianMT) | `services/translation/` |
 | Event → topic tagging | sentence-transformer cosine similarity (`paraphrase-multilingual-MiniLM-L12-v2`, same model as clustering) | `services/topics/matcher.py::EmbeddingTopicMatcher` |

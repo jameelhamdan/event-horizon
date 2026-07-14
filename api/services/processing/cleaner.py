@@ -10,7 +10,6 @@ class ArticleCleaner:
 
     - ArticleAnalyzer (LLM): category, sub-category, country, city, coordinates,
       and event_intensity — the fields that need real judgment.
-    - NER (local, dslim/bert-base-NER): named entities.
     - VADER (local, rule-based): general sentiment polarity.
     - FinBERT (local): financial sentiment — a separate, domain-specific signal.
 
@@ -37,12 +36,12 @@ class ArticleCleaner:
         document (or for all, if a single bool); the LLM call itself is always
         English-only. category/sub_category/geo/event_intensity come from one LLM
         call over the whole chunk (so a mixed lite/full chunk still maps to exactly
-        one batched call — see ArticleAnalyzer.ANALYZE_BATCH_SIZE); entities (NER),
-        sentiment (VADER), and finbert_sentiment all run locally on every document,
+        one batched call — see ArticleAnalyzer.ANALYZE_BATCH_SIZE); sentiment
+        (VADER) and finbert_sentiment both run locally on every document,
         independent of the LLM call.
 
-        ``skip_local``: skip NER/VADER/FinBERT entirely (returns None for those
-        three ArticleFeatures fields) — for geocode-repair, where those fields
+        ``skip_local``: skip VADER/FinBERT entirely (returns None for those
+        two ArticleFeatures fields) — for geocode-repair, where those fields
         already have a correct value on the article and only the LLM's
         category/geo/intensity judgment is being retried.
         """
@@ -51,12 +50,10 @@ class ArticleCleaner:
         texts = [doc.full_text for doc in documents]
         if skip_local:
             finbert_batch = [None] * len(documents)
-            entities_batch = [None] * len(documents)
             sentiment_batch = [None] * len(documents)
         else:
-            from services.processing import finbert, ner, vader
+            from services.processing import finbert, vader
             finbert_batch = finbert.score_batch(texts)
-            entities_batch = ner.extract_batch(texts)
             sentiment_batch = vader.score_batch(texts)
 
         if isinstance(lite_flags, bool):
@@ -72,13 +69,12 @@ class ArticleCleaner:
             self._analyzer.add_arabic_translations([analyses[i] for i in full_idxs])
 
         results = []
-        for doc, finbert_sentiment, entities, sentiment, analysis in zip(
-            documents, finbert_batch, entities_batch, sentiment_batch, analyses,
+        for doc, finbert_sentiment, sentiment, analysis in zip(
+            documents, finbert_batch, sentiment_batch, analyses,
         ):
             location = ', '.join(filter(None, [analysis.city, analysis.country])) or None
             results.append(ArticleFeatures(
                 id=doc.id,
-                entities=entities,
                 sentiment=sentiment,
                 finbert_sentiment=finbert_sentiment,
                 location=location,

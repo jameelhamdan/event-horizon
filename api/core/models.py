@@ -95,7 +95,7 @@ class Article(models.Model):
     )
 
     # NLP fields — populated by process_articles
-    entities = models.JSONField(default=list, blank=True)  # local NER (dslim/bert-base-NER)
+    entities = models.JSONField(default=list, blank=True)  # unused — retained for schema stability; not populated
     # sentiment = VADER polarity [-1, 1] (local, rule-based).
     sentiment = models.FloatField(null=True, blank=True)
     # FinBERT signed sentiment [-1, 1] for news article text (domain-matched).
@@ -760,7 +760,6 @@ class ArticleDocument:
 class ArticleFeatures:
     """NLP output for a single article, returned by ArticleCleaner."""
     id: str
-    entities: list[dict]    # [{text: str, label: str}] — local NER (dslim/bert-base-NER)
     sentiment: float        # VADER polarity [-1, 1] (local, rule-based)
     finbert_sentiment: float | None  # FinBERT signed sentiment [-1, 1], news-domain
     location: str | None    # 'City, Country' from LLM analysis

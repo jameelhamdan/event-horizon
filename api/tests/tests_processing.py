@@ -1,5 +1,5 @@
 """Dependency-light self-tests for the local processing services: the shared
-lazy-loader, NER, VADER, translation, FinBERT (env-toggle paths only — none of
+lazy-loader, VADER, translation, FinBERT (env-toggle paths only — none of
 these download a model), and the pure-logic pieces of ArticleAnalyzer.
 
 No database or network required — model pipelines are exercised via their
@@ -82,84 +82,6 @@ def test_lazy_loader_import_error_returns_none():
     loader = lazy_loader('test_importerr', 'TESTS_PROCESSING_IMPORTERR_ENABLED', build)
     os.environ.pop('TESTS_PROCESSING_IMPORTERR_ENABLED', None)
     assert loader() is None
-
-
-# ── ner._clean (pure logic — no model needed) ─────────────────────────────────
-
-def test_ner_clean_keeps_valid_labels():
-    from services.processing.ner import _clean
-    raw = [{'entity_group': 'PER', 'score': 0.9, 'word': 'John Smith'}]
-    out = _clean(raw)
-    assert out == [{'text': 'John Smith', 'label': 'PER'}]
-
-
-def test_ner_clean_drops_invalid_label():
-    from services.processing.ner import _clean
-    raw = [{'entity_group': 'DATE', 'score': 0.9, 'word': '2024'}]
-    assert _clean(raw) == []
-
-
-def test_ner_clean_drops_low_score():
-    from services.processing.ner import _clean
-    raw = [{'entity_group': 'ORG', 'score': 0.2, 'word': 'Acme Corp'}]
-    assert _clean(raw) == []
-
-
-def test_ner_clean_drops_blank_word():
-    from services.processing.ner import _clean
-    raw = [{'entity_group': 'LOC', 'score': 0.9, 'word': '   '}]
-    assert _clean(raw) == []
-
-
-def test_ner_clean_dedups_case_insensitive():
-    from services.processing.ner import _clean
-    raw = [
-        {'entity_group': 'LOC', 'score': 0.9, 'word': 'Kyiv'},
-        {'entity_group': 'LOC', 'score': 0.8, 'word': 'kyiv'},
-    ]
-    out = _clean(raw)
-    assert len(out) == 1
-    assert out[0]['text'] == 'Kyiv'
-
-
-def test_ner_extract_batch_disabled_returns_empty_lists():
-    from services.processing import ner
-    with _disabled('NER_ENABLED', ner._pipeline):
-        assert ner.extract_batch(['some article', 'another one']) == [[], []]
-
-
-def test_ner_extract_batch_empty_input():
-    from services.processing import ner
-    assert ner.extract_batch([]) == []
-
-
-def test_ner_extract_batch_uses_pipeline_output():
-    from services.processing import ner
-    from unittest.mock import patch
-
-    fake_output = [
-        [{'entity_group': 'PER', 'score': 0.95, 'word': 'Jane Doe'}],
-        [],
-    ]
-
-    def fake_pipe(texts, batch_size=16):
-        return fake_output
-
-    with patch.object(ner, '_pipeline', return_value=fake_pipe):
-        result = ner.extract_batch(['Jane Doe visited', 'nothing notable'])
-    assert result == [[{'text': 'Jane Doe', 'label': 'PER'}], []]
-
-
-def test_ner_extract_batch_pipeline_exception_degrades_to_empty():
-    from services.processing import ner
-    from unittest.mock import patch
-
-    def raising_pipe(texts, batch_size=16):
-        raise RuntimeError('model exploded')
-
-    with patch.object(ner, '_pipeline', return_value=raising_pipe):
-        result = ner.extract_batch(['a', 'b'])
-    assert result == [[], []]
 
 
 # ── vader (real lexicon, no download needed) ──────────────────────────────────
@@ -369,15 +291,6 @@ _TESTS = [
     test_lazy_loader_env_opt_out_returns_none,
     test_lazy_loader_build_failure_returns_none_not_raise,
     test_lazy_loader_import_error_returns_none,
-    test_ner_clean_keeps_valid_labels,
-    test_ner_clean_drops_invalid_label,
-    test_ner_clean_drops_low_score,
-    test_ner_clean_drops_blank_word,
-    test_ner_clean_dedups_case_insensitive,
-    test_ner_extract_batch_disabled_returns_empty_lists,
-    test_ner_extract_batch_empty_input,
-    test_ner_extract_batch_uses_pipeline_output,
-    test_ner_extract_batch_pipeline_exception_degrades_to_empty,
     test_vader_scores_positive_text,
     test_vader_scores_negative_text,
     test_vader_disabled_returns_neutral,

@@ -13,4 +13,3 @@ the Docker build layer, before the rest of the app exists in the image (see
 CLUSTER_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 FINBERT_MODEL_NAME = "ProsusAI/finbert"
 TRANSLATION_MODEL_NAME = "Helsinki-NLP/opus-mt-en-ar"
-NER_MODEL_NAME = "dslim/bert-base-NER"

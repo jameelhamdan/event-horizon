@@ -61,7 +61,7 @@ services:
       - static_data:/app/.static
 
   # Steady NLP/LLM work — 4 workers. NOTE: each prefork child lazily loads its
-  # own copy of the local ML stack (MiniLM + FinBERT + NER + MarianMT, ~1.5-2GB
+  # own copy of the local ML stack (MiniLM + FinBERT + MarianMT, ~1.5-2GB
   # warm), so RAM scales with --concurrency; max-tasks-per-child recycles
   # children periodically as a leak backstop. Keep --concurrency in sync with
   # CELERY_QUEUE_WORKERS in api/settings/base.py (dashboard display).
@@ -86,7 +86,7 @@ services:
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
-    # 4 children x ~1.5-2GB warm ML models (MiniLM + FinBERT + NER + MarianMT)
+    # 4 children x ~1.5-2GB warm ML models (MiniLM + FinBERT + MarianMT)
     # = ~6-8GB baseline; this caps the container well above that so a slow
     # per-task leak gets OOM-killed (and restarted) before it can pressure the
     # host, instead of growing unbounded.

@@ -17,7 +17,7 @@ The pipeline has one easy-to-misread step. Spelling it out:
 
 ```mermaid
 flowchart TD
-    A[Scrapers / RSS] --> B[NLP: LLM category/geo/intensity · local NER/VADER/FinBERT]
+    A[Scrapers / RSS] --> B[NLP: LLM category/geo/intensity · local VADER/FinBERT]
     B --> C[Events + topic tags<br/>existing pipeline]
 
     subgraph ROUTING [Event to Symbol Routing]

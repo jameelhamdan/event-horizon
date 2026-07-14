@@ -1,4 +1,4 @@
-"""Shared lazy-load helper for local CPU models (FinBERT, NER, VADER, translation).
+"""Shared lazy-load helper for local CPU models (FinBERT, VADER, translation).
 
 Each model module wants the same three things: an env-var opt-out, a cache so the
 model loads exactly once per process, and a load failure that degrades to "disabled"
