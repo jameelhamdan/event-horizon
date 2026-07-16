@@ -10,7 +10,7 @@
 | Scheduling | supercronic + `api/crontab` → `manage.py run_task` (runs in `api` container) |
 | Ingestion | feedparser (RSS) + requests |
 | NLP | LLM (category/sub-category · geo naming · intensity) · VADER (sentiment, rule-based) · sentence-transformers (clustering + topic matching) · **FinBERT** (financial sentiment) · MarianMT (Arabic translation) · geonamescache (geocode) |
-| LLM | Multi-provider via `services/llm/` — Groq/Cerebras/OpenRouter (free-tier cloud, primary) with Ollama (local, CPU) as last-resort fallback; per-use-case routing + fallback chains (`settings.LLM_ROUTES`) |
+| LLM | Multi-provider via `services/llm/` — Groq/Cerebras/Mistral/OpenRouter (free-tier cloud, primary) with Ollama (local, CPU) as last-resort fallback; per-use-case routing + fallback chains (`settings.LLM_ROUTES`) |
 | Forecasting | as-of feature engineering + **LightGBM** (optional dep) |
 | Frontend | React 19 + Vite + react-router-dom + react-leaflet (TypeScript) |
 | Real-time | Server-Sent Events over Redis pub/sub |
@@ -55,7 +55,8 @@ flowchart LR
     WB --> MONGO
     WH -->|LLM calls| GROQ([Groq])
     GROQ -.fallback.-> CEREBRAS([Cerebras])
-    CEREBRAS -.fallback.-> OR([OpenRouter])
+    CEREBRAS -.fallback.-> MISTRAL([Mistral])
+    MISTRAL -.fallback.-> OR([OpenRouter])
     OR -.fallback.-> OLLAMA[Ollama · local, last resort]
     WH -->|SES| SES([AWS SES email])
     WL -->|publish ticks| REDIS
@@ -166,7 +167,8 @@ the only one with no rate limit, but it's slow on CPU-only hardware).
 | Provider | Endpoint | Key required | Notes |
 |----------|----------|--------------|-------|
 | `groq` | `https://api.groq.com/openai/v1` | `GROQ_API_KEYS` | Free tier, high headroom — leads most chains. |
-| `cerebras` | `https://api.cerebras.ai/v1` | `CEREBRAS_API_KEYS` | Free tier, tiny 5 req/min quota — only *leads* the low-volume newsletter role. |
+| `cerebras` | `https://api.cerebras.ai/v1` | `CEREBRAS_API_KEYS` | Free tier, tiny 5 req/min quota — only *leads* the low-volume newsletter role. Model is env-overridable (`CEREBRAS_MODEL`) since Cerebras rotates its served roster; a stale id 404s and the leg silently falls through. |
+| `mistral` | `https://api.mistral.ai/v1` | `MISTRAL_API_KEYS` | Free "Experiment" tier, OpenAI-compatible. 2 req/min per key; comma-separated keys rotate round-robin. Requires opting into data-training on La Plateforme (only public scraped RSS news is sent). Model env-overridable (`MISTRAL_MODEL`, default `mistral-small-latest`). |
 | `openrouter` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEYS` | Mid fallback. Comma-separated keys rotate round-robin. |
 | `ollama_small` | `OLLAMA_BASE_URL` (default `http://localhost:11434`) | None | `qwen3:4b` — last resort, fast/simple tasks |
 | `ollama_medium` | same | None | `qwen3:8b` — last resort, default tier |
@@ -179,7 +181,7 @@ Model overrides: set `OLLAMA_MODEL_SMALL`, `OLLAMA_MODEL_MEDIUM`, `OLLAMA_MODEL_
 | Role | Chain | Used for |
 |------|-------|----------|
 | `default` | groq → cerebras → openrouter → ollama_medium | fallback for unlisted roles |
-| `analyzer_lite` | groq → cerebras → openrouter → ollama_medium | article category/sub-category/geo/intensity + EN translation (sentiment is local — see below) |
+| `analyzer_lite` | groq → cerebras → mistral → openrouter → ollama_medium | article category/sub-category/geo/intensity + EN translation (sentiment is local — see below) |
 | `newsletter` | cerebras → openrouter → ollama_large | daily newsletter prose |
 | `scoring` | groq → cerebras → openrouter → ollama_small | article importance rating |
 | `historical` | groq → cerebras → openrouter → ollama_small | backfill importance rating |
@@ -206,7 +208,8 @@ flowchart LR
     CALL["get_llm_service('analyzer_lite')"] --> ROUTE{LLM_ROUTES}
     ROUTE --> GROQ[groq · key]
     GROQ -->|fail| CEREBRAS[cerebras · key]
-    CEREBRAS -->|fail| OR[openrouter · key]
+    CEREBRAS -->|fail| MISTRAL[mistral · key]
+    MISTRAL -->|fail| OR[openrouter · key]
     OR -->|fail| OLLAMA[ollama_medium · local, last resort]
     OLLAMA -->|all fail| ERR([LLMError])
 ```

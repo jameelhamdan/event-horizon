@@ -319,6 +319,14 @@ CEREBRAS_API_KEYS = config('CEREBRAS_API_KEYS', default='')
 # served roster changes. Confirm with: manage.py test_llm --role scoring.
 CEREBRAS_MODEL = config('CEREBRAS_MODEL', default='llama-3.3-70b')
 
+# Mistral — free "Experiment" tier, OpenAI-compatible (https://api.mistral.ai/v1).
+# Requires opting into data-training on La Plateforme per account (we only send
+# public scraped RSS news content — low sensitivity). 2 req/min per key;
+# comma-separated keys round-robin the same as GROQ_API_KEYS/CEREBRAS_API_KEYS
+# (see services/llm/__init__.py::_Cycle).
+MISTRAL_API_KEYS = config('MISTRAL_API_KEYS', default='')
+MISTRAL_MODEL = config('MISTRAL_MODEL', default='mistral-small-latest')
+
 # Per-request LLM timeout. Cloud providers (Groq/Cerebras) are fast-inference
 # chips — a stuck/degraded request should fail and fall back quickly rather
 # than eat a large chunk of the task's own time limit. Was 300s; a hung
@@ -361,7 +369,7 @@ OLLAMA_ACQUIRE_SECONDS = config('OLLAMA_ACQUIRE_SECONDS', default=2.0, cast=floa
 # See CLAUDE.md "LLM routing" for the full local-model map.
 LLM_ROUTES = {
     'default':       ['groq', 'cerebras', 'openrouter', 'ollama_medium'],
-    'analyzer_lite': ['groq', 'cerebras', 'openrouter', 'ollama_medium'],  # article analysis (EN-only LLM output)
+    'analyzer_lite': ['groq', 'cerebras', 'mistral', 'openrouter', 'ollama_medium'],  # article analysis (EN-only LLM output)
     'newsletter':    ['cerebras', 'openrouter', 'ollama_large'],           # long-form, low volume
     'scoring':       ['groq', 'cerebras', 'openrouter', 'ollama_small'],
     'historical':    ['groq', 'cerebras', 'openrouter', 'ollama_small'],

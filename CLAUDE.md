@@ -80,7 +80,7 @@ Copy `api/.env.example` to `api/.env` (or `.env.app` at the project root). Key s
 
 - `TASK_QUEUE_ENABLED=false` — tasks run synchronously; no Redis/worker required locally.
 - `DATABASE_URL` — MongoDB connection string (default `mongodb://root:1234@localhost:27017/radar-live?authSource=admin`).
-- LLM credentials go in env (`GROQ_API_KEYS`, `CEREBRAS_API_KEYS`, `OPENROUTER_API_KEYS`, `OLLAMA_BASE_URL`); routing logic is in `settings/base.py` `LLM_ROUTES`. The LLM only handles category/sub-category/geo/intensity classification and newsletter/topic-enrichment prose — sentiment, translation, topic tagging, and event routing all run on local models (see LLM routing below).
+- LLM credentials go in env (`GROQ_API_KEYS`, `CEREBRAS_API_KEYS`, `MISTRAL_API_KEYS`, `OPENROUTER_API_KEYS`, `OLLAMA_BASE_URL`); routing logic is in `settings/base.py` `LLM_ROUTES`. The LLM only handles category/sub-category/geo/intensity classification and newsletter/topic-enrichment prose — sentiment, translation, topic tagging, and event routing all run on local models (see LLM routing below).
 
 ## Architecture
 
@@ -183,7 +183,7 @@ Stream tasks run independently: prices (5m), NOTAMs (15m), earthquakes (5m), for
 
 ### LLM routing
 
-`get_llm_service(role)` in `services/llm/__init__.py` reads `settings.LLM_ROUTES[role]` (a list of provider names) and tries each in order on failure. Providers: `groq`, `cerebras`, `openrouter`, `ollama_small/medium/large`. Strip code fences before `json.loads()` — always use `services.llm.strip_code_fences()`.
+`get_llm_service(role)` in `services/llm/__init__.py` reads `settings.LLM_ROUTES[role]` (a list of provider names) and tries each in order on failure. Providers: `groq`, `cerebras`, `mistral`, `openrouter`, `ollama_small/medium/large`. Strip code fences before `json.loads()` — always use `services.llm.strip_code_fences()`.
 
 Several tasks run on local CPU models rather than the LLM — cheaper, faster, and no rate limits. When touching these areas, prefer extending the local model rather than adding LLM calls:
 

@@ -83,6 +83,7 @@ See `api/.env.example` for the full annotated list. Key variables:
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server (default LLM backend) |
 | `GROQ_API_KEYS` | — | Groq API key(s), comma-separated (free cloud fallback) |
 | `CEREBRAS_API_KEYS` | — | Cerebras API key(s), comma-separated (free cloud fallback) |
+| `MISTRAL_API_KEYS` | — | Mistral La Plateforme key(s), comma-separated (free "Experiment" tier, cloud fallback) |
 | `OPENROUTER_API_KEYS` | — | OpenRouter key(s) (last-resort fallback) |
 | `NEWSLETTER_ENABLED` | `true` | Enable newsletter generation + sending |
 | `FORECAST_ENABLED` | `true` | Enable forecasting pipeline |
@@ -148,7 +149,7 @@ api/
     streams/     Price, NOTAM, earthquake, forex live feeds
     newsletter/  Newsletter generator
     email/       SES / SMTP email service
-    llm/         LLM provider abstraction (Ollama, Groq, Cerebras, OpenRouter)
+    llm/         LLM provider abstraction (Ollama, Groq, Cerebras, Mistral, OpenRouter)
     workflow/    Pipeline orchestration (articles, events, topics)
     tasks.py     Celery task definitions
     queue.py     Enqueue helpers + task run tracking

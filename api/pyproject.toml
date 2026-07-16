@@ -1,6 +1,6 @@
 [project]
 name = "event-horizon-api"
-version = "2.32.0"
+version = "2.33.0"
 description = "Event Horizon — live global-event map: RSS ingestion, NLP/LLM analysis, geographic event clustering, and a DRF API."
 requires-python = ">=3.13"
 

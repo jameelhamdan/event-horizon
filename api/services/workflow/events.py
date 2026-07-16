@@ -358,12 +358,15 @@ def pipeline_coverage() -> list[dict]:
     the tick dispatcher uses — so the displayed count, the Reprocess button's
     effect, and what the cron actually dispatches cannot drift apart.
 
-    Returns one dict per row: {stage, model, label, need, action, error_sample,
-    last_dispatch}. ``action`` is the stage name posted back to
-    admin_dashboard._handle_reprocess (None for informational rows).
+    Returns one dict per row: {stage, model, label, need, age, action,
+    error_sample, last_dispatch}. ``need`` is the total pending; ``age`` is the
+    same set bucketed by how long it's been waiting (<1h / 1h-24h / 24h-1w / >1w,
+    from services.stages.stage_age_buckets — None for stages without a queryset).
+    ``action`` is the stage name posted back to admin_dashboard._handle_reprocess
+    (None for informational rows).
     """
     from core.models import Article, Event
-    from services.stages import REGISTRY, last_dispatched_at
+    from services.stages import REGISTRY, last_dispatched_at, stage_age_buckets
 
     def _err_sample(model, stage_key):
         try:
@@ -378,16 +381,21 @@ def pipeline_coverage() -> list[dict]:
 
     out: list[dict] = []
     for stage in REGISTRY.values():
-        if stage.singleton or not stage.coverage:
-            continue  # no per-record pending set (aggregate) / not a stuck signal (fetch)
         error_sample = None
         if stage.error_stage_key and stage.model in _models:
             error_sample = _err_sample(_models[stage.model], stage.error_stage_key)
         last = last_dispatched_at(stage)
+        # fetch re-fetches every enabled source each cadence (not a stuck-records
+        # set) and aggregate is a singleton (no per-record queue). Show both for
+        # visibility, but as informational rows: no age buckets, no Reprocess
+        # button, and no pending backlog (aggregate → "—"; fetch → source count).
+        informational = stage.singleton or not stage.coverage
+        enabled = stage.enabled()
         out.append({
             'stage': stage.name, 'model': stage.model, 'label': stage.label,
-            'need': stage.pending_count() if stage.enabled() else 0,
-            'action': stage.name if stage.enabled() else None,
+            'need': None if stage.singleton else (stage.pending_count() if enabled else 0),
+            'age': None if informational else (stage_age_buckets(stage) if enabled else None),
+            'action': None if informational else (stage.name if enabled else None),
             'error_sample': error_sample,
             'last_dispatch': last,
         })

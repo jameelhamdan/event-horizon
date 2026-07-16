@@ -176,12 +176,19 @@ def _tag_pending_ids(limit: int | None) -> list:
     return ids[:limit] if limit else ids
 
 
+def _tag_pending_qs():
+    """DB-narrowed pending set (untagged / keyword-fallback / legacy events) —
+    mirrors _tag_pending_ids' DB predicate, minus the per-event Python check.
+    Shared by the coverage count and the age-bucket breakdown."""
+    from core import models as m
+    lookback = _now() - timedelta(hours=EVENT_STAGE_WINDOW_HOURS)
+    return m.Event.objects.filter(started_at__gte=lookback).exclude(topics_source='embed')
+
+
 def _tag_pending_count() -> int:
     """Cheap DB-side count for the coverage table — mirrors _tag_pending_ids'
     DB predicate without materializing/filtering every event in Python."""
-    from core import models as m
-    lookback = _now() - timedelta(hours=EVENT_STAGE_WINDOW_HOURS)
-    return m.Event.objects.filter(started_at__gte=lookback).exclude(topics_source='embed').count()
+    return _tag_pending_qs().count()
 
 
 def _tag_handler(ids: list) -> int:
@@ -237,6 +244,8 @@ class Stage:
     handler: Callable[[list], int]                 # process one chunk of ids
     pending_ids: Callable[[int], list] | None = None   # bounded id selection (None → singleton)
     pending_count: Callable[[], int] = lambda: 0       # dashboard/coverage count
+    pending_qs: Callable[[], object] | None = None     # full pending queryset (age buckets)
+    age_field: str = 'created_on'                      # record field used to bucket pending age
     claim: Callable[[list], None] | None = None        # mark ids in-flight at dispatch
     release: Callable[[list], None] | None = None      # undo claim for never-enqueued ids
     enabled: Callable[[], bool] = lambda: True
@@ -267,7 +276,7 @@ REGISTRY: dict[str, Stage] = {s.name: s for s in [
         name='score', label='Unprocessed & unscored', model='article',
         queue='heavy', chunk_size=30, limit=300, every_minutes=60,
         handler=_score_handler, pending_ids=_score_ids,
-        pending_count=_count(_score_pending),
+        pending_count=_count(_score_pending), pending_qs=_score_pending,
         enabled=_score_enabled,
     ),
     Stage(
@@ -276,7 +285,7 @@ REGISTRY: dict[str, Stage] = {s.name: s for s in [
         name='process', label='Unprocessed & eligible (awaiting dispatch)', model='article',
         queue='heavy', chunk_size=8, limit=500, every_minutes=30,
         handler=_process_handler, pending_ids=_process_ids,
-        pending_count=_count(_process_pending),
+        pending_count=_count(_process_pending), pending_qs=_process_pending,
         claim=_process_claim, release=_process_release,
         enabled=_live_llm_enabled,   # dashboard master switch for live LLM
         error_stage_key='process',
@@ -291,7 +300,7 @@ REGISTRY: dict[str, Stage] = {s.name: s for s in [
         name='geocode', label='Processed but un-located (repair)', model='article',
         queue='heavy', chunk_size=8, limit=200, every_minutes=720,
         handler=_geocode_handler, pending_ids=_geocode_pending_ids,
-        pending_count=_count(_geocode_pending),
+        pending_count=_count(_geocode_pending), pending_qs=_geocode_pending,
         enabled=_live_llm_enabled,   # geocode-repair re-runs the LLM analyzer
         error_stage_key='geocode',
         # Repair chunks re-run the full analysis, and these are precisely the
@@ -313,14 +322,14 @@ REGISTRY: dict[str, Stage] = {s.name: s for s in [
         name='tag', label='Untagged / keyword-fallback events', model='event',
         queue='heavy', chunk_size=10, limit=500, every_minutes=60,
         handler=_tag_handler, pending_ids=_tag_pending_ids,
-        pending_count=_tag_pending_count,
+        pending_count=_tag_pending_count, pending_qs=_tag_pending_qs,
         error_stage_key='tag',
     ),
     Stage(
         name='route', label='Unrouted events (repair)', model='event',
         queue='heavy', chunk_size=10, limit=500, every_minutes=360,
         handler=_route_handler, pending_ids=_route_ids,
-        pending_count=_count(_route_pending),
+        pending_count=_count(_route_pending), pending_qs=_route_pending,
         enabled=_forecast_enabled,
         error_stage_key='route',
     ),
@@ -376,6 +385,36 @@ def last_dispatched_at(stage: Stage) -> datetime | None:
     except Exception:  # noqa: BLE001
         return None
     return datetime.fromtimestamp(float(ts), tz=dt_timezone.utc) if ts else None
+
+
+def stage_age_buckets(stage: Stage) -> dict | None:
+    """Break a stage's pending records into age buckets by ``age_field``
+    (default ``created_on``): how long each record has been waiting at this step.
+
+    Buckets: <1h, 1h–24h, 24h–1w, >1w, plus ``total``. Returns None for stages
+    with no queryset (singletons like aggregate). Four index-backed count()
+    queries — cheap enough for the dashboard, computed by boundary subtraction
+    so the buckets always sum to ``total``.
+    """
+    if stage.pending_qs is None:
+        return None
+    now = _now()
+    field = stage.age_field
+    try:
+        qs = stage.pending_qs()
+        total = qs.count()
+        older_1h = qs.filter(**{f'{field}__lt': now - timedelta(hours=1)}).count()
+        older_1d = qs.filter(**{f'{field}__lt': now - timedelta(days=1)}).count()
+        older_1w = qs.filter(**{f'{field}__lt': now - timedelta(weeks=1)}).count()
+    except Exception:  # noqa: BLE001 — same defensive stance as _count()
+        return None
+    return {
+        'lt_1h': total - older_1h,
+        'h1_24h': older_1h - older_1d,
+        'd1_1w': older_1d - older_1w,
+        'gt_1w': older_1w,
+        'total': total,
+    }
 
 
 def dispatch_stage(stage_name: str, force: bool = False) -> int:

@@ -78,6 +78,7 @@ class _Debounce:
         'openrouter': 86400,   # daily free-tier quota per key
         'groq':           60,  # per-minute rate limit
         'cerebras':       60,  # 5 req/min quota
+        'mistral':        60,  # 2 req/min per key
     }
     DEFAULT_TTL = 60
 
@@ -595,6 +596,11 @@ def _build_provider_specs() -> dict[str, dict]:
             'base_url': 'https://api.cerebras.ai/v1',
             'api_keys': _parse_csv(getattr(settings, 'CEREBRAS_API_KEYS', '')),
             'model': settings.CEREBRAS_MODEL,
+        },
+        'mistral': {
+            'base_url': 'https://api.mistral.ai/v1',
+            'api_keys': _parse_csv(getattr(settings, 'MISTRAL_API_KEYS', '')),
+            'model': settings.MISTRAL_MODEL,
         },
     }
 

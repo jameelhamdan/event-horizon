@@ -201,16 +201,31 @@
     </div>
   </details>
 
-  {# ── Pipeline coverage ───────────────────────────────────────────── #}
+  {# ── Stages ──────────────────────────────────────────────────────── #}
   <section class="ops-card">
-    <h2>Pipeline coverage</h2>
+    <h2>Stages</h2>
     <table class="ops-table">
-      <thead><tr><th>Stage</th><th>Pending</th><th>Last dispatch</th><th>Last error</th><th></th></tr></thead>
+      <thead><tr>
+        <th>Stage</th><th>Pending</th>
+        <th title="Waiting less than 1 hour">&lt;1h</th>
+        <th title="Waiting 1–24 hours">1–24h</th>
+        <th title="Waiting 1–7 days">1–7d</th>
+        <th title="Waiting more than 1 week — likely stuck">&gt;1w</th>
+        <th>Last dispatch</th><th>Last error</th><th></th>
+      </tr></thead>
       <tbody>
       {% for c in coverage %}
         <tr{% if c.need and not c.action %} class="ops-informational"{% endif %}>
           <td>{{ c.label }}</td>
-          <td class="{% if c.need and c.action %}ops-warn{% elif c.need %}ops-muted{% endif %}">{{ c.need }}</td>
+          <td class="{% if c.need and c.action %}ops-warn{% elif c.need %}ops-muted{% endif %}">{{ c.need|default_if_none:"—" }}</td>
+          {% if c.age %}
+          <td class="ops-muted">{{ c.age.lt_1h }}</td>
+          <td class="ops-muted">{{ c.age.h1_24h }}</td>
+          <td class="ops-muted">{{ c.age.d1_1w }}</td>
+          <td class="{% if c.age.gt_1w %}ops-warn{% else %}ops-muted{% endif %}">{{ c.age.gt_1w }}</td>
+          {% else %}
+          <td class="ops-muted">—</td><td class="ops-muted">—</td><td class="ops-muted">—</td><td class="ops-muted">—</td>
+          {% endif %}
           <td class="ops-muted">{{ c.last_dispatch|date:"M d H:i"|default:"—" }}</td>
           <td class="ops-muted">{{ c.error_sample|default:"—" }}</td>
           <td>
@@ -225,7 +240,7 @@
           </td>
         </tr>
       {% empty %}
-        <tr><td colspan="5" class="ops-muted">No coverage data.</td></tr>
+        <tr><td colspan="9" class="ops-muted">No coverage data.</td></tr>
       {% endfor %}
       </tbody>
     </table>
