@@ -260,6 +260,11 @@ ARTICLE_IMPORTANCE_SCORING_ENABLED = config('ARTICLE_IMPORTANCE_SCORING_ENABLED'
 ARTICLE_MIN_IMPORTANCE_TO_PROCESS = config('ARTICLE_MIN_IMPORTANCE_TO_PROCESS', default=2.0, cast=float)  # below this → skip process_articles_task
 ARTICLE_MIN_IMPORTANCE = config('ARTICLE_MIN_IMPORTANCE', default=4.0, cast=float)                        # below this → eligible for deletion
 ARTICLE_CLEANUP_GRACE_HOURS = 48
+# Window the every-30-min 'aggregate' stage re-clusters. Kept below the 168h
+# tag/route repair lookback (services.stages.EVENT_STAGE_WINDOW_HOURS) so each
+# tick doesn't re-cluster a full week; aggregate_full_task sweeps the full 168h
+# once daily to catch multi-day events that age past this window.
+AGGREGATE_LIVE_WINDOW_HOURS = config('AGGREGATE_LIVE_WINDOW_HOURS', default=72, cast=int)
 ARTICLE_STALE_PROCESSED_DAYS = 7
 # Per-calendar-month retention cap, ranked by importance_score — applies retroactively
 # to every month, not just the current one. Keeps DB growth bounded over years of

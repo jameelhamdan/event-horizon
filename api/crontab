@@ -13,6 +13,11 @@
 # cadence, chunking, and queue live in services/stages.py — NOT here.
 */10 * * * *   python /app/manage.py run_task pipeline_tick_task
 
+# Daily full-window aggregate sweep — the live 'aggregate' stage only clusters the
+# trailing AGGREGATE_LIVE_WINDOW_HOURS (72h) each tick; this re-aggregates the full
+# EVENT_STAGE_WINDOW_HOURS (168h) once daily for multi-day events past that window.
+0 1 * * *      python /app/manage.py run_task aggregate_full_task
+
 # ── Streams (light queue) ────────────────────────────────────────────────
 */5  * * * *   python /app/manage.py run_task run_stream_task name=prices      --require-flag STREAM_PRICES_ENABLED
 */15 * * * *   python /app/manage.py run_task run_stream_task name=notam      --require-flag STREAM_NOTAM_ENABLED

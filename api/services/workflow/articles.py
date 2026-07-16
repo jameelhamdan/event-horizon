@@ -163,7 +163,15 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
         ogs = map_concurrent(banner_targets, lambda t: _fetch_og_image(t[1]), max_workers=8)
         banner_results = {banner_targets[k][0]: og for k, og in enumerate(ogs) if og}
 
-    processed = 0
+    # Base field set written for every article; banner_image_url is added to the
+    # bulk_update field list only when at least one article in the chunk got a
+    # fresh og:image (articles without one are written unchanged — harmless).
+    update_fields = [
+        'entities', 'sentiment', 'finbert_sentiment', 'location', 'latitude', 'longitude',
+        'event_intensity', 'category', 'sub_category', 'processed_on',
+        'extra_data', 'translations', 'llm_usage', 'stage_status', 'geo_failed',
+    ]
+    to_save = []
     for i, (article, features, lite) in enumerate(zip(articles, feature_list, lite_flags)):
         if features.sentiment is not None:
             article.sentiment = features.sentiment
@@ -194,20 +202,18 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
         mark_stage(article, 'process', ok=features.llm_error is None, error=features.llm_error)
         mark_stage(article, 'geocode', ok=bool(features.location), error=None if features.location else 'no location resolved')
 
-        update_fields = [
-            'entities', 'sentiment', 'finbert_sentiment', 'location', 'latitude', 'longitude',
-            'event_intensity', 'category', 'sub_category', 'processed_on',
-            'extra_data', 'translations', 'llm_usage', 'stage_status', 'geo_failed',
-        ]
         og = banner_results.get(i)
         if og:
             article.banner_image_url = og
-            update_fields.append('banner_image_url')
+            if 'banner_image_url' not in update_fields:
+                update_fields.append('banner_image_url')
 
-        article.save(update_fields=update_fields)
-        processed += 1
+        to_save.append(article)
         location = features.location or '?'
         category = '/'.join(filter(None, [features.category, features.sub_category]))
         logger.info(f'[process] {article.title[:70]} → {category} @ {location}')
 
-    return processed
+    if to_save:
+        Article.objects.bulk_update(to_save, update_fields, batch_size=500)
+
+    return len(to_save)

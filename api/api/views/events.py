@@ -30,7 +30,15 @@ def _redis_cache():
 
 
 def _build_source_map() -> dict[str, str]:
-    return {s.code: s.name for s in core_models.Source.objects.only('code', 'name')}
+    """{source_code: name} — cached briefly in Redis. Sources change rarely, so a
+    short stale window is fine, and this spares every uncached caller (TopicEvents,
+    PriceLatest) a full Source scan per request."""
+    cache = _redis_cache()
+    if (cached := cache.get('api:sources:map')) is not None:
+        return cached
+    source_map = {s.code: s.name for s in core_models.Source.objects.only('code', 'name')}
+    cache.set('api:sources:map', source_map, 60)
+    return source_map
 
 
 def _parse_bool_param(value: str | None, default: bool = True) -> bool | None:
@@ -184,20 +192,28 @@ class PriceLatestView(APIView):
     """GET /api/prices/latest/ — most recent tick per symbol; query param: stream_key"""
 
     def get(self, request):
-        qs = core_models.PriceTick.objects.all()
-        if stream_key := request.query_params.get('stream_key'):
-            qs = qs.filter(stream_key=stream_key)
+        stream_key = request.query_params.get('stream_key')
+        cache_key = f'api:prices:latest:{stream_key or "all"}'
+        cache = _redis_cache()
+        if (cached := cache.get(cache_key)) is not None:
+            return Response(cached)
 
-        seen: set = set()
+        # Drive the lookup off the curated symbol set instead of walking the whole
+        # PriceTick collection: one indexed ('symbol', 'occurred_at') lookup per
+        # symbol via the model's -occurred_at default ordering.
+        symbols_qs = core_models.MarketSymbol.objects.filter(is_active=True)
+        if stream_key:
+            symbols_qs = symbols_qs.filter(stream_key=stream_key)
+
         latest = []
-        for tick in qs:
-            if tick.symbol not in seen:
-                seen.add(tick.symbol)
+        for symbol in symbols_qs.values_list('symbol', flat=True):
+            tick = core_models.PriceTick.objects.filter(symbol=symbol).first()
+            if tick is not None:
                 latest.append(tick)
-            if len(seen) > 200:
-                break
 
-        return Response({'results': PriceTickSerializer(latest, many=True).data})
+        data = {'results': PriceTickSerializer(latest, many=True).data}
+        cache.set(cache_key, data, _CACHE_TTL)
+        return Response(data)
 
 
 class PriceHistoryView(APIView):

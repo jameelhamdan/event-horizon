@@ -186,6 +186,57 @@ def test_run_chunk_routes_to_handler():
         assert S.run_chunk('tag', [1, 2, 3]) == 3
 
 
+def test_tag_pending_narrows_at_db_and_keeps_python_safety_net():
+    """The tag stage excludes embed-tagged events at the DB (cheap count +
+    selection), then keeps the _needs_tagging/keyword check only as a
+    legacy-list safety net over the already-narrowed set."""
+    from services import stages as S
+
+    class _Ev:
+        def __init__(self, pk, topics, source):
+            self.pk, self.topics, self.topics_source = pk, topics, source
+
+    # What survives exclude(topics_source='embed'): untagged (empty dict),
+    # keyword-fallback, and legacy list-format events.
+    rows = [
+        _Ev(1, {}, ''),               # untagged → _needs_tagging True
+        _Ev(2, {'x': 1}, 'keyword'),  # keyword-fallback → kept via OR
+        _Ev(3, ['legacy'], ''),       # legacy list → _needs_tagging True
+    ]
+
+    class _QS:
+        def __init__(self):
+            self.exclude_kwargs = None
+        def filter(self, **kw):
+            return self
+        def exclude(self, **kw):
+            self.exclude_kwargs = kw
+            return self
+        def only(self, *a):
+            return self
+        def count(self):
+            return len(rows)
+        def __iter__(self):
+            return iter(rows)
+
+    qs = _QS()
+
+    class _Mgr:
+        def filter(self, **kw):
+            return qs
+
+    class _Event:
+        objects = _Mgr()
+
+    with patch('core.models.Event', _Event):
+        ids = S._tag_pending_ids(None)
+        count = S._tag_pending_count()
+
+    assert qs.exclude_kwargs == {'topics_source': 'embed'}
+    assert ids == [1, 2, 3]
+    assert count == 3
+
+
 def test_run_due_stages_isolates_stage_failures():
     """One stage blowing up must not stop later stages from dispatching."""
     from services import stages as S
@@ -219,6 +270,7 @@ TESTS = [
     test_dispatch_releases_unclaimed_on_enqueue_failure,
     test_singleton_dispatch_enqueues_once,
     test_run_chunk_routes_to_handler,
+    test_tag_pending_narrows_at_db_and_keeps_python_safety_net,
     test_run_due_stages_isolates_stage_failures,
 ]
 

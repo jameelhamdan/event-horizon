@@ -115,6 +115,26 @@ def test_asymmetric_sentiment_zero_floored_at_0_3():
     assert asymmetric_sentiment(0.0) == 0.3
 
 
+# ── select_route_sentiment ─────────────────────────────────────────────────────
+
+def test_select_route_sentiment_prefers_finbert_when_present():
+    from services.forecasting.routing import select_route_sentiment
+    assert select_route_sentiment(0.4, -0.9) == 0.4
+
+
+def test_select_route_sentiment_keeps_neutral_zero_finbert():
+    # Regression: a genuine 0.0 FinBERT reading must NOT fall through to the
+    # general sentiment (the old `avg_finbert or avg_sentiment` bug did).
+    from services.forecasting.routing import select_route_sentiment
+    assert select_route_sentiment(0.0, -0.9) == 0.0
+
+
+def test_select_route_sentiment_falls_back_when_finbert_missing():
+    from services.forecasting.routing import select_route_sentiment
+    assert select_route_sentiment(None, -0.9) == -0.9
+    assert select_route_sentiment(None, None) is None
+
+
 # ── route_event_to_weighted_symbols ────────────────────────────────────────────
 
 def test_weighted_symbols_empty_when_no_symbols_routed():
@@ -190,6 +210,9 @@ _TESTS = [
     test_asymmetric_sentiment_positive_passthrough_above_floor,
     test_asymmetric_sentiment_small_positive_floored_at_0_3,
     test_asymmetric_sentiment_zero_floored_at_0_3,
+    test_select_route_sentiment_prefers_finbert_when_present,
+    test_select_route_sentiment_keeps_neutral_zero_finbert,
+    test_select_route_sentiment_falls_back_when_finbert_missing,
     test_weighted_symbols_empty_when_no_symbols_routed,
     test_weighted_symbols_shape_and_sign_for_negative_sentiment,
     test_weighted_symbols_positive_sentiment_gives_positive_weight,

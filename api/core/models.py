@@ -290,6 +290,9 @@ class Event(models.Model):
             models.Index(fields=['category']),
             models.Index(fields=['location_name']),
             models.Index(fields=['is_routed']),
+            # tag stage coverage/selection: filter started_at window, then
+            # exclude(topics_source='embed') to find events still needing tagging.
+            models.Index(fields=['topics_source'], name='core_event_topics_src_idx'),
             # Dashboard activity chart: month-range filter on started_at, then
             # sort+limit by avg_intensity to fetch the top N per month.
             models.Index(fields=['started_at', 'avg_intensity'], name='core_event_start_int_idx'),

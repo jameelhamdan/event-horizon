@@ -219,8 +219,11 @@ def aggregate_events(
         category = max(set(categories), key=categories.count) if categories else 'general'
         sub_categories = sorted({a.sub_category for a in group if a.sub_category})
 
-        from services.forecasting.routing import route_event_to_weighted_symbols
-        route_sentiment = avg_finbert_sentiment if avg_finbert_sentiment is not None else avg_sentiment
+        from services.forecasting.routing import route_event_to_weighted_symbols, select_route_sentiment
+        # Empty topic_slugs — topics aren't known until the tag stage, which then
+        # re-routes with the real slugs (higher signal). This inline pass gives the
+        # freshly-created event indicators immediately instead of a tag-cadence gap.
+        route_sentiment = select_route_sentiment(avg_finbert_sentiment, avg_sentiment)
         route_started = time.monotonic()
         affected_indicators = route_event_to_weighted_symbols(
             category, location, [], sub_categories, route_sentiment,

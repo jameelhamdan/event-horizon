@@ -137,6 +137,16 @@ def _country_risk(location: str) -> float:
     return best
 
 
+def select_route_sentiment(avg_finbert: float | None, avg_sentiment: float | None) -> float | None:
+    """Pick the sentiment that feeds routing: financial (FinBERT) if present, else
+    general (VADER). Single source of truth so every routing call site agrees.
+
+    Uses ``is not None`` — a genuine neutral 0.0 FinBERT reading must NOT fall
+    through to the general sentiment (``avg_finbert or avg_sentiment`` would).
+    """
+    return avg_finbert if avg_finbert is not None else avg_sentiment
+
+
 def asymmetric_sentiment(sentiment: float | None) -> float:
     """Signed sentiment multiplier with negative amplification.
 

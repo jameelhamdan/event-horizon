@@ -25,6 +25,14 @@ def _needs_tagging(topics) -> bool:
     return False
 
 
+def event_needs_tagging(event) -> bool:
+    """True if an event still needs (re)tagging: untagged or legacy-format topics,
+    or a keyword-fallback that should be upgraded to embed. Single source of truth
+    shared by the tag stage (services/stages.py) and tag_events_with_topics — the
+    Python-side counterpart to the DB narrow ``.exclude(topics_source='embed')``."""
+    return _needs_tagging(event.topics) or event.topics_source == 'keyword'
+
+
 def refresh_topics() -> int:
     """Scrape all configured sources and upsert Topic objects (is_current=True).
 
@@ -47,6 +55,17 @@ def refresh_topics() -> int:
     seen_slugs: set[str] = set()
     new_slugs: list[str] = []
     now = timezone.now()
+
+    # Prefetch every existing topic for the scraped slugs in one query (was one
+    # point-query per scraped topic), then batch the writes below.
+    scraped_slugs = [s for t in scraped if (s := (t.get('slug') or '').strip())]
+    existing_by_slug = {t.slug: t for t in Topic.objects.filter(slug__in=scraped_slugs)}
+    update_fields = [
+        'name', 'keywords', 'description', 'category', 'source_url',
+        'parent_slug', 'is_current', 'is_active', 'ended_at', 'source_ids',
+    ]
+    to_update: list = []
+    to_create: list = []
 
     for topic in scraped:
         slug = (topic.get('slug') or '').strip()
@@ -75,29 +94,30 @@ def refresh_topics() -> int:
             'ended_at':    None,
         }
 
-        existing = Topic.objects.filter(slug=slug).first()
+        existing = existing_by_slug.get(slug)
 
         if existing:
             for key, val in defaults.items():
                 setattr(existing, key, val)
-            merged_sources = list({*(existing.source_ids or []), *source_ids})
-            existing.source_ids = merged_sources
-            existing.save(update_fields=[
-                'name', 'keywords', 'description', 'category', 'source_url',
-                'parent_slug', 'is_current', 'is_active', 'ended_at', 'source_ids',
-            ])
+            existing.source_ids = list({*(existing.source_ids or []), *source_ids})
+            to_update.append(existing)
             logger.info('[topics] Updated topic: %s', slug)
         else:
             approx = topic.get('approximate_start')
             started_at = parse_approximate_date(approx) if approx else now
-            Topic.objects.create(
+            to_create.append(Topic(
                 slug=slug,
                 started_at=started_at,
                 source_ids=source_ids,
                 **defaults,
-            )
+            ))
             new_slugs.append(slug)
             logger.info('[topics] Created topic: %s', slug)
+
+    if to_update:
+        Topic.objects.bulk_update(to_update, update_fields, batch_size=500)
+    if to_create:
+        Topic.objects.bulk_create(to_create, batch_size=500)
 
     # Topics no longer in the scrape: mark is_current=False.
     stale_qs = Topic.objects.filter(is_current=True, is_active=True).exclude(
@@ -164,9 +184,9 @@ def prune_stale_topics(stale_days: int | None = None) -> int:
 
 
 def tag_events_with_topics(hours: int = 24, force_retag: bool = False) -> int:
-    """Match recent Events to active Topics using the LLM (batch mode).
-
-    Returns the number of events processed.
+    """Match recent Events to active Topics with the local EmbeddingTopicMatcher
+    (batch mode — no LLM; keyword matcher is the fallback). Returns the number of
+    events processed.
     """
     from core.models import Topic, Event
 
@@ -179,11 +199,9 @@ def tag_events_with_topics(hours: int = 24, force_retag: bool = False) -> int:
 
     qs = Event.objects.filter(started_at__gte=lookback)
     if not force_retag:
-        events_all = list(qs)
-        events = [
-            e for e in events_all
-            if _needs_tagging(e.topics) or e.topics_source == 'keyword'
-        ]
+        # DB-narrow to non-embed events, then the shared predicate as the
+        # legacy-list safety net (same selection the tag stage uses).
+        events = [e for e in qs.exclude(topics_source='embed') if event_needs_tagging(e)]
     else:
         events = list(qs)
 
@@ -215,11 +233,11 @@ def tag_events_by_ids(event_ids: list) -> int:
 
 
 def _apply_topic_tags(events: list, all_active_topics: list) -> int:
-    """Run the LLM matcher over events and persist topics + re-routed indicators.
-    Returns the number of events processed.
+    """Run the local EmbeddingTopicMatcher over events and persist topics +
+    re-routed indicators. Returns the number of events processed.
     """
     from services.topics.matcher import EmbeddingTopicMatcher
-    from services.forecasting.routing import route_event_to_weighted_symbols
+    from services.routing import route_event
     from services.utils import mark_stage
 
     matcher = EmbeddingTopicMatcher()
@@ -232,15 +250,9 @@ def _apply_topic_tags(events: list, all_active_topics: list) -> int:
         event.topic_slugs = list(result.keys())
         source = batch_sources.get(str(event.pk), 'keyword')
         event.topics_source = source
-        route_sentiment = (
-            event.avg_finbert_sentiment
-            if event.avg_finbert_sentiment is not None
-            else event.avg_sentiment
-        )
-        event.affected_indicators = route_event_to_weighted_symbols(
-            event.category, event.location_name, event.topic_slugs,
-            event.sub_categories or [], route_sentiment,
-        )
+        # topic_slugs is set above, so route off the event itself (shared router —
+        # consistent sentiment selection + router_source).
+        event.affected_indicators = route_event(event)
         event.is_routed = bool(event.affected_indicators)
         mark_stage(event, 'tag', ok=(source == 'embed'),
                    error=None if source == 'embed' else 'keyword fallback (embedding model unavailable)')
@@ -455,16 +467,8 @@ def retroactive_tag_topic(slug: str, lookback_hours: int = 72) -> int:
         event.topics_source = 'keyword'
 
         try:
-            from services.forecasting.routing import route_event_to_weighted_symbols
-            route_sentiment = (
-                event.avg_finbert_sentiment
-                if event.avg_finbert_sentiment is not None
-                else event.avg_sentiment
-            )
-            event.affected_indicators = route_event_to_weighted_symbols(
-                event.category, event.location_name, event.topic_slugs,
-                event.sub_categories or [], route_sentiment,
-            )
+            from services.routing import route_event
+            event.affected_indicators = route_event(event)
             event.is_routed = bool(event.affected_indicators)
         except Exception:
             pass  # routing is best-effort; topic tags are still saved
