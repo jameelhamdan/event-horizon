@@ -106,16 +106,32 @@ _debounce = _Debounce()
 
 # ── Per-provider call stats (Redis counters) ──────────────────────────────────
 
+# All req-stat keys expire this long after the provider's last call, so the ok/err
+# counters (and the last_ok/last_err timestamps) reflect only *recent* activity — a
+# provider that erupted in errors days ago but has been quiet since shows nothing,
+# and any non-zero err count on the dashboard is therefore known to be recent.
+_STAT_TTL = 24 * 3600  # 24h
+
+
 def _record_llm_call(provider: str, success: bool, latency_ms: int) -> None:
-    """Increment lightweight Redis counters for the admin dashboard."""
+    """Increment lightweight Redis counters for the admin dashboard.
+
+    Every touched key gets its TTL refreshed to _STAT_TTL, so the whole per-provider
+    stats block is a rolling 24h window rather than an all-time tally.
+    """
     try:
         from services.cache import get_redis_client, key_llm_req_stat
         rc = get_redis_client(write=True)
         pipe = rc.pipeline(transaction=False)
         key = 'ok' if success else 'err'
-        pipe.incr(key_llm_req_stat(provider, key))
-        pipe.incrbyfloat(key_llm_req_stat(provider, 'ms'), latency_ms)
-        pipe.set(key_llm_req_stat(provider, f'last_{key}'), int(_time.time()), ex=7 * 86400)
+        count_key = key_llm_req_stat(provider, key)
+        ms_key = key_llm_req_stat(provider, 'ms')
+        # incr/incrbyfloat create the key without a TTL, so re-arm expiry each call.
+        pipe.incr(count_key)
+        pipe.expire(count_key, _STAT_TTL)
+        pipe.incrbyfloat(ms_key, latency_ms)
+        pipe.expire(ms_key, _STAT_TTL)
+        pipe.set(key_llm_req_stat(provider, f'last_{key}'), int(_time.time()), ex=_STAT_TTL)
         pipe.execute()
     except Exception:
         pass

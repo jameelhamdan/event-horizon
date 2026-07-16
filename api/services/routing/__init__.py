@@ -7,18 +7,21 @@ import logging
 
 from django.utils import timezone
 
-from services.forecasting.routing import route_event_to_weighted_symbols
+from services.forecasting.routing import route_event_to_weighted_symbols, select_route_sentiment
 
 logger = logging.getLogger(__name__)
 
 
-def _route_event(event) -> list[dict]:
+def route_event(event) -> list[dict]:
     return route_event_to_weighted_symbols(
         category=event.category or 'general',
         location=event.location_name or '',
         topic_slugs=list(event.topic_slugs or []),
         sub_categories=list(event.sub_categories or []),
-        sentiment=getattr(event, 'avg_finbert_sentiment', None) or getattr(event, 'avg_sentiment', None),
+        sentiment=select_route_sentiment(
+            getattr(event, 'avg_finbert_sentiment', None),
+            getattr(event, 'avg_sentiment', None),
+        ),
     )
 
 
@@ -31,7 +34,7 @@ def route_events(events: list) -> int:
 
     now = timezone.now()
     for event in events:
-        indicators = _route_event(event)
+        indicators = route_event(event)
         event.affected_indicators = indicators
         event.router_source = 'rules'
         event.is_routed = bool(indicators)
@@ -46,4 +49,4 @@ def route_events(events: list) -> int:
     return len(events)
 
 
-__all__ = ['route_events']
+__all__ = ['route_event', 'route_events']

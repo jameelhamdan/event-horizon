@@ -125,7 +125,7 @@ api/
                          fallback), scraper, dedup, sources/current_events
     newsletter/         generator, sender
   migrations/  centralized, mapped via MIGRATION_MODULES
-  requirements-dev.txt  dev-only deps (ruff); ruff.toml — lint config (F + E9/W6 only)
+  pyproject.toml  runtime + dev ([dev] extra: ruff) deps, torch CPU index, ruff lint config (F + E9/W6/E502 only)
 ui/            React 19 + Vite SPA (TypeScript)
 ```
 

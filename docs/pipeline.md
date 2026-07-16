@@ -36,7 +36,8 @@ flowchart TD
     A1 --> P["process<br/><i>heavy · every 30m</i>"]
     P --> A2[(Article · enriched)]
     A2 --> GC["geocode<br/><i>heavy · every 12h (repair)</i>"]
-    A2 --> AG["aggregate<br/><i>heavy · every 30m · singleton</i>"]
+    A2 --> AG["aggregate<br/><i>heavy · every 30m · singleton · trailing 72h</i>"]
+    AF["aggregate_full_task<br/><i>heavy · daily 01:00 · full 168h</i>"] --> E
     AG --> E[(Event)]
     E --> T["tag<br/><i>heavy · every 60m</i>"]
     E --> RE["route<br/><i>heavy · every 6h (repair)</i>"]
@@ -62,7 +63,7 @@ daily `PriceBar` backfill, not the tick stream:
 flowchart LR
     YF([Yahoo + CoinGecko]) --> FP["run_stream_task(prices) · 5m"] --> PT[(PriceTick)]
     ECB([ECB]) --> FX["run_stream_task(forex) · 15m"] --> PT
-    AW([aviationweather]) --> NO["run_stream_task(notam) · 15m"] --> NZ[(Notam*)]
+    AW([FAA notamSearch · keyless]) -.-> NO["run_stream_task(notam) · 15m · off by default"] -.-> NZ[(Notam*)]
     USGS([USGS]) --> EQ["run_stream_task(earthquakes) · 5m"] --> EQR[(EarthquakeRecord)]
     PT & NZ & EQR -.->|Redis pub/sub| SSE([/api/sse → browser])
 ```
@@ -153,6 +154,12 @@ pass as `process` (`only_failed=True`).
 **Singleton stage** (no per-record fan-out — one `aggregate_events()` call per
 tick). **Code:** `services/workflow/events.py`.
 
+The 30-min stage clusters only the trailing `AGGREGATE_LIVE_WINDOW_HOURS` (72h) so
+each tick doesn't re-cluster a full week; `aggregate_full_task` (daily 01:00) re-runs
+`aggregate_events()` over the full 168h (`EVENT_STAGE_WINDOW_HOURS`) to catch
+multi-day events that age past the live window. `aggregate_events()` is idempotent
+(upsert keyed on `(location_name, category, day)`), so the two safely overlap.
+
 1. Bucket processed, located articles by `(city, country, category, N-day window)`.
 2. Semantically sub-cluster within a bucket (`SemanticClusterer`,
    cosine ≥ 0.55, multilingual MiniLM).
@@ -229,7 +236,7 @@ to a Redis SSE channel:
 | Stream | Cadence | Writes | Source |
 |--------|---------|--------|--------|
 | `prices` | 5m | `PriceTick` | Yahoo Finance + CoinGecko (incl. **^VIX**, DX-Y.NYB) |
-| `notam` | 15m | `NotamZone` (upsert) + `NotamRecord` (append) | aviationweather.gov |
+| `notam` | 15m | `NotamZone` (upsert) + `NotamRecord` (append) | FAA `notamSearch` (keyless — polls curated world airports, coords from ICAO Q-line). **Off by default** (`STREAM_NOTAM_ENABLED=False`): the endpoint is behind Akamai and bot-blocks bursty/low-reputation IPs, so opt in from a stable server IP and watch its `TaskRun`s |
 | `earthquakes` | 5m | `EarthquakeRecord` | USGS FDSN |
 | `forex` | 15m | `PriceTick` (`stream_key='forex'`) | ECB |
 

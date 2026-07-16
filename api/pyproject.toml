@@ -1,0 +1,102 @@
+[project]
+name = "event-horizon-api"
+version = "2.32.0"
+description = "Event Horizon — live global-event map: RSS ingestion, NLP/LLM analysis, geographic event clustering, and a DRF API."
+requires-python = ">=3.13"
+
+dependencies = [
+    # Django
+    "Django==6.0.6",
+    "djangorestframework==3.17.1",
+    "django-import-export==4.4.1",
+    "django-qsessions==2.1.0",
+    "python-decouple==3.8",
+    "django-redis>=5.4.0",
+    "celery[redis]>=5.4",
+    "croniter>=2.0.0",
+    # Celery ground-truth monitor (own container) + the /flower/ staff-only Django proxy in front of it
+    "flower>=2.0",
+    "django-proxy>=1.3",
+    "django-mongodb-backend==6.0.3",
+    "django-cors-headers==4.9.0",
+
+    # Deployment
+    "uvicorn==0.49.0",
+    "whitenoise==6.12.0",
+    "sentry-sdk",
+
+    # Ingestion
+    "requests>=2.34.2",
+    "feedparser>=6.0.12",
+    "transformers>=5.3",
+    "sentencepiece>=0.2.0",
+    "sacremoses>=0.1.1",
+    "sentence-transformers>=3.0",
+    "vaderSentiment>=3.3.2",
+    "openai>=2.24.0",
+    "httpx>=0.28.1",
+
+    # HTML parsing
+    "scrapling>=0.2.9",
+
+    # Geocoding
+    "geonamescache>=3.0.0",
+
+    # Email
+    "boto3>=1.37.0",
+    "markdown>=3.8.1",
+
+    # Stream data fetching (prices, forex, NOTAM, earthquakes)
+    "yfinance>=1.2.0",
+
+    # Forecasting — gradient-boosted directional + magnitude models, calibration, persistence
+    "lightgbm>=4.6.0",
+    "scikit-learn>=1.5.2",
+    "joblib>=1.3.0",
+
+    # PyTorch CPU-only — the +cpu build is resolved from the pytorch-cpu index
+    # below (see [tool.uv.sources]) to avoid pulling CUDA binaries.
+    "torch==2.12.1",
+]
+
+[project.optional-dependencies]
+# Development-only tooling — not installed in the Docker images.
+#   uv pip install -e '.[dev]'   (or: pip install -e '.[dev]')
+# Lint: run from api/ with `ruff check .` (config in [tool.ruff] below).
+dev = [
+    "ruff==0.15.20",
+]
+
+# This is an application, not an installable package — uv should not try to build it.
+[tool.uv]
+package = false
+
+# PyTorch CPU-only wheel index. `explicit = true` means it is only consulted for
+# packages that opt in via [tool.uv.sources], so nothing else resolves against it.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+# Lint config — run from api/ with `ruff check .` (ruff comes from the `dev` extra).
+# No line-length limit (E501 is not selected and this ceiling is effectively off).
+[tool.ruff]
+line-length = 320
+target-version = "py313"
+exclude = ["migrations"]
+
+[tool.ruff.lint]
+# Pyflakes (F): real defects — unused imports/variables, redefinitions, undefined
+# names. E9/W6: syntax-level errors. E502: backslash line continuations are
+# banned — wrap in parentheses instead. Deliberately conservative otherwise:
+# no style rules, so the linter only fails on things that are actually wrong.
+select = ["F", "E9", "W6", "E502"]
+# E502 is preview-only; preview affects only explicitly selected rules here.
+preview = true
+
+[tool.ruff.lint.per-file-ignores]
+# __init__.py re-exports look "unused" to F401
+"**/__init__.py" = ["F401"]

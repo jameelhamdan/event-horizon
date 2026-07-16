@@ -234,87 +234,74 @@ def _find_run(job_id):
     return TaskRun.objects.filter(job_id=job_id).order_by('-started_at').first()
 
 
-@task_prerun.connect
-def _on_task_prerun(sender=None, task_id=None, **kwargs) -> None:
-    """Celery task_prerun signal — fires in the worker right before a task body runs."""
+def _track_signal(job_id, action: str, fn) -> None:
+    """Look up the TaskRun for ``job_id`` and run ``fn(run)`` on it — the shared
+    scaffold for every Celery status signal below. Guarded by the tracking flag
+    and wrapped so history-keeping can never break the task it tracks (module
+    docstring). ``action`` names the signal for error logs. Handlers reach the
+    status enum via ``run.Status`` (instance → nested class), so no per-handler
+    ``TaskRun`` import is needed.
+    """
     if not settings.TASK_RUN_TRACKING_ENABLED:
         return
     try:
-        from django.utils import timezone
-        from core.models import TaskRun
-        run = _find_run(task_id)
-        if run is not None and run.status == TaskRun.Status.QUEUED:
-            run.status = TaskRun.Status.RUNNING
+        run = _find_run(job_id)
+        if run is not None:
+            fn(run)
+    except Exception:  # noqa: BLE001
+        logger.exception('[queue] %s tracking failed for job %s', action, job_id)
+
+
+@task_prerun.connect
+def _on_task_prerun(sender=None, task_id=None, **kwargs) -> None:
+    """Celery task_prerun signal — fires in the worker right before a task body runs."""
+    def _mark(run):
+        if run.status == run.Status.QUEUED:
+            from django.utils import timezone
+            run.status = run.Status.RUNNING
             run.picked_up_at = timezone.now()
             run.save(update_fields=['status', 'picked_up_at'])
-    except Exception:  # noqa: BLE001
-        logger.exception('[queue] task_prerun tracking failed for job %s', task_id)
+    _track_signal(task_id, 'task_prerun', _mark)
 
 
 @task_retry.connect
 def _on_task_retry(sender=None, request=None, reason=None, **kwargs) -> None:
     """Celery task_retry signal — fires when a failed task is rescheduled for another attempt."""
-    if not settings.TASK_RUN_TRACKING_ENABLED:
-        return
-    job_id = getattr(request, 'id', None)
-    try:
-        from core.models import TaskRun
-        run = _find_run(job_id)
-        if run is not None:
-            run.retries += 1
-            run.status = TaskRun.Status.QUEUED
-            run.error = str(reason)[:4000]
-            run.save(update_fields=['retries', 'status', 'error'])
-    except Exception:  # noqa: BLE001
-        logger.exception('[queue] task_retry tracking failed for job %s', job_id)
+    def _mark(run):
+        run.retries += 1
+        run.status = run.Status.QUEUED
+        run.error = str(reason)[:4000]
+        run.save(update_fields=['retries', 'status', 'error'])
+    _track_signal(getattr(request, 'id', None), 'task_retry', _mark)
 
 
 @task_success.connect
 def _on_task_success(sender=None, result=None, **kwargs) -> None:
     """Celery task_success signal — runs in the worker process right after a task returns."""
-    if not settings.TASK_RUN_TRACKING_ENABLED:
-        return
     job_id = getattr(getattr(sender, 'request', None), 'id', None)
-    if not job_id:
-        return
-    try:
-        from core.models import TaskRun
-        run = _find_run(job_id)
-        if run is not None:
-            _finish_task_run(run, TaskRun.Status.SUCCESS, result=result, has_result=True)
-    except Exception:  # noqa: BLE001
-        logger.exception('[queue] task_success tracking failed for job %s', job_id)
+    _track_signal(
+        job_id, 'task_success',
+        lambda run: _finish_task_run(run, run.Status.SUCCESS, result=result, has_result=True),
+    )
 
 
 @task_failure.connect
 def _on_task_failure(sender=None, task_id=None, exception=None, einfo=None, **kwargs) -> None:
     """Celery task_failure signal — runs in the worker process after a task raises
     (only once retries, if any, are exhausted — see _on_task_retry for the interim state)."""
-    if not settings.TASK_RUN_TRACKING_ENABLED:
-        return
-    try:
-        from core.models import TaskRun
-        run = _find_run(task_id)
-        if run is not None:
-            error = f'{type(exception).__name__}: {exception}'
-            _finish_task_run(run, TaskRun.Status.FAILED, error=error,
-                              traceback_str=str(einfo) if einfo is not None else None)
-    except Exception:  # noqa: BLE001
-        logger.exception('[queue] task_failure tracking failed for job %s', task_id)
+    def _mark(run):
+        error = f'{type(exception).__name__}: {exception}'
+        _finish_task_run(run, run.Status.FAILED, error=error,
+                          traceback_str=str(einfo) if einfo is not None else None)
+    _track_signal(task_id, 'task_failure', _mark)
 
 
 @task_revoked.connect
 def _on_task_revoked(sender=None, request=None, terminated=None, signum=None, expired=None, **kwargs) -> None:
     """Celery task_revoked signal — fires when a task is cancelled (app.control.revoke),
     whether it was queued, actively running, or expired before being picked up."""
-    if not settings.TASK_RUN_TRACKING_ENABLED:
-        return
-    job_id = getattr(request, 'id', None)
-    try:
-        from core.models import TaskRun
-        run = _find_run(job_id)
-        if run is not None and run.status in (TaskRun.Status.QUEUED, TaskRun.Status.RUNNING):
+    def _mark(run):
+        if run.status in (run.Status.QUEUED, run.Status.RUNNING):
             reason = 'expired' if expired else ('terminated' if terminated else 'revoked')
-            _finish_task_run(run, TaskRun.Status.CANCELLED, error=reason)
-    except Exception:  # noqa: BLE001
-        logger.exception('[queue] task_revoked tracking failed for job %s', job_id)
+            _finish_task_run(run, run.Status.CANCELLED, error=reason)
+    _track_signal(getattr(request, 'id', None), 'task_revoked', _mark)

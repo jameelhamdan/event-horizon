@@ -180,6 +180,21 @@ def discover_topics_task(hours: int = 6) -> int:
     return discover_topics_from_events(hours=hours)
 
 
+@shared_task
+@_log_task
+def aggregate_full_task() -> int:
+    """Daily full-window aggregate sweep. The live 'aggregate' stage clusters only
+    the trailing AGGREGATE_LIVE_WINDOW_HOURS (72h) each tick; this re-runs
+    aggregate_events over the full EVENT_STAGE_WINDOW_HOURS (168h) once a day so
+    multi-day events whose articles span >72h still re-aggregate after aging past
+    the live window. Idempotent (upsert keyed on location/category/day), routes
+    inline. Returns created+updated."""
+    from services.stages import EVENT_STAGE_WINDOW_HOURS
+    from services.workflow import aggregate_events
+    created, updated = aggregate_events(hours=EVENT_STAGE_WINDOW_HOURS)
+    return created + updated
+
+
 # ── LLM maintenance ──────────────────────────────────────────────────────────────
 
 @shared_task

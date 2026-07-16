@@ -2,6 +2,7 @@ from services.workflow.articles import fetch_source, fetch_sources, process_arti
 from services.workflow.events import aggregate_events, pipeline_coverage
 from services.workflow.topics import (
     _needs_tagging,
+    event_needs_tagging,
     refresh_topics,
     prune_stale_topics,
     tag_events_with_topics,
@@ -17,6 +18,7 @@ __all__ = [
     'aggregate_events',
     'pipeline_coverage',
     '_needs_tagging',
+    'event_needs_tagging',
     'refresh_topics',
     'prune_stale_topics',
     'tag_events_with_topics',

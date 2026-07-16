@@ -152,18 +152,36 @@ def _geocode_handler(ids: list) -> int:
 
 
 def _aggregate_handler(_ids) -> int:
+    from django.conf import settings
     from services.workflow import aggregate_events
-    created, updated = aggregate_events(hours=EVENT_STAGE_WINDOW_HOURS)
+    # Live stage clusters only the trailing AGGREGATE_LIVE_WINDOW_HOURS each tick;
+    # aggregate_full_task sweeps the full EVENT_STAGE_WINDOW_HOURS daily.
+    created, updated = aggregate_events(hours=settings.AGGREGATE_LIVE_WINDOW_HOURS)
     return created + updated
 
 
 def _tag_pending_ids(limit: int | None) -> list:
     from core import models as m
-    from services.workflow import _needs_tagging
+    from services.workflow import event_needs_tagging
     lookback = _now() - timedelta(hours=EVENT_STAGE_WINDOW_HOURS)
-    qs = m.Event.objects.filter(started_at__gte=lookback).only('pk', 'topics', 'topics_source')
-    ids = [e.pk for e in qs if _needs_tagging(e.topics) or e.topics_source == 'keyword']
+    # DB-narrow to non-embed-tagged events (untagged / keyword-fallback / legacy);
+    # an embed pass never needs re-tagging. The Python check stays only as a
+    # legacy-list safety net over the already-narrowed set — no more full scan.
+    qs = (
+        m.Event.objects.filter(started_at__gte=lookback)
+        .exclude(topics_source='embed')
+        .only('pk', 'topics', 'topics_source')
+    )
+    ids = [e.pk for e in qs if event_needs_tagging(e)]
     return ids[:limit] if limit else ids
+
+
+def _tag_pending_count() -> int:
+    """Cheap DB-side count for the coverage table — mirrors _tag_pending_ids'
+    DB predicate without materializing/filtering every event in Python."""
+    from core import models as m
+    lookback = _now() - timedelta(hours=EVENT_STAGE_WINDOW_HOURS)
+    return m.Event.objects.filter(started_at__gte=lookback).exclude(topics_source='embed').count()
 
 
 def _tag_handler(ids: list) -> int:
@@ -295,7 +313,7 @@ REGISTRY: dict[str, Stage] = {s.name: s for s in [
         name='tag', label='Untagged / keyword-fallback events', model='event',
         queue='heavy', chunk_size=10, limit=500, every_minutes=60,
         handler=_tag_handler, pending_ids=_tag_pending_ids,
-        pending_count=lambda: len(_tag_pending_ids(None)),
+        pending_count=_tag_pending_count,
         error_stage_key='tag',
     ),
     Stage(
