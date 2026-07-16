@@ -53,7 +53,7 @@ python -m tests.tests_forecasting_routing
 python -m tests.tests_forecast_evaluate
 DJANGO_SETTINGS_MODULE=settings.base python -m tests.tests_forecast   # slower (LightGBM roundtrip)
 
-# Lint (dev-only tooling, not in the Docker image — pip install -r requirements-dev.txt)
+# Lint (dev-only tooling, not in the Docker image — uv pip install -e '.[dev]' or pip install -e '.[dev]')
 ruff check .
 ```
 
@@ -133,8 +133,7 @@ api/                       PYTHONPATH root inside Docker (/app)
                            persists Event.affected_indicators (route_events()); no LLM path
   migrations/              Centralized — all apps map here via MIGRATION_MODULES
   tests/                   Management-command e2e tests + offline unit tests
-  requirements-dev.txt     Dev-only deps (currently just ruff) — not installed in Docker images
-  ruff.toml                Lint config (F + E9/W6 rules only — real defects, no style rules)
+  pyproject.toml           Runtime deps ([project.dependencies]), dev extra ([project.optional-dependencies].dev — currently just ruff, not installed in Docker), torch CPU index (tool.uv.sources), and ruff lint config (tool.ruff — F + E9/W6/E502 rules only, no style rules)
 ```
 
 ### Task execution model
@@ -167,9 +166,12 @@ pipeline_tick_task (every 10m) — dispatches due stages from services/stages.py
                               — local: VADER (sentiment), FinBERT (financial
                                 sentiment), MarianMT (EN→AR translation)
   geocode   (12h, heavy)    — repair: reprocess processed-but-unlocated articles
-  aggregate (30m, heavy)    — singleton: cluster + upsert Events, routes inline
+  aggregate (30m, heavy)    — singleton: cluster + upsert Events, routes inline;
+                              trailing AGGREGATE_LIVE_WINDOW_HOURS (72h) per tick
   tag       (60m, heavy)    — EmbeddingTopicMatcher chunks of 10 (local — no LLM)
   route     (6h, heavy)     — repair only: events that missed inline routing
+aggregate_full_task (daily 01:00) — full 168h aggregate sweep, so multi-day events
+  that age past the live 72h window still re-aggregate
 discover_topics_task (daily 05:00, LLM)
 refresh_topics_task (daily 04:00, WikipediaCurrentEventsAdapter + LLM enrichment)
 generate_newsletter_task (daily 06:00, LLM)
