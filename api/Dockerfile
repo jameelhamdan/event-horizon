@@ -1,6 +1,6 @@
 FROM python:3.13-slim
 
-COPY ./requirements.txt /requirements.txt
+COPY ./pyproject.toml /build/pyproject.toml
 
 ARG TARGETARCH=amd64
 RUN apt-get update && apt-get upgrade -y \
@@ -14,13 +14,15 @@ RUN apt-get update && apt-get upgrade -y \
 # Store HF model cache inside /py so it's readable by all users
 ENV HF_HOME=/py/huggingface
 ENV UV_INDEX_STRATEGY=unsafe-best-match
+# uv sync targets this env instead of creating .venv; keeps deps in /py.
+ENV UV_PROJECT_ENVIRONMENT=/py
 
 COPY ./scripts/init_models.py /init_models.py
 COPY ./settings/model_names.py /model_names.py
 
 RUN pip install --no-cache-dir uv \
     && uv venv /py \
-    && uv pip install --python /py/bin/python -r /requirements.txt \
+    && uv sync --project /build --no-dev --no-install-project \
     && /py/bin/python /init_models.py \
     && adduser --disabled-password djangouser \
     && chown -R djangouser /py/huggingface
