@@ -10,7 +10,7 @@ Run standalone:
     DJANGO_SETTINGS_MODULE=settings.base python -m tests.tests_cache
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from tests._runner import bootstrap_django, run
 
@@ -165,6 +165,27 @@ def test_get_redis_client_uses_write_flag():
     assert result is fake_client
 
 
+def test_record_llm_call_expires_stats_after_24h():
+    """Per-provider req-stat counters must carry a rolling 24h TTL so a non-zero
+    err count on the dashboard is always known to be *recent*."""
+    from services import llm
+
+    pipe = MagicMock()
+    fake_client = MagicMock()
+    fake_client.pipeline.return_value = pipe
+
+    with patch('services.cache.get_redis_client', return_value=fake_client):
+        llm._record_llm_call('groq', success=False, latency_ms=42)
+
+    assert llm._STAT_TTL == 24 * 3600
+    pipe.incr.assert_called_once_with('llm:req:groq:err')
+    # Both the err counter and the ms accumulator re-arm their expiry each call.
+    pipe.expire.assert_any_call('llm:req:groq:err', llm._STAT_TTL)
+    pipe.expire.assert_any_call('llm:req:groq:ms', llm._STAT_TTL)
+    # last_err timestamp gets the same expiry (was 7d before).
+    pipe.set.assert_called_once_with('llm:req:groq:last_err', ANY, ex=llm._STAT_TTL)
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 _TESTS = [
@@ -182,6 +203,7 @@ _TESTS = [
     test_blocklist_falls_back_to_local_dict_when_redis_unavailable,
     test_redis_set_add_and_members,
     test_get_redis_client_uses_write_flag,
+    test_record_llm_call_expires_stats_after_24h,
 ]
 
 
