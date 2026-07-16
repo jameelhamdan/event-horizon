@@ -353,7 +353,12 @@ OLLAMA_TIMEOUTS = {'small': 15, 'medium': 25, 'large': 45}
 OLLAMA_MAX_CONCURRENCY = config('OLLAMA_MAX_CONCURRENCY', default=1, cast=int)
 OLLAMA_ACQUIRE_SECONDS = config('OLLAMA_ACQUIRE_SECONDS', default=2.0, cast=float)
 
-# Routing: role -> provider name OR ordered fallback list (tried in order on failure).
+# Routing: role -> provider name OR a list of legs tried in order on failure.
+# A leg is a provider name (strict priority) OR a set of names (a *balanced*
+# group — calls spread across its members concurrently with in-group failover,
+# instead of hammering one and only falling over on error). Balancing multiplies
+# throughput; use it where many concurrent calls would otherwise serialize on a
+# single provider's rate limit (e.g. analyzer backlog burn).
 # Unconfigured providers are silently skipped; unknown roles fall back to 'default'.
 #
 # Ollama tiers map task complexity to model size (4b/8b/14b).
@@ -369,7 +374,10 @@ OLLAMA_ACQUIRE_SECONDS = config('OLLAMA_ACQUIRE_SECONDS', default=2.0, cast=floa
 # See CLAUDE.md "LLM routing" for the full local-model map.
 LLM_ROUTES = {
     'default':       ['groq', 'cerebras', 'openrouter', 'ollama_medium'],
-    'analyzer_lite': ['groq', 'cerebras', 'mistral', 'openrouter', 'ollama_medium'],  # article analysis (EN-only LLM output)
+    # Balanced across the 3 fast free providers so backlog reprocessing fans out
+    # concurrently instead of serializing on groq's rate limit, then strict
+    # failover to openrouter → ollama. (sentiment/translation are local — see below)
+    'analyzer_lite': [{'groq', 'cerebras', 'mistral'}, 'openrouter', 'ollama_medium'],
     'newsletter':    ['cerebras', 'openrouter', 'ollama_large'],           # long-form, low volume
     'scoring':       ['groq', 'cerebras', 'openrouter', 'ollama_small'],
     'historical':    ['groq', 'cerebras', 'openrouter', 'ollama_small'],

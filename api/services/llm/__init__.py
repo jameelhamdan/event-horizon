@@ -1,5 +1,7 @@
 import hashlib
+import itertools
 import logging
+import random
 import re
 import threading
 import time as _time
@@ -542,6 +544,52 @@ class FallbackLLMService(BaseLLMService):
         raise LLMError(f'All LLM providers failed ({", ".join(self._names)})') from last_error
 
 
+class BalancedLLMService(BaseLLMService):
+    """Spreads calls across a group of interchangeable providers so they run
+    concurrently, instead of hammering one and only failing over on error.
+
+    Each call starts at a rotating offset (round-robin) and, on failure, walks
+    the rest of the group — so concurrent workers land on *different* providers
+    while any single call still has in-group failover. Raises LLMError only if
+    every provider in the group fails (the outer FallbackLLMService then moves
+    on to the next leg, e.g. openrouter → ollama).
+
+    Unlike FallbackLLMService (strict priority order), this exists to multiply
+    throughput: with groq+mistral+cerebras balanced, N concurrent analyzer
+    chunks fan out across all three rather than serializing on groq's rate limit.
+    The per-process counter is seeded randomly so prefork workers don't all
+    start on the same provider.
+    """
+
+    def __init__(self, backends: list[BaseLLMService], names: list[str]) -> None:
+        if not backends:
+            raise LLMError('BalancedLLMService requires at least one backend')
+        self._backends = backends
+        self._names = names
+        self._counter = itertools.count(random.randrange(len(backends)))
+
+    @property
+    def _model(self) -> str:
+        return ' | '.join(self._names)
+
+    def chat_with_usage(self, messages: list[dict], **kwargs) -> tuple[str, dict]:
+        n = len(self._backends)
+        start = next(self._counter) % n  # next() is atomic under the GIL
+        last_error: Exception | None = None
+        for k in range(n):
+            i = (start + k) % n
+            try:
+                result = self._backends[i].chat_with_usage(messages, **kwargs)
+            except LLMError as e:
+                last_error = e
+                logger.warning('LLM provider %r failed, trying next: %s', self._names[i], e)
+                continue
+            if k > 0:
+                logger.info('LLM provider %r succeeded after %d in-group fallback(s)', self._names[i], k)
+            return result
+        raise LLMError(f'All balanced providers failed ({", ".join(self._names)})') from last_error
+
+
 # ── Provider registry ─────────────────────────────────────────────────────────
 
 _specs_cache: dict[str, dict] | None = None
@@ -650,24 +698,48 @@ def get_llm_service(role: str = 'default') -> BaseLLMService:
     route = routes.get(role) or routes.get('default')
     if route is None:
         raise LLMError(f'No LLM route for role {role!r} and no default route configured')
-    names = [route] if isinstance(route, str) else list(route)
+    # A route is a provider name, or a list whose elements are either a provider
+    # name (strict-priority leg) or a set of names (a balanced group — spread
+    # across concurrently, in-group failover). e.g.
+    #   [{'groq', 'cerebras', 'mistral'}, 'openrouter', 'ollama_medium']
+    elements = [route] if isinstance(route, str) else list(route)
 
     specs = _provider_specs()
-    backends: list[BaseLLMService] = []
-    resolved: list[str] = []
-    for name in names:
-        backend = _get_backend(name, specs)
-        if backend is not None:
-            backends.append(backend)
-            resolved.append(name)
+    legs: list[BaseLLMService] = []      # one per route element (may itself be balanced)
+    leg_names: list[str] = []            # aligned with legs, for FallbackLLMService
+    tried: list[str] = []
+    for element in elements:
+        if isinstance(element, (set, frozenset)):
+            # Balanced group: sort for stable identity; skip unconfigured members.
+            group_backends, group_names = [], []
+            for name in sorted(element):
+                tried.append(name)
+                backend = _get_backend(name, specs)
+                if backend is not None:
+                    group_backends.append(backend)
+                    group_names.append(name)
+            if not group_backends:
+                continue
+            if len(group_backends) == 1:
+                legs.append(group_backends[0])
+                leg_names.append(group_names[0])
+            else:
+                legs.append(BalancedLLMService(group_backends, group_names))
+                leg_names.append('{' + '|'.join(group_names) + '}')
+        else:
+            tried.append(element)
+            backend = _get_backend(element, specs)
+            if backend is not None:
+                legs.append(backend)
+                leg_names.append(element)
 
-    if not backends:
+    if not legs:
         raise LLMError(
-            f'No configured LLM provider for role {role!r} (tried: {", ".join(names)})'
+            f'No configured LLM provider for role {role!r} (tried: {", ".join(tried)})'
         )
-    if len(backends) == 1:
-        return backends[0]
-    return FallbackLLMService(backends, resolved)
+    if len(legs) == 1:
+        return legs[0]
+    return FallbackLLMService(legs, leg_names)
 
 
 def resolved_provider_names(service: BaseLLMService) -> list[str]:
@@ -679,6 +751,13 @@ def resolved_provider_names(service: BaseLLMService) -> list[str]:
     so the effective primary can differ from route[0] (e.g. a deployment with
     only OLLAMA_BASE_URL set resolves straight to Ollama).
     """
-    if isinstance(service, FallbackLLMService):
+    if isinstance(service, BalancedLLMService):
         return list(service._names)
+    if isinstance(service, FallbackLLMService):
+        # Flatten each leg — a leg may itself be a balanced group — so callers
+        # sizing off names[0] see a real provider, not the '{a|b}' group label.
+        flat: list[str] = []
+        for backend in service._backends:
+            flat.extend(resolved_provider_names(backend))
+        return flat
     return [getattr(service, '_provider', 'unknown')]

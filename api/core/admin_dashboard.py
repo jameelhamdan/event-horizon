@@ -436,10 +436,14 @@ def _llm_status():
 
         all_providers: set[str] = set()
         for route in settings.LLM_ROUTES.values():
-            if isinstance(route, str):
-                all_providers.add(route)
-            else:
-                all_providers.update(route)
+            # A route is a name or a list of legs; a leg is a name or a set of
+            # names (balanced group). Flatten one level so groups don't leak an
+            # unhashable set into all_providers.
+            for leg in ([route] if isinstance(route, str) else route):
+                if isinstance(leg, (set, frozenset, list, tuple)):
+                    all_providers.update(leg)
+                else:
+                    all_providers.add(leg)
 
         rows = []
         for provider in sorted(all_providers):
