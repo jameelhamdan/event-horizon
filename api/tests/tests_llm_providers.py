@@ -45,7 +45,7 @@ PROVIDERS = {
         'base_url': 'https://api.cerebras.ai/v1',
         'keys_var': 'CEREBRAS_API_KEYS',
         'model_var': 'CEREBRAS_MODEL',
-        'default_model': 'gemma-4-31b',
+        'default_model': 'gpt-oss-120b',
     },
 }
 

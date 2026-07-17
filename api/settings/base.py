@@ -312,12 +312,17 @@ GROQ_MODEL = 'llama-3.1-8b-instant'
 # NB: very low request quota (5 req/min, 150/hour, 2,400/day; 30k tokens/min) —
 # use as a fast *secondary*, or primary only for low-volume roles (newsletter).
 CEREBRAS_API_KEYS = config('CEREBRAS_API_KEYS', default='')
-# 'gemma-4-31b' was not a model Cerebras serves (Gemma is Google's; Cerebras has
-# no gemma-4/31b), so the cerebras leg silently failed over on every call and
-# never contributed. llama-3.3-70b is a generally-available Cerebras model; keep
-# it env-overridable so the operator can swap it without a redeploy when the
-# served roster changes. Confirm with: manage.py test_llm --role scoring.
-CEREBRAS_MODEL = config('CEREBRAS_MODEL', default='llama-3.3-70b')
+# Cerebras's served model roster drifts over time — this default has already had
+# to change twice (gemma-4-31b was never served; llama-3.3-70b was later pulled
+# and started returning 404 model_not_found). Don't assume a model is still
+# served: re-verify with GET https://api.cerebras.ai/v1/models, and prefer a
+# model marked Production on Cerebras's model overview page
+# (inference-docs.cerebras.ai/models/overview) over a Preview one — Preview
+# models "should not be used in production, as they may be discontinued on short
+# notice." gpt-oss-120b is currently the only Production model. Keep it
+# env-overridable so ops can swap it without a redeploy when the roster drifts
+# again. Confirm with: manage.py test_llm --role scoring.
+CEREBRAS_MODEL = config('CEREBRAS_MODEL', default='gpt-oss-120b')
 
 # Mistral — free "Experiment" tier, OpenAI-compatible (https://api.mistral.ai/v1).
 # Requires opting into data-training on La Plateforme per account (we only send
