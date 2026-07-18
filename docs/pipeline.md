@@ -2,7 +2,7 @@
 
 The article→event pipeline is declared as a **stage registry**
 (`api/services/stages.py`), not a set of per-step tasks. Each pull-based stage
-(fetch → score → process → geocode-repair → aggregate → tag → route) declares
+(fetch → score → process → aggregate → tag → route) declares
 how to find pending work, how to process it, and its own chunk size/queue/cadence.
 Exactly two Celery tasks execute every stage:
 
@@ -35,7 +35,6 @@ flowchart TD
     SC --> A1[(Article · scored)]
     A1 --> P["process<br/><i>heavy · every 30m</i>"]
     P --> A2[(Article · enriched)]
-    A2 --> GC["geocode<br/><i>heavy · every 12h (repair)</i>"]
     A2 --> AG["aggregate<br/><i>heavy · every 30m · singleton · trailing 72h</i>"]
     AF["aggregate_full_task<br/><i>heavy · daily 01:00 · full 168h</i>"] --> E
     AG --> E[(Event)]
@@ -139,13 +138,11 @@ python manage.py process_articles --source-code <code>
 python manage.py process_articles --reprocess             # re-run over already-processed rows
 ```
 
----
-
-## Stage: geocode (repair)
-
-Reprocesses articles that were `process`ed but ended up with no `location`
-(articles not already marked `geo_failed` in `extra_data`). Runs the same NLP
-pass as `process` (`only_failed=True`).
+Geocoding is **not a separate stage** — it happens inline in `process`
+(`analyzer._geocode`, a local `geonamescache` lookup of the LLM's country/city).
+A processed article that resolves no location is terminal (it simply never
+aggregates into an event); a *failed* analysis stays unprocessed and is retried
+by the `process` stage rather than sitting in a repair loop.
 
 ---
 
@@ -254,10 +251,11 @@ unsubscribe). See [`../CLAUDE.md` → Newsletter](../CLAUDE.md).
 
 ## Maintenance & health tasks
 
+Article records are never deleted — every article is kept as training/distillation
+data, so there are no cleanup/prune tasks.
+
 | Task | Cadence | Purpose |
 |------|---------|---------|
-| `cleanup_low_importance_articles_task` | daily 03:00 | Delete articles below `ARTICLE_MIN_IMPORTANCE` after grace period |
-| `prune_stale_articles_task` | daily 03:30 | Remove old unprocessed articles |
 | `adjust_source_weights_task` | weekly (Sun 02:00) | Adjust source reliability weights based on signal quality |
 | `pipeline_health_task` | every 30m | Freshness/staleness report (articles, streams, current-topics, per-stage staleness); persisted to Redis and rendered on `/admin/dashboard/`'s Health section |
 | `backfill_prices_task` | weekly (Sun 00:00) | Backfill daily OHLC for active symbols (bulk queue) |

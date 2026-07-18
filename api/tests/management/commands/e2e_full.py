@@ -259,7 +259,6 @@ class Command(BaseCommand):
             ss = sample.stage_status or {}
             c.soft('process.stage_status_process', (ss.get('process') or {}).get('ok') is True,
                    f'stage_status={ss}')
-            c.soft('process.stage_status_geocode_present', 'geocode' in ss)
 
     # ── Stage 4: aggregate ────────────────────────────────────────────────
 
@@ -347,7 +346,7 @@ class Command(BaseCommand):
             return
         c.hard('coverage.runs', isinstance(cov, list) and len(cov) >= 1)
         stages = {row.get('stage') for row in cov}
-        c.hard('coverage.has_stages', {'process', 'geocode', 'tag', 'route'} <= stages,
+        c.hard('coverage.has_stages', {'process', 'tag', 'route'} <= stages,
                f'{sorted(stages)}')
         shape_ok = all({'stage', 'label', 'need', 'action'} <= set(row) for row in cov)
         c.hard('coverage.row_shape', shape_ok)

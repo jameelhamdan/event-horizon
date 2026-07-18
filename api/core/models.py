@@ -128,14 +128,16 @@ class Article(models.Model):
 
     # Per-stage pipeline outcome tracking — written by each per-record worker.
     # Shape: {"process": {"ok": true, "at": "ISO-8601", "error": null},
-    #         "geocode": {"ok": false, "at": "...", "error": "LLM unavailable"}, ...}
+    #         "score": {"ok": false, "at": "...", "error": "LLM unavailable"}, ...}
     # Makes the *reason* a stage is missing visible (not just that it's missing).
     stage_status = models.JSONField(default=dict, blank=True)
 
     # Media — populated during fetch (RSS) or process_articles (OG image fallback)
     banner_image_url = models.URLField(max_length=512, null=True, blank=True)
 
-    # Geocoding — populated by aggregate_events
+    # Geocoding — populated by process_articles (analyzer.py's country/city →
+    # services.processing.analyzer._geocode, a local geonamescache lookup). NOT
+    # set by aggregate_events; the Event carries its own lat/lon separately.
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
 
@@ -148,13 +150,6 @@ class Article(models.Model):
     # {"provider": "groq", "model": "llama-3.1-8b-instant",
     #  "prompt_tokens": 420, "completion_tokens": 180, "total_tokens": 600}
     llm_usage = models.JSONField(default=dict, blank=True)
-
-    # Set by process_articles(only_failed=True) when the LLM answered but the
-    # article genuinely has no resolvable location — excludes it from future
-    # geocode-repair passes. Real field (not extra_data-nested) so the geocode
-    # stage's pending query can filter it in Mongo instead of loading extra_data
-    # for every unlocated article into Python.
-    geo_failed = models.BooleanField(default=False)
 
     # Set on articles saved by a fetch-only backfill (BACKFILL_LLM_ENABLED=False):
     # they are fetched + stored but not scored/processed, and the live score/process
@@ -186,7 +181,6 @@ class Article(models.Model):
             models.Index(fields=['category']),
             models.Index(fields=['processed_on']),
             models.Index(fields=['location']),
-            models.Index(fields=['geo_failed']),
             # annotate_deferred_articles_task selects the (small) deferred set;
             # the live score/process stages exclude it from their pending queries.
             models.Index(fields=['annotation_deferred'], name='core_article_annot_defer_idx'),
@@ -199,6 +193,31 @@ class Article(models.Model):
 
     def __str__(self):
         return self.title
+
+    # Canonical annotation-pipeline states — the single vocabulary for "where is
+    # this article". Kept in sync with the stage predicates in services/stages.py.
+    STATE_DEFERRED = 'deferred'    # backfill / reset failures, parked for the local annotator
+    STATE_FETCHED = 'fetched'      # ingested, not yet importance-scored
+    STATE_SCORED = 'scored'        # scored, awaiting the process stage (or parked below threshold)
+    STATE_PROCESSED = 'processed'  # analysed — terminal, with or without a resolved location
+
+    @property
+    def pipeline_state(self) -> str:
+        """Where this article sits in the annotation pipeline, derived from the
+        SAME signals services/stages.py selects on (never stored, so it can't
+        drift from the stage predicates). See docs/pipeline-state.md.
+
+        Location is an attribute of a processed article, not a pipeline step: a
+        processed article with no resolved location is still 'processed' (it just
+        never aggregates into an event). STATE_SCORED covers both process-eligible
+        and parked-below-threshold articles — the threshold gate lives in the
+        process stage, not here.
+        """
+        if self.annotation_deferred:
+            return self.STATE_DEFERRED
+        if self.processed_on is None:
+            return self.STATE_SCORED if self.importance_score is not None else self.STATE_FETCHED
+        return self.STATE_PROCESSED
 
 
 class Event(models.Model):
@@ -718,7 +737,7 @@ class RuntimeConfig(models.Model):
     # Master LLM switches. When off, the corresponding pipeline pauses its
     # LLM-consuming work (the articles simply accumulate as pending and resume
     # when re-enabled) — see services/stages.py (live) and backfill_day_chunk_task.
-    live_llm_enabled = models.BooleanField(default=True)       # live score/process/geocode stages
+    live_llm_enabled = models.BooleanField(default=True)       # live score/process stages
     backfill_llm_enabled = models.BooleanField(default=True)   # historical backfill annotation
 
     created_on = models.DateTimeField(auto_now_add=True)

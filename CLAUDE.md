@@ -145,7 +145,7 @@ Three queues:
 - `heavy` — NLP/LLM work (scoring, processing, clustering, topic matching, newsletters) — 4 workers (`celery -A app worker -Q heavy`); ML models load lazily per job, no preloading
 - `bulk` — long one-shot jobs and pure dispatchers (price backfills, model training, the historical-article backfill dispatcher — its actual per-day-chunk fetch/save/process work runs on `heavy`, bounded to ~10min per chunk) — 1 worker
 
-**The pipeline is a stage registry, not a set of per-step tasks.** `services/stages.py` declares each pull-based stage (fetch → score → process → geocode-repair → aggregate → tag → route) with its selection predicate, handler, chunk size, queue, and cadence. Exactly two Celery tasks execute all of them:
+**The pipeline is a stage registry, not a set of per-step tasks.** `services/stages.py` declares each pull-based stage (fetch → score → process → aggregate → tag → route) with its selection predicate, handler, chunk size, queue, and cadence. Geocoding is not a stage — it runs inline in `process` (a local `geonamescache` lookup in `analyzer._geocode`). Exactly two Celery tasks execute all of them:
 - `pipeline_tick_task` (cron, every 10 min) — dispatches every enabled stage that is due and has pending work
 - `run_stage_chunk_task(stage_name, ids)` — the only fan-out worker
 
@@ -164,8 +164,10 @@ pipeline_tick_task (every 10m) — dispatches due stages from services/stages.py
   process   (30m, heavy)    — chunks of 8 = one batched LLM call
                               — LLM: category/sub-category/geo/intensity + EN translation
                               — local: VADER (sentiment), FinBERT (financial
-                                sentiment), MarianMT (EN→AR translation)
-  geocode   (12h, heavy)    — repair: reprocess processed-but-unlocated articles
+                                sentiment), MarianMT (EN→AR translation),
+                                geonamescache (geocode — inline, not a stage)
+                              — a failed LLM analysis leaves processed_on NULL so
+                                the stage retries it (no separate repair stage)
   aggregate (30m, heavy)    — singleton: cluster + upsert Events, routes inline;
                               trailing AGGREGATE_LIVE_WINDOW_HOURS (72h) per tick
   tag       (60m, heavy)    — EmbeddingTopicMatcher chunks of 10 (local — no LLM)

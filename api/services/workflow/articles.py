@@ -103,17 +103,21 @@ def _fetch_og_image(url: str) -> str | None:
         return None
 
 
-def process_articles(ids: list, only_failed: bool = False) -> int:
-    """Run NLP on exactly these article ids. LLM analyzer extracts category and
-    location; local VADER adds sentiment; FinBERT adds financial sentiment.
-    Returns the number of articles processed.
+def process_articles(ids: list) -> int:
+    """Run NLP on exactly these article ids. LLM analyzer extracts category and a
+    place name (geocoded inline to lat/lon via a local geonamescache lookup —
+    there is no separate geocode step); local VADER adds sentiment; FinBERT adds
+    financial sentiment. Returns the number of articles marked processed.
 
-    Selection lives with the callers — the stage predicates in services/stages.py
-    (``_process_pending`` / ``_geocode_pending_ids``) are the single source of
-    truth for what needs processing; this function is the id-driven executor.
+    Selection lives with the caller — the ``_process_pending`` predicate in
+    services/stages.py is the single source of truth for what needs processing;
+    this function is the id-driven executor.
 
-    only_failed: geocode-repair mode — articles that stay location-less get
-    marked ``geo_failed`` so they aren't re-selected forever.
+    A *failed* LLM analysis (``llm_error`` set) does NOT stamp ``processed_on``:
+    the article stays unprocessed so the process stage retries it, rather than a
+    degraded 'general'/no-location result masquerading as done. A *successful*
+    analysis that simply resolves no location is processed and terminal (it just
+    never aggregates into an event).
     """
     import uuid as _uuid
     from core.models import Article, ArticleDocument
@@ -142,11 +146,7 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
     # (no Arabic) and no banner scrape. They still geocode + categorize.
     lite_flags = [bool((a.extra_data or {}).get('backfill_day')) for a in articles]
 
-    # Geocode repair only retries the LLM's category/geo/intensity judgment —
-    # entities/sentiment/finbert_sentiment already have a correct value from the
-    # original process pass and don't depend on location, so skip re-running
-    # those three local models for every repair chunk.
-    feature_list = cleaner.clean_batch(docs, lite_flags=lite_flags, skip_local=only_failed)
+    feature_list = cleaner.clean_batch(docs, lite_flags=lite_flags)
 
     # Banner scrapes are independent HTTP fetches (og:image) — run the whole
     # chunk's fetches concurrently instead of serially (was up to chunk_size *
@@ -169,7 +169,7 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
     update_fields = [
         'entities', 'sentiment', 'finbert_sentiment', 'location', 'latitude', 'longitude',
         'event_intensity', 'category', 'sub_category', 'processed_on',
-        'extra_data', 'translations', 'llm_usage', 'stage_status', 'geo_failed',
+        'extra_data', 'translations', 'llm_usage', 'stage_status',
     ]
     to_save = []
     for i, (article, features, lite) in enumerate(zip(articles, feature_list, lite_flags)):
@@ -183,14 +183,12 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
         article.event_intensity = features.event_intensity
         article.category = features.category
         article.sub_category = features.sub_category
-        article.processed_on = timezone.now()
-        extra = {**(article.extra_data or {}), 'llm': features.llm_data}
-        # geo_failed means "the LLM answered and the article genuinely has no
-        # resolvable location" — a failed LLM call proves nothing about the
-        # article, so leave it selectable for the next repair pass.
-        if only_failed and not features.location and features.llm_error is None:
-            article.geo_failed = True
-        article.extra_data = extra
+        # Only a successful analysis marks the article processed. A failed LLM
+        # call leaves processed_on NULL so the process stage retries it instead
+        # of stamping a degraded result as done (see the function docstring).
+        if features.llm_error is None:
+            article.processed_on = timezone.now()
+        article.extra_data = {**(article.extra_data or {}), 'llm': features.llm_data}
         article.translations = features.translations
         article.llm_usage = features.llm_usage
 
@@ -200,7 +198,6 @@ def process_articles(ids: list, only_failed: bool = False) -> int:
         # in stage_status. Surface the real outcome so it shows up in
         # pipeline_coverage()'s error_sample instead of hiding degraded data.
         mark_stage(article, 'process', ok=features.llm_error is None, error=features.llm_error)
-        mark_stage(article, 'geocode', ok=bool(features.location), error=None if features.location else 'no location resolved')
 
         og = banner_results.get(i)
         if og:

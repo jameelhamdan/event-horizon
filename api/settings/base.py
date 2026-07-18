@@ -254,22 +254,15 @@ OPENROUTER_DYNAMIC_MODELS = config('OPENROUTER_DYNAMIC_MODELS', default=True, ca
 OPENROUTER_MODELS_COUNT = config('OPENROUTER_MODELS_COUNT', default=5, cast=int)
 
 # ── Article importance scoring ────────────────────────────────────────────────
-# LLM-based 1.0–10.0 significance rating. Low-scoring articles are skipped by the
-# NLP pipeline and deleted after a grace period.
+# LLM-based 1.0–10.0 significance rating. Articles below the threshold are skipped
+# by the process stage (not deleted — every record is kept as training data).
 ARTICLE_IMPORTANCE_SCORING_ENABLED = config('ARTICLE_IMPORTANCE_SCORING_ENABLED', default=True, cast=bool)
-ARTICLE_MIN_IMPORTANCE_TO_PROCESS = config('ARTICLE_MIN_IMPORTANCE_TO_PROCESS', default=2.0, cast=float)  # below this → skip process_articles_task
-ARTICLE_MIN_IMPORTANCE = config('ARTICLE_MIN_IMPORTANCE', default=4.0, cast=float)                        # below this → eligible for deletion
-ARTICLE_CLEANUP_GRACE_HOURS = 48
+ARTICLE_MIN_IMPORTANCE_TO_PROCESS = config('ARTICLE_MIN_IMPORTANCE_TO_PROCESS', default=2.0, cast=float)  # below this → process stage skips the article
 # Window the every-30-min 'aggregate' stage re-clusters. Kept below the 168h
 # tag/route repair lookback (services.stages.EVENT_STAGE_WINDOW_HOURS) so each
 # tick doesn't re-cluster a full week; aggregate_full_task sweeps the full 168h
 # once daily to catch multi-day events that age past this window.
 AGGREGATE_LIVE_WINDOW_HOURS = config('AGGREGATE_LIVE_WINDOW_HOURS', default=72, cast=int)
-ARTICLE_STALE_PROCESSED_DAYS = 7
-# Per-calendar-month retention cap, ranked by importance_score — applies retroactively
-# to every month, not just the current one. Keeps DB growth bounded over years of
-# ingest; articles referenced by any Event.article_ids are exempt from this prune.
-ARTICLE_MONTHLY_IMPORTANCE_CAP = config('ARTICLE_MONTHLY_IMPORTANCE_CAP', default=5000, cast=int)
 ARTICLE_MIN_WORD_COUNT = 30               # fetch-time filter, zero LLM cost
 ARTICLE_DEDUP_TITLE_ENABLED = True        # Jaccard dedup on titles (Redis-backed)
 ARTICLE_DEDUP_JACCARD_THRESHOLD = 0.75
@@ -289,7 +282,7 @@ WAYBACK_PROXY_URL = config('WAYBACK_PROXY_URL', default='')
 # value the first time RuntimeConfig is created (fail-open fallback if Mongo read
 # ever fails).
 #
-# LIVE_LLM_ENABLED gates the live score/process/geocode stages. When off, the
+# LIVE_LLM_ENABLED gates the live score/process stages. When off, the
 # live pipeline keeps fetching but stops LLM annotation — articles accumulate as
 # pending and resume when re-enabled.
 # BACKFILL_LLM_ENABLED gates historical backfill annotation. When off,

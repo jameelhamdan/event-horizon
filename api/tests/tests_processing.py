@@ -237,6 +237,32 @@ def test_geocode_nothing_resolves_returns_none_none():
     assert _geocode(None, None) == (None, None)
 
 
+def test_geocode_country_alias_resolves():
+    """Common LLM name variants must resolve to the canonical country coords."""
+    from services.processing.analyzer import _geocode
+    canonical = _geocode(None, 'United States')
+    assert canonical != (None, None)
+    for variant in ('USA', 'US', 'U.S.', 'america', 'United States of America'):
+        assert _geocode(None, variant) == canonical, variant
+    # A different canonical name via alias (Türkiye → Turkey) also resolves.
+    assert _geocode(None, 'Türkiye') == _geocode(None, 'Turkey')
+    assert _geocode(None, 'Russian Federation') == _geocode(None, 'Russia')
+
+
+def test_geocode_extra_place_resolves():
+    """Territories geonamescache lacks (Palestine/Gaza) resolve via _EXTRA_PLACES,
+    whether the LLM put the name in the city or the country field."""
+    from services.processing.analyzer import _geocode
+    assert _geocode(None, 'Palestine') != (None, None)
+    assert _geocode('Gaza', None) != (None, None)
+    assert _geocode('Gaza City', 'Palestine') != (None, None)
+
+
+def test_geocode_city_alias_resolves():
+    from services.processing.analyzer import _geocode
+    assert _geocode('Kiev', None) == _geocode('Kyiv', None)
+
+
 def test_analyzer_empty_result_shape():
     from services.processing.analyzer import ArticleAnalyzer
     empty = ArticleAnalyzer._empty()
@@ -313,6 +339,9 @@ _TESTS = [
     test_geocode_known_city_resolves,
     test_geocode_unknown_city_falls_back_to_country,
     test_geocode_nothing_resolves_returns_none_none,
+    test_geocode_country_alias_resolves,
+    test_geocode_extra_place_resolves,
+    test_geocode_city_alias_resolves,
     test_analyzer_empty_result_shape,
     test_parse_obj_invalid_category_defaults_to_general,
     test_parse_obj_invalid_subcategory_dropped,

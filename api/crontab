@@ -9,7 +9,7 @@
 
 # ── The pipeline ─────────────────────────────────────────────────────────
 # One tick dispatches every pipeline stage that is due and has pending work
-# (fetch → score → process → geocode → aggregate → tag → route). Per-stage
+# (fetch → score → process → aggregate → tag → route). Per-stage
 # cadence, chunking, and queue live in services/stages.py — NOT here.
 */10 * * * *   python /app/manage.py run_task pipeline_tick_task
 
@@ -34,8 +34,6 @@
 0 6 * * *      python /app/manage.py run_task generate_newsletter_task --require-flag NEWSLETTER_ENABLED
 
 # ── Maintenance (light) ──────────────────────────────────────────────────
-0  3 * * *     python /app/manage.py run_task cleanup_low_importance_articles_task --require-flag ARTICLE_IMPORTANCE_SCORING_ENABLED
-30 3 * * *     python /app/manage.py run_task prune_stale_articles_task            --require-flag ARTICLE_IMPORTANCE_SCORING_ENABLED
 0  2 * * 0     python /app/manage.py run_task adjust_source_weights_task           --require-flag ARTICLE_IMPORTANCE_SCORING_ENABLED
 
 # ── Forecasting ──────────────────────────────────────────────────────────

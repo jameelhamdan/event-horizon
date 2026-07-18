@@ -1,7 +1,7 @@
 """Pipeline stage registry — the single definition of the article→event pipeline.
 
-Every pull-based pipeline step (fetch, score, process, geocode-repair,
-aggregate, tag, route) is declared here as a Stage: how to find pending work
+Every pull-based pipeline step (fetch, score, process, aggregate, tag, route)
+is declared here as a Stage: how to find pending work
 (``pending_ids``/``pending_count``), how to do it (``handler``), and how it is
 scheduled and chunked. Exactly two Celery tasks execute all of them —
 ``services.tasks.pipeline_tick_task`` (cron, every 10 min: dispatches every
@@ -88,8 +88,8 @@ def _score_handler(ids: list) -> int:
 
 def _live_llm_enabled() -> bool:
     """Dashboard-editable master switch for the live pipeline's LLM stages
-    (score/process/geocode). Off ⇒ those stages don't dispatch; articles keep
-    being fetched and accumulate as pending until it's turned back on."""
+    (score/process). Off ⇒ those stages don't dispatch; articles keep being
+    fetched and accumulate as pending until it's turned back on."""
     from services.runtime_config import is_live_llm_enabled
     return is_live_llm_enabled()
 
@@ -131,24 +131,6 @@ def _process_release(ids: list) -> None:
 def _process_handler(ids: list) -> int:
     from services.workflow.articles import process_articles
     return process_articles(ids=ids)
-
-
-def _geocode_pending():
-    from django.db.models import Q
-    from core import models as m
-    return m.Article.objects.filter(processed_on__isnull=False, geo_failed=False).filter(
-        Q(location__isnull=True) | Q(location='')
-    )
-
-
-def _geocode_pending_ids(limit: int | None) -> list:
-    qs = _geocode_pending().values_list('id', flat=True)
-    return list(qs[:limit]) if limit else list(qs)
-
-
-def _geocode_handler(ids: list) -> int:
-    from services.workflow.articles import process_articles
-    return process_articles(ids=ids, only_failed=True)
 
 
 def _aggregate_handler(_ids) -> int:
@@ -289,28 +271,14 @@ REGISTRY: dict[str, Stage] = {s.name: s for s in [
         claim=_process_claim, release=_process_release,
         enabled=_live_llm_enabled,   # dashboard master switch for live LLM
         error_stage_key='process',
-        # Same batch-size collapse as geocode (analyzer.py: Ollama-as-primary
-        # forces one LLM call per article instead of one per 8-article chunk) —
-        # the heavy queue's 600s default is sized for the normal single batched
-        # call and would SIGKILL a chunk mid-flight if Ollama is effective
-        # primary, silently dropping the whole chunk's progress.
+        # When Ollama is the effective primary (no cloud keys, or all exhausted),
+        # analyzer.py degrades analyze_batch to one LLM call per article instead
+        # of one per 8-article chunk — the heavy queue's 600s default would
+        # SIGKILL such a chunk mid-flight and silently drop its progress, so give
+        # the process job extra headroom. Geocoding is done inline here (a local
+        # geonamescache lookup of the LLM's country/city — analyzer._geocode);
+        # there is no separate geocode stage.
         job_timeout=1200,
-    ),
-    Stage(
-        name='geocode', label='Processed but un-located (repair)', model='article',
-        queue='heavy', chunk_size=8, limit=200, every_minutes=720,
-        handler=_geocode_handler, pending_ids=_geocode_pending_ids,
-        pending_count=_count(_geocode_pending), pending_qs=_geocode_pending,
-        enabled=_live_llm_enabled,   # geocode-repair re-runs the LLM analyzer
-        error_stage_key='geocode',
-        # Repair chunks re-run the full analysis, and these are precisely the
-        # articles whose LLM pass failed before — worst case one chunk walks
-        # the whole failover chain (3 cloud providers × 2 models × 45s), and
-        # with Ollama as effective primary analyze_batch degrades to one call
-        # per article (8 walks/chunk). The heavy queue's 600s default SIGKILLed
-        # every chunk mid-flight, so no geo_failed marks were ever written and
-        # each 12h dispatch re-selected the same ids — a pass never completed.
-        job_timeout=1800,
     ),
     Stage(
         name='aggregate', label='Aggregate articles into events', model='event',

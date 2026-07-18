@@ -24,16 +24,15 @@ logger = logging.getLogger(__name__)
 # Every standalone crontab task gets a button so any stalled stage can be
 # resumed from the dashboard without shell access. Queues mirror run_task.py's
 # authoritative map (HEAVY_TASKS / BULK_TASKS, everything else 'default').
-# The template renders 'prune_stale_articles' (deletes data) and
-# 'generate_newsletter' (sends real email to subscribers) behind an
-# are-you-sure confirm() — keep it that way if you add more destructive ones.
+# The template renders 'generate_newsletter' (sends real email to subscribers)
+# behind an are-you-sure confirm() — keep it that way if you add destructive
+# ones. Article deletion tasks are intentionally NOT exposed here: deletion is
+# disabled (records are kept as training data).
 _TASK_ACTIONS = {
     'refresh_topics': ('refresh_topics_task', 'heavy', 'Topic refresh enqueued (Wikipedia current events + LLM enrichment).'),
     'discover_topics': ('discover_topics_task', 'heavy', 'Topic discovery enqueued (LLM over recent events).'),
     'generate_newsletter': ('generate_newsletter_task', 'heavy', 'Newsletter generation enqueued — WILL EMAIL SUBSCRIBERS when it completes.'),
     'pipeline_health': ('pipeline_health_task', 'default', 'Health report enqueued — the Health section refreshes on next page load.'),
-    'cleanup_low_importance': ('cleanup_low_importance_articles_task', 'default', 'Low-importance article cleanup enqueued.'),
-    'prune_stale_articles': ('prune_stale_articles_task', 'default', 'Stale-article prune enqueued (deletes articles).'),
     'adjust_source_weights': ('adjust_source_weights_task', 'default', 'Source-weight adjustment enqueued.'),
     'score_forecasts': ('score_forecasts_task', 'default', 'Forecast scoring enqueued.'),
     'refresh_openrouter_models': ('refresh_openrouter_models_task', 'default', 'OpenRouter model refresh enqueued.'),
@@ -489,6 +488,50 @@ def _coverage():
     return pipeline_coverage()
 
 
+def _article_states():
+    """Article census by pipeline_state (Article.pipeline_state), computed with
+    index-backed DB counts that mirror the property's precedence so the numbers
+    can't drift from what the stages actually select. 'processed' is split into
+    located / no-location for visibility into location coverage.
+
+    Returns a list of {key, label, count, tone, hint} ordered fetched→located.
+    """
+    from django.db.models import Q
+    from core import models as m
+
+    A = m.Article.objects
+    live = A.exclude(annotation_deferred=True)  # deferred is its own bucket
+    processed = live.filter(processed_on__isnull=False)
+    no_loc = Q(location__isnull=True) | Q(location='')
+
+    rows = [
+        ('fetched', 'Fetched — awaiting score', 'muted',
+         live.filter(processed_on__isnull=True, importance_score__isnull=True).count(),
+         'ingested, not yet importance-scored'),
+        ('scored', 'Scored — awaiting process', 'muted',
+         live.filter(processed_on__isnull=True, importance_score__isnull=False).count(),
+         'rated, queued for NLP/LLM analysis'),
+        ('located', 'Processed · located', 'ok',
+         processed.filter(location__isnull=False).exclude(location='').count(),
+         'geocoded inline — flows on to events'),
+        ('no_location', 'Processed · no location', 'muted',
+         processed.filter(no_loc).count(),
+         'analysed but no place resolved — terminal (never aggregates), kept for training'),
+        ('deferred', 'Deferred — awaiting (re)processing', 'warn',
+         A.filter(annotation_deferred=True).count(),
+         'backfill + reset analysis-failures; parked off the live LLM pipeline'),
+    ]
+    total = sum(r[3] for r in rows)
+    return {
+        'total': total,
+        'rows': [
+            {'key': k, 'label': lbl, 'tone': tone, 'count': n, 'hint': hint,
+             'pct': round(100 * n / total, 1) if total else 0.0}
+            for (k, lbl, tone, n, hint) in rows
+        ],
+    }
+
+
 def _llm_flags():
     """Current live/backfill LLM master-switch states for the Actions toggles."""
     from services.runtime_config import llm_flags
@@ -718,6 +761,7 @@ def dashboard_view(request):
         'upcoming': _upcoming,
         'flower': _flower_status,
         'coverage': _coverage,
+        'article_states': _article_states,
         'forecast': _forecast_status,
         'llm_status': _llm_status,
         'llm_flags': _llm_flags,

@@ -141,17 +141,87 @@ def _country_index() -> dict[str, tuple[float, float]]:
     return index
 
 
+# Common LLM/name variants → the canonical geonamescache country name. The LLM
+# routinely returns "USA"/"UK"/"Russian Federation"/"Türkiye" etc.; geonamescache
+# only keys the canonical form, so without this map a correctly-identified country
+# silently fails to geocode (the root cause of the large un-located backlog).
+# Every value here is a verified canonical geonamescache country name.
+_COUNTRY_ALIASES: dict[str, str] = {
+    'usa': 'United States', 'us': 'United States', 'u.s.': 'United States',
+    'u.s.a.': 'United States', 'america': 'United States',
+    'united states of america': 'United States',
+    'uk': 'United Kingdom', 'u.k.': 'United Kingdom', 'britain': 'United Kingdom',
+    'great britain': 'United Kingdom', 'england': 'United Kingdom',
+    'scotland': 'United Kingdom', 'wales': 'United Kingdom',
+    'northern ireland': 'United Kingdom',
+    'russian federation': 'Russia',
+    'czech republic': 'Czechia',
+    'turkiye': 'Turkey', 'türkiye': 'Turkey',
+    'burma': 'Myanmar',
+    'dr congo': 'Democratic Republic of the Congo',
+    'drc': 'Democratic Republic of the Congo',
+    'congo-kinshasa': 'Democratic Republic of the Congo',
+    'congo (kinshasa)': 'Democratic Republic of the Congo',
+    'congo-brazzaville': 'Republic of the Congo',
+    'cape verde': 'Cabo Verde',
+    'swaziland': 'Eswatini',
+    'macedonia': 'North Macedonia',
+    'vatican city': 'Vatican', 'holy see': 'Vatican',
+    'uae': 'United Arab Emirates', 'u.a.e.': 'United Arab Emirates',
+    'the emirates': 'United Arab Emirates',
+    'south korea': 'South Korea', 'north korea': 'North Korea',
+}
+
+# Places geonamescache has no country entry for — direct coordinate fallback so
+# high-frequency conflict geographies still resolve. Keyed by normalized name;
+# matched against either the city or the country field.
+_EXTRA_PLACES: dict[str, tuple[float, float]] = {
+    'palestine': (31.9522, 35.2332), 'palestinian territories': (31.9522, 35.2332),
+    'west bank': (31.9522, 35.2332),
+    'gaza': (31.5, 34.47), 'gaza strip': (31.5, 34.47), 'gaza city': (31.5, 34.47),
+    'kosovo': (42.6026, 20.9030),
+}
+
+# City spellings the gazetteer lists under a different form.
+_CITY_ALIASES: dict[str, str] = {'kiev': 'kyiv'}
+
+
+def _norm(name: str) -> str:
+    """Normalize a place string for lookup: lowercase, trim, drop a leading
+    'the ', and strip surrounding quotes/whitespace. Cheap and allocation-light."""
+    n = name.strip().strip('"\'').lower()
+    if n.startswith('the '):
+        n = n[4:]
+    return n
+
+
+def _country_key(country: str) -> str:
+    """Alias-resolved, lowercased key into _country_index() for a country name."""
+    n = _norm(country)
+    canonical = _COUNTRY_ALIASES.get(n)
+    return canonical.lower() if canonical else n
+
+
 def _geocode(city: str | None, country: str | None = None) -> tuple[float | None, float | None]:
     """
     Try city first; fall back to the country's main city if city is absent or unknown.
+    Applies alias/normalization so common LLM name variants (USA, UK, Türkiye, …)
+    and gazetteer-less territories (Palestine, Gaza) still resolve.
     Returns (None, None) if neither resolves.
     """
     if city:
-        coords = _city_index().get(city.lower())
+        n = _norm(city)
+        coords = _city_index().get(n) or _city_index().get(_CITY_ALIASES.get(n, n))
         if coords:
             return coords
+    # Territories geonamescache lacks — check both fields before the country index.
+    for raw in (city, country):
+        if raw:
+            coords = _EXTRA_PLACES.get(_norm(raw))
+            if coords:
+                return coords
     if country:
-        coords = _country_index().get(country.lower())
+        coords = _country_index().get(_country_key(country))
         if coords:
             return coords
     return None, None

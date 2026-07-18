@@ -27,7 +27,7 @@ def test_registry_pipeline_order():
     """Registry order IS pipeline order — upstream stages first."""
     from services.stages import REGISTRY
     names = list(REGISTRY)
-    assert names == ['fetch', 'score', 'process', 'geocode', 'aggregate', 'tag', 'route']
+    assert names == ['fetch', 'score', 'process', 'aggregate', 'tag', 'route']
 
 
 def test_registry_queues_valid():
@@ -49,7 +49,7 @@ def test_singleton_stages_have_no_pending_ids():
     agg = REGISTRY['aggregate']
     assert agg.singleton
     assert agg.pending_ids is None
-    for name in ('fetch', 'score', 'process', 'geocode', 'tag', 'route'):
+    for name in ('fetch', 'score', 'process', 'tag', 'route'):
         assert not REGISTRY[name].singleton, name
 
 

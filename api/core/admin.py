@@ -209,13 +209,13 @@ class ArticleAdmin(ImportExportModelAdmin):
     autocomplete_fields = ["related"]
     actions = ["reprocess_selected", "score_importance_selected"]
 
-    @admin.action(description="Reprocess selected (NLP / geocode)")
+    @admin.action(description="Reprocess selected (NLP)")
     def reprocess_selected(self, request, queryset):
         from services.queue import enqueue
         from services.tasks import run_stage_chunk_task
         ids = [a.id for a in queryset]
         if ids:
-            enqueue(run_stage_chunk_task, 'geocode', ids, queue="heavy")
+            enqueue(run_stage_chunk_task, 'process', ids, queue="heavy")
         self.message_user(request, f"Reprocess enqueued for {len(ids)} article(s).", messages.SUCCESS)
 
     @admin.action(description="Score importance (LLM)")
@@ -294,7 +294,6 @@ class ArticleAdmin(ImportExportModelAdmin):
         stage = {
             "fetch": "fetch",
             "process": "process",
-            "reprocess_failed": "geocode",
             "aggregate": "aggregate",
         }.get(action)
         if stage is None:

@@ -15,7 +15,7 @@
       <form method="post" class="ops-tile">
         {% csrf_token %}
         <button class="button" name="dashboard_action" value="run_pipeline">▶ Run full sync</button>
-        <p class="ops-tile-desc">Dispatch every enabled pipeline stage right now (fetch → score → process → geocode repair → aggregate → tag → route), skipping the normal per-stage cadence gates.</p>
+        <p class="ops-tile-desc">Dispatch every enabled pipeline stage right now (fetch → score → process → aggregate → tag → route), skipping the normal per-stage cadence gates.</p>
       </form>
       <form method="post" class="ops-tile">
         {% csrf_token %}
@@ -46,7 +46,7 @@
         <input type="hidden" name="flag" value="live">
         <input type="hidden" name="enabled" value="{% if llm_flags.live %}false{% else %}true{% endif %}">
         <button class="button" type="submit">{% if llm_flags.live %}Disable{% else %}Enable{% endif %} live-pipeline LLM</button>
-        <p class="ops-tile-desc">Currently <strong>{% if llm_flags.live %}ON{% else %}OFF{% endif %}</strong>. Master switch for the live pipeline's LLM stages (score → process → geocode repair). When OFF, articles keep being fetched and pile up as pending, then resume annotating when re-enabled. Applies on the next tick — no restart.</p>
+        <p class="ops-tile-desc">Currently <strong>{% if llm_flags.live %}ON{% else %}OFF{% endif %}</strong>. Master switch for the live pipeline's LLM stages (score → process). When OFF, articles keep being fetched and pile up as pending, then resume annotating when re-enabled. Applies on the next tick — no restart.</p>
       </form>
       <form method="post" class="ops-tile">
         {% csrf_token %}
@@ -171,11 +171,6 @@
     <div class="ops-tiles">
       <form method="post" class="ops-tile">
         {% csrf_token %}
-        <button class="button" name="dashboard_action" value="cleanup_low_importance">Cleanup low-importance</button>
-        <p class="ops-tile-desc">Remove or downrank low-importance articles that passed initial scoring but weren't worth keeping around.</p>
-      </form>
-      <form method="post" class="ops-tile">
-        {% csrf_token %}
         <button class="button" name="dashboard_action" value="adjust_source_weights">Adjust source weights</button>
         <p class="ops-tile-desc">Recompute per-source importance weighting used by the score stage.</p>
       </form>
@@ -188,11 +183,6 @@
 
     <h3 class="ops-group-title ops-danger-title">⚠ Danger zone</h3>
     <div class="ops-tiles">
-      <form method="post" class="ops-tile ops-tile-danger" onsubmit="return confirm('prune_stale_articles_task DELETES old low-importance articles. Run it?')">
-        {% csrf_token %}
-        <button class="button ops-danger-btn" name="dashboard_action" value="prune_stale_articles">Prune stale articles</button>
-        <p class="ops-tile-desc">Permanently deletes old, low-importance articles from the database. Not reversible.</p>
-      </form>
       <form method="post" class="ops-tile ops-tile-danger" onsubmit="return confirm('generate_newsletter_task SENDS REAL EMAIL to all subscribers when it completes. Run it?')">
         {% csrf_token %}
         <button class="button ops-danger-btn" name="dashboard_action" value="generate_newsletter">Generate newsletter</button>
@@ -244,6 +234,37 @@
       {% endfor %}
       </tbody>
     </table>
+  </section>
+
+  {# ── Article states ──────────────────────────────────────────────── #}
+  <section class="ops-card">
+    <h2>Article states
+      <span class="ops-muted" style="font-weight:normal">— census by <code>pipeline_state</code>{% if article_states %} · {{ article_states.total }} total{% endif %}</span>
+    </h2>
+    {% if article_states %}
+    <table class="ops-table">
+      <thead><tr>
+        <th>State</th><th>Count</th><th>Share</th><th style="width:34%">&nbsp;</th><th>Meaning</th>
+      </tr></thead>
+      <tbody>
+      {% for s in article_states.rows %}
+        <tr>
+          <td class="{% if s.tone == 'ok' %}ops-ok{% elif s.tone == 'warn' %}ops-warn{% endif %}">{{ s.label }}</td>
+          <td>{{ s.count }}</td>
+          <td class="ops-muted">{{ s.pct }}%</td>
+          <td>
+            <div style="background:var(--darkened-bg,#0002);border-radius:3px;height:9px;overflow:hidden">
+              <div style="width:{{ s.pct }}%;height:9px;background:{% if s.tone == 'ok' %}#4caf50{% elif s.tone == 'warn' %}#e0a030{% else %}#7a8aa0{% endif %}"></div>
+            </div>
+          </td>
+          <td class="ops-muted">{{ s.hint }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="ops-muted">Article census unavailable.</p>
+    {% endif %}
   </section>
 
   {# ── Health ──────────────────────────────────────────────────────── #}

@@ -116,7 +116,7 @@ def aggregate_events(
     if skipped_no_location:
         logger.info(
             '[aggregate] %d processed article(s) in window have no location — excluded from '
-            'events. The geocode repair stage recovers them.', skipped_no_location,
+            'events (no location resolved; kept for training).', skipped_no_location,
         )
 
     if not articles:

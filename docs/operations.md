@@ -61,7 +61,7 @@ Each stage handler records its outcome on the record's `stage_status` JSON
 (`{stage: {ok, at, error}}`) via `services/utils.py::mark_stage`. Stages tracked
 this way:
 
-- **Article**: `process`, `geocode`
+- **Article**: `process`
 - **Event**: `route` (routing failures/no-indicator outcomes)
 
 `pipeline_coverage()` (`services/workflow/events.py`) returns, per stage, the

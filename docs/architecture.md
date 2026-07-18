@@ -72,7 +72,7 @@ queues it runs on; see [pipeline.md](pipeline.md) for the full stage list.
 - **`default`** — fast I/O: the `fetch` pipeline stage, `pipeline_tick_task`
   itself, `dispatch_stage_task`, price/notam/earthquake/forex streams
   (`run_stream_task`).
-- **`heavy`** — anything CPU- or LLM-bound: the `score`/`process`/`geocode`/
+- **`heavy`** — anything CPU- or LLM-bound: the `score`/`process`/
   `aggregate`/`tag`/`route` pipeline stages (via `run_stage_chunk_task`),
   `discover_topics_task`, `refresh_topics_task`, `run_forecast_task`,
   `score_forecasts_task`, `train_forecast_model_task`, `generate_newsletter_task`,
@@ -92,7 +92,7 @@ flowchart TB
         D1[pipeline_tick_task] --- D2[fetch stage] --- D3[run_stream_task ×4]
     end
     subgraph HEAVY["heavy queue · worker-heavy · CPU / LLM"]
-        H1[score / process / geocode<br/>stages] --- H2[aggregate stage]
+        H1[score / process<br/>stages] --- H2[aggregate stage]
         H3[tag stage / discover_topics] --- H4[route stage]
         H5[run_forecast / score_forecasts / train] --- H6[generate_newsletter]
         H7[backfill_day_chunk_task]
