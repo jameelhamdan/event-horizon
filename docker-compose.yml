@@ -60,7 +60,7 @@ services:
       - ./media_data:/app/media
       - static_data:/app/.static
 
-  # Steady NLP/LLM work — 4 workers. NOTE: each prefork child lazily loads its
+  # Steady NLP/LLM work — 2 workers. NOTE: each prefork child lazily loads its
   # own copy of the local ML stack (MiniLM + FinBERT + MarianMT, ~1.5-2GB
   # warm), so RAM scales with --concurrency; max-tasks-per-child recycles
   # children periodically as a leak backstop. Keep --concurrency in sync with
@@ -72,7 +72,7 @@ services:
     # (above the ~1.5-2GB warm-model baseline, so normal operation never trips
     # it) — a tighter, per-process complement to max-tasks-per-child that
     # catches a leak by memory instead of task count.
-    command: sh -c "celery -A app worker -Q heavy --concurrency=6 --pool=prefork -O fair --max-tasks-per-child=200 --max-memory-per-child=2400000 -n heavy@%h"
+    command: sh -c "celery -A app worker -Q heavy --concurrency=2 --pool=prefork -O fair --max-tasks-per-child=200 --max-memory-per-child=2400000 -n heavy@%h"
     environment:
       # Celery's prefork pool forks per-task worker processes — safety default
       # in case anything ever loads an HF tokenizer in the parent (its background
@@ -86,14 +86,14 @@ services:
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
-    # 4 children x ~1.5-2GB warm ML models (MiniLM + FinBERT + MarianMT)
-    # = ~6-8GB baseline; this caps the container well above that so a slow
+    # 2 children x ~1.5-2GB warm ML models (MiniLM + FinBERT + MarianMT)
+    # = ~3-4GB baseline; this caps the container well above that so a slow
     # per-task leak gets OOM-killed (and restarted) before it can pressure the
     # host, instead of growing unbounded.
     deploy:
       resources:
         limits:
-          memory: 10g
+          memory: 6g
 
   # Fast I/O (fetchers, stream collectors, dispatchers) — 4 workers.
   worker-light:

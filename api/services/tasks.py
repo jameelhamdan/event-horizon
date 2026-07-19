@@ -856,6 +856,27 @@ def adjust_source_weights_task() -> int:
 
 
 @shared_task
+def prune_task_runs_task() -> int:
+    """Delete TaskRun rows older than settings.TASK_RUN_RETENTION_DAYS.
+
+    TaskRun (services/queue.py) is written on every pipeline tick, stage chunk,
+    and stream run with no natural cap, unlike Article (kept forever as
+    training data) — a TaskRun row has no value once it's aged out of the
+    admin dashboard's history window, so unlike article deletion this is
+    intentionally implemented to keep the collection (and its indexes) from
+    growing unbounded in Mongo.
+    """
+    from django.conf import settings
+    from core import models as core_models
+
+    cutoff = datetime.now(dt_timezone.utc) - timedelta(days=settings.TASK_RUN_RETENTION_DAYS)
+    deleted, _ = core_models.TaskRun.objects.filter(started_at__lt=cutoff).delete()
+    if deleted:
+        logger.info('[maintenance] pruned %d TaskRun row(s) older than %dd', deleted, settings.TASK_RUN_RETENTION_DAYS)
+    return deleted
+
+
+@shared_task
 def score_forecasts_task() -> int:
     """Fill realized outcomes for forecasts whose horizon has elapsed."""
     from core import models as core_models

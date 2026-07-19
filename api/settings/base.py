@@ -223,6 +223,13 @@ TASK_QUEUE_ENABLED = config('TASK_QUEUE_ENABLED', default=False, cast=bool)
 # available — see services/queue.py.
 TASK_RUN_TRACKING_ENABLED = config('TASK_RUN_TRACKING_ENABLED', default=True, cast=bool)
 
+# TaskRun rows are written on every pipeline tick, stage chunk, and stream run
+# with no natural cap — unlike Article (kept forever as training data), a
+# TaskRun row has no analytical value once it ages out of the admin dashboard's
+# history window. prune_task_runs_task (weekly, api/crontab) deletes rows older
+# than this so the collection (and its indexes) don't grow unbounded in Mongo.
+TASK_RUN_RETENTION_DAYS = config('TASK_RUN_RETENTION_DAYS', default=30, cast=int)
+
 # ── Feature flags — gates both scheduling (api/crontab) and the task function itself.
 NEWSLETTER_ENABLED = config('NEWSLETTER_ENABLED', default=True, cast=bool)
 STREAM_PRICES_ENABLED = config('STREAM_PRICES_ENABLED', default=True, cast=bool)
@@ -455,7 +462,7 @@ CELERY_QUEUE_TIME_LIMITS = {
 # should render instantly even when a queue's workers are down.
 CELERY_QUEUE_WORKERS = {
     'default': 4,
-    'heavy': 4,
+    'heavy': 2,
     'bulk': 1,
 }
 
