@@ -96,7 +96,7 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "--output", type=str, default=None,
-            help="Output JSON file path (default: ./e2e_report_<timestamp>.json)",
+            help="Output JSON file path (default: results/e2e_pipeline/e2e_report_<timestamp>.json)",
         )
         parser.add_argument(
             "--skip-fetch", action="store_true",
@@ -104,7 +104,7 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "--skip-process", action="store_true",
-            help="Skip step 2 — process_articles",
+            help="Skip step 2 — annotate_articles",
         )
         parser.add_argument(
             "--skip-aggregate", action="store_true",
@@ -119,7 +119,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         from core import models as core_models
-        from services.workflow import fetch_sources, process_articles, aggregate_events, tag_events_with_topics
+        from services.workflow import fetch_sources, annotate_articles, aggregate_events, tag_events_with_topics
 
         source = options["source"]
         fetch_hours = options["fetch_hours"]
@@ -128,7 +128,8 @@ class Command(BaseCommand):
         n = options["samples"]
 
         timestamp = datetime.now(dt_timezone.utc).strftime("%Y%m%dT%H%M%S")
-        output_path = Path(options["output"] or f"e2e_report_{timestamp}.json")
+        from services.utils import results_dir
+        output_path = Path(options["output"]) if options["output"] else results_dir('e2e_pipeline') / f"e2e_report_{timestamp}.json"
 
         report: dict = {
             "run_at": datetime.now(dt_timezone.utc).isoformat(),
@@ -182,13 +183,13 @@ class Command(BaseCommand):
         # ── Step 2: Process ────────────────────────────────────────────────────
         step2: dict = {"skipped": options["skip_process"]}
         if not options["skip_process"]:
-            self.stdout.write("→ Step 2: process_articles …")
+            self.stdout.write("→ Step 2: annotate_articles …")
             unprocessed_before = core_models.Article.objects.filter(processed_on__isnull=True).count()
 
             try:
                 from services.stages import select_ids
-                pending_ids = select_ids('process', process_limit, source_code=source)
-                processed = process_articles(ids=pending_ids) if pending_ids else 0
+                pending_ids = select_ids('annotate', process_limit, source_code=source)
+                processed = annotate_articles(ids=pending_ids) if pending_ids else 0
                 unprocessed_after = core_models.Article.objects.filter(processed_on__isnull=True).count()
                 # Sample recently-processed articles
                 recent_processed = list(

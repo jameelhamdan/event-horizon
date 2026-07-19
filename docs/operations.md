@@ -29,7 +29,7 @@ single registry (`services/stages.py`) executed by exactly two Celery tasks (see
 | `pipeline_tick_task` (cron, every 10m) | Dispatches every enabled stage that is due (past its own `every_minutes`) and has pending work — runs on `default` |
 | `run_stage_chunk_task(stage_name, ids)` | The only fan-out worker — executes one stage's handler over one chunk of ids — runs on the stage's own queue (`default`/`heavy`) |
 | `dispatch_stage_task(stage_name)` | Force-dispatches one stage, skipping the cadence gate (admin buttons, manual repair) |
-| `backfill_history_task` → `backfill_day_chunk_task(day, source_codes)` | Historical backfill dispatcher (separate from the live-pipeline `fetch` stage) — one day × `BACKFILL_CHUNK_SIZE` sources, fetches+saves+NLP-processes inline; see `services/data/historical.py` |
+| `backfill_history_task` → `backfill_day_chunk_task(day, source_codes)` | Historical backfill dispatcher (separate from the live-pipeline `fetch` stage) — one day × `BACKFILL_CHUNK_SIZE` sources, fetches+saves+annotates inline; see `services/data/historical.py` |
 
 Each stage in the registry declares its own `chunk_size`/`limit`/`queue`/
 `every_minutes` — to change a stage's throughput, edit its entry in
@@ -44,7 +44,7 @@ lost). The admin **"Run full pipeline"** button calls `pipeline_tick_task(force=
 **Robustness.** `run_stage_chunk_task` is a Celery task declared with
 `autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={'max_retries': 3}`.
 Saves are idempotent (`get_or_create` for articles, date-skip for prices), so a
-retried or resumed run fills only gaps. The `process` stage claims ids at
+retried or resumed run fills only gaps. The `annotate` stage claims ids at
 dispatch time (`process_queued_at`, TTL `PROCESS_CLAIM_TTL_HOURS`) so a
 backlogged heavy queue doesn't get the same articles re-dispatched every tick;
 a mid-loop enqueue failure releases the claim on ids that never actually made
@@ -61,7 +61,7 @@ Each stage handler records its outcome on the record's `stage_status` JSON
 (`{stage: {ok, at, error}}`) via `services/utils.py::mark_stage`. Stages tracked
 this way:
 
-- **Article**: `process`
+- **Article**: `analyze`, `annotate`, `refine`
 - **Event**: `route` (routing failures/no-indicator outcomes)
 
 `pipeline_coverage()` (`services/workflow/events.py`) returns, per stage, the

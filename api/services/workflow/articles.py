@@ -1,3 +1,16 @@
+"""Article-flow orchestration glue for the fetch/analyze/annotate/refine stages.
+
+Thin, id-driven executors over the services that do the actual work:
+``fetch_source`` (RSS via services.data), ``analyze_live_articles``
+(services.processing.analyzer — full cloud-LLM analysis, live traffic only),
+``annotate_articles`` (services.processing.annotator + services.scoring — full
+on-prem NLP, historical/backfill volume plus any live article the LLM pass
+didn't reach in time), and ``refine_articles`` (services.processing.refiner —
+second-opinion judge for annotate's low-confidence output). Selection
+predicates live in services/stages.py — these functions never decide *what*
+to run on, only *how* to persist the results.
+"""
+
 import logging
 import re
 import requests
@@ -6,16 +19,6 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
-
-
-def _apply_min_score_filter(qs, min_score: float):
-    """Exclude articles whose importance_score is set and below min_score."""
-    if min_score > 0:
-        qs = qs.exclude(
-            importance_score__isnull=False,
-            importance_score__lt=min_score,
-        )
-    return qs
 
 
 # Cursor floor: never fetch further back than this on the live path — feeds
@@ -103,25 +106,147 @@ def _fetch_og_image(url: str) -> str | None:
         return None
 
 
-def process_articles(ids: list) -> int:
-    """Run NLP on exactly these article ids. LLM analyzer extracts category and a
-    place name (geocoded inline to lat/lon via a local geonamescache lookup —
-    there is no separate geocode step); local VADER adds sentiment; FinBERT adds
-    financial sentiment. Returns the number of articles marked processed.
+def analyze_live_articles(ids: list) -> int:
+    """Full cloud-LLM analysis for exactly these article ids — the 'analyze'
+    stage's executor. Uses services.processing.analyzer.ArticleAnalyzer
+    (LLM_ROUTES['analyzer_lite']) for category/sub-category/geo/intensity/EN
+    summary — the same fields annotate_articles produces on-prem, so nothing
+    downstream (aggregate/tag/route, the API, the UI) needs to know which
+    analyzer produced a given article. Sentiment (VADER + FinBERT), Arabic
+    translation and importance scoring are unchanged: they're local/rule-based
+    regardless of backend, so they run exactly as they do in annotate_articles.
 
-    Selection lives with the caller — the ``_process_pending`` predicate in
-    services/stages.py is the single source of truth for what needs processing;
+    Only articles services.stages._analyze_ids actually selects (fetched
+    within LIVE_ANALYZE_FRESHNESS_HOURS, not backfill-tagged) should reach
+    this function in production; it doesn't re-check freshness itself; e.g.
+    the analyzer-eval skill deliberately calls it on chosen samples regardless
+    of age.
+
+    A *failed* analysis (``error`` set) does NOT stamp ``processed_on`` or
+    advance ``stage`` — the article stays at 'fetched', so either this stage
+    retries it on its next 3h tick, or (once it ages past the freshness
+    window) the on-prem 'annotate' stage picks it up for free instead. A live
+    article is therefore never stranded by an LLM outage or a disabled
+    LIVE_LLM_ENABLED switch — coverage only ever gets worse in analysis
+    *quality*, never in whether an article gets analyzed at all.
+    """
+    import uuid as _uuid
+    from core.models import Article
+    from services.processing.analyzer import ArticleAnalyzer
+    from services.processing.annotator import add_arabic_translations
+    from services.processing import finbert, vader
+    from services.scoring import ImportanceScorer
+    from services.utils import mark_stage
+
+    uuids = [i if isinstance(i, _uuid.UUID) else _uuid.UUID(str(i)) for i in ids]
+    articles = list(Article.objects.filter(id__in=uuids))
+    if not articles:
+        return 0
+
+    texts = [f'{a.title} {a.content}' for a in articles]
+    analyses = ArticleAnalyzer().analyze_batch(texts)
+
+    full_blocks = [a.translations for a in analyses if a.error is None]
+    if full_blocks:
+        add_arabic_translations(full_blocks)
+
+    finbert_batch = finbert.score_batch(texts)
+    sentiment_batch = vader.score_batch(texts)
+
+    importance = ImportanceScorer().score_from_intensity(articles, {
+        str(article.id): analysis.intensity
+        for article, analysis in zip(articles, analyses) if analysis.error is None
+    })
+
+    # Banner scrapes are independent HTTP fetches (og:image) — run the whole
+    # chunk's fetches concurrently instead of serially, same as annotate_articles.
+    banner_targets = [
+        (i, article.source_url)
+        for i, article in enumerate(articles)
+        if not article.banner_image_url and article.source_url.startswith('https://')
+    ]
+    banner_results: dict[int, str] = {}
+    if banner_targets:
+        from services.utils import map_concurrent
+        ogs = map_concurrent(banner_targets, lambda t: _fetch_og_image(t[1]), max_workers=8)
+        banner_results = {banner_targets[k][0]: og for k, og in enumerate(ogs) if og}
+
+    update_fields = [
+        'sentiment', 'finbert_sentiment', 'location', 'latitude', 'longitude',
+        'event_intensity', 'category', 'sub_category', 'processed_on', 'stage',
+        'importance_score', 'importance_source',
+        'extra_data', 'translations', 'llm_usage', 'stage_status',
+    ]
+    to_save = []
+    for i, (article, analysis, sent, fin) in enumerate(zip(articles, analyses, sentiment_batch, finbert_batch)):
+        article.sentiment = sent
+        article.finbert_sentiment = fin
+        article.location = ', '.join(filter(None, [analysis.city, analysis.country])) or None
+        article.latitude = analysis.latitude
+        article.longitude = analysis.longitude
+        article.event_intensity = analysis.intensity
+        article.category = analysis.category
+        article.sub_category = analysis.sub_category
+        # Only a successful analysis marks the article processed and advances
+        # its stage. A failure leaves it at 'fetched' for the fallback path
+        # above (see the function docstring) instead of stamping a degraded
+        # result as done.
+        if analysis.error is None:
+            article.processed_on = timezone.now()
+            article.stage = Article.STAGE_ANNOTATED
+            score = importance.get(str(article.id))
+            if score is not None:
+                article.importance_score = score
+                article.importance_source = 'rules'
+        article.extra_data = {**(article.extra_data or {}), 'llm': analysis.llm_data}
+        article.translations = analysis.translations
+        article.llm_usage = analysis.llm_usage
+
+        # Surface the real outcome so a failed analysis shows up in
+        # pipeline_coverage()'s error_sample instead of hiding degraded data.
+        mark_stage(article, 'analyze', ok=analysis.error is None, error=analysis.error)
+
+        og = banner_results.get(i)
+        if og:
+            article.banner_image_url = og
+            if 'banner_image_url' not in update_fields:
+                update_fields.append('banner_image_url')
+
+        to_save.append(article)
+        location = article.location or '?'
+        category = '/'.join(filter(None, [article.category, article.sub_category]))
+        logger.info(f'[analyze] {article.title[:70]} → {category} @ {location} [{article.stage}]')
+
+    if to_save:
+        Article.objects.bulk_update(to_save, update_fields, batch_size=500)
+
+    return len(to_save)
+
+
+def annotate_articles(ids: list) -> int:
+    """Run the full on-prem NLP annotation on exactly these article ids: the
+    NLPAnnotator extracts category/sub-category, a place name (geocoded inline
+    to lat/lon via a local geonamescache lookup — there is no separate geocode
+    step), intensity, sentiment (VADER + FinBERT) and translations; importance
+    is then computed from intensity + source weight + corroboration. Returns
+    the number of articles annotated.
+
+    Selection lives with the caller — the ``_annotate_pending`` predicate in
+    services/stages.py is the single source of truth for what needs annotating;
     this function is the id-driven executor.
 
-    A *failed* LLM analysis (``llm_error`` set) does NOT stamp ``processed_on``:
-    the article stays unprocessed so the process stage retries it, rather than a
-    degraded 'general'/no-location result masquerading as done. A *successful*
-    analysis that simply resolves no location is processed and terminal (it just
-    never aggregates into an event).
+    A *failed* annotation (``llm_error`` set) does NOT stamp ``processed_on`` or
+    advance ``stage``: the article stays at 'fetched' so the annotate stage
+    retries it, rather than a degraded 'general'/no-location result
+    masquerading as done. A *successful* annotation advances stage to
+    'annotated' (confident) or 'refine' (queued for the judge — see
+    services/processing/refiner.py); either is processed, and an article that
+    resolves no location is simply terminal (never aggregates into an event).
     """
     import uuid as _uuid
     from core.models import Article, ArticleDocument
-    from services.processing.cleaner import ArticleCleaner
+    from services.processing.annotator import ESCALATE_BELOW, NLPAnnotator
+    from services.scoring import ImportanceScorer
     from services.utils import mark_stage
 
     uuids = [i if isinstance(i, _uuid.UUID) else _uuid.UUID(str(i)) for i in ids]
@@ -129,8 +254,6 @@ def process_articles(ids: list) -> int:
 
     if not articles:
         return 0
-
-    cleaner = ArticleCleaner()
 
     docs = [
         ArticleDocument(
@@ -146,7 +269,12 @@ def process_articles(ids: list) -> int:
     # (no Arabic) and no banner scrape. They still geocode + categorize.
     lite_flags = [bool((a.extra_data or {}).get('backfill_day')) for a in articles]
 
-    feature_list = cleaner.clean_batch(docs, lite_flags=lite_flags)
+    feature_list = NLPAnnotator().annotate_batch(docs, lite_flags=lite_flags)
+
+    importance = ImportanceScorer().score_from_intensity(articles, {
+        str(a.id): f.event_intensity
+        for a, f in zip(articles, feature_list) if f.llm_error is None
+    })
 
     # Banner scrapes are independent HTTP fetches (og:image) — run the whole
     # chunk's fetches concurrently instead of serially (was up to chunk_size *
@@ -168,7 +296,8 @@ def process_articles(ids: list) -> int:
     # fresh og:image (articles without one are written unchanged — harmless).
     update_fields = [
         'entities', 'sentiment', 'finbert_sentiment', 'location', 'latitude', 'longitude',
-        'event_intensity', 'category', 'sub_category', 'processed_on',
+        'event_intensity', 'category', 'sub_category', 'processed_on', 'stage',
+        'importance_score', 'importance_source',
         'extra_data', 'translations', 'llm_usage', 'stage_status',
     ]
     to_save = []
@@ -183,21 +312,27 @@ def process_articles(ids: list) -> int:
         article.event_intensity = features.event_intensity
         article.category = features.category
         article.sub_category = features.sub_category
-        # Only a successful analysis marks the article processed. A failed LLM
-        # call leaves processed_on NULL so the process stage retries it instead
-        # of stamping a degraded result as done (see the function docstring).
+        # Only a successful annotation marks the article processed and advances
+        # its stage ('annotated' or 'refine'). A failure leaves it at 'fetched'
+        # so the annotate stage retries it instead of stamping a degraded
+        # result as done (see the function docstring).
         if features.llm_error is None:
             article.processed_on = timezone.now()
+            article.stage = (
+                Article.STAGE_ANNOTATED if features.confidence >= ESCALATE_BELOW
+                else Article.STAGE_REFINE
+            )
+            score = importance.get(str(article.id))
+            if score is not None:
+                article.importance_score = score
+                article.importance_source = 'rules'
         article.extra_data = {**(article.extra_data or {}), 'llm': features.llm_data}
         article.translations = features.translations
         article.llm_usage = features.llm_usage
 
-        # ok=True here previously regardless of whether the LLM call actually
-        # succeeded, so a fully-failed analysis (silently falling back to
-        # category='general'/no location) looked identical to a real success
-        # in stage_status. Surface the real outcome so it shows up in
+        # Surface the real outcome so a failed annotation shows up in
         # pipeline_coverage()'s error_sample instead of hiding degraded data.
-        mark_stage(article, 'process', ok=features.llm_error is None, error=features.llm_error)
+        mark_stage(article, 'annotate', ok=features.llm_error is None, error=features.llm_error)
 
         og = banner_results.get(i)
         if og:
@@ -208,9 +343,73 @@ def process_articles(ids: list) -> int:
         to_save.append(article)
         location = features.location or '?'
         category = '/'.join(filter(None, [features.category, features.sub_category]))
-        logger.info(f'[process] {article.title[:70]} → {category} @ {location}')
+        logger.info(f'[annotate] {article.title[:70]} → {category} @ {location} [{article.stage}]')
 
     if to_save:
         Article.objects.bulk_update(to_save, update_fields, batch_size=500)
 
     return len(to_save)
+
+
+def refine_articles(ids: list) -> int:
+    """Second-opinion pass over exactly these article ids: the configured judge
+    (services.processing.refiner.LLMRefiner) re-decides category/sub-category —
+    and, for LLM providers, geo/intensity/summary — then the article advances
+    to stage='refined' with ``refined_on``/``refined_by`` re-stamped (the
+    latter to the judging provider's name: 'zeroshot' | 'ollama' | 'cloud').
+
+    Id-driven, like annotate_articles: it does NOT filter by current stage, so
+    it can re-refine an already-refined (or even already-annotated) article on
+    request — e.g. to re-judge with a different REFINE_PROVIDER, or to redo a
+    judgment now considered wrong. The refine *stage*'s own automatic dispatch
+    only ever passes ids selected by stages._refine_pending() (stage='refine'
+    only); this function is the shared executor for both that scheduled path
+    and any manual/admin re-refine.
+
+    A None verdict (judge unavailable/failed) leaves the article at its
+    current stage unchanged so a later retry can pick it up again. Returns the
+    number of articles refined.
+    """
+    import uuid as _uuid
+    from core.models import Article
+    from services.processing.refiner import LLMRefiner
+    from services.utils import mark_stage
+
+    uuids = [i if isinstance(i, _uuid.UUID) else _uuid.UUID(str(i)) for i in ids]
+    articles = list(Article.objects.filter(id__in=uuids))
+    if not articles:
+        return 0
+
+    refiner = LLMRefiner()
+    verdicts = refiner.judge([(a.title, a.content or '') for a in articles])
+
+    update_fields = [
+        'category', 'sub_category', 'location', 'latitude', 'longitude',
+        'event_intensity', 'translations', 'extra_data',
+        'stage', 'refined_on', 'refined_by', 'stage_status',
+    ]
+    to_save, refined = [], 0
+    for article, verdict in zip(articles, verdicts):
+        if verdict is None:
+            # Leave the article's stage untouched (unset on failure) — a
+            # scheduled retry only re-selects it if it was already 'refine';
+            # a manual re-refine call is free to try again immediately.
+            # Still record the outcome so it's visible in stage_status.
+            mark_stage(article, 'refine', ok=False, error=f'judge unavailable ({refiner.provider})')
+            to_save.append(article)
+            continue
+
+        refiner.apply(article, verdict)
+        article.stage = Article.STAGE_REFINED
+        article.refined_on = timezone.now()
+        mark_stage(article, 'refine', ok=True)
+        to_save.append(article)
+        refined += 1
+        logger.info(
+            f'[refine/{verdict["provider"]}] {article.title[:70]} → '
+            f'{article.category}/{article.sub_category or "-"}'
+        )
+
+    if to_save:
+        Article.objects.bulk_update(to_save, update_fields, batch_size=500)
+    return refined

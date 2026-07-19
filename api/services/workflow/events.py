@@ -400,22 +400,4 @@ def pipeline_coverage() -> list[dict]:
             'last_dispatch': last,
         })
 
-        if stage.name == 'score':
-            # Informational: articles deliberately excluded by the importance
-            # cutoff — no action, the same filter excludes them from dispatch.
-            from django.conf import settings
-            min_score = getattr(settings, 'ARTICLE_MIN_IMPORTANCE_TO_PROCESS', 0)
-            low_score_count = (
-                Article.objects.filter(
-                    processed_on__isnull=True,
-                    importance_score__isnull=False, importance_score__lt=min_score,
-                ).count()
-                if min_score > 0 else 0
-            )
-            out.append({
-                'stage': 'low_score', 'model': 'article',
-                'label': 'Unprocessed, below importance threshold (by design)',
-                'need': low_score_count, 'action': None, 'error_sample': None,
-                'last_dispatch': None,
-            })
     return out

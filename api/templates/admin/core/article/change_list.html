@@ -9,32 +9,21 @@
 
       <div class="pipeline-section">
         <span class="pipeline-section__label">Fetch</span>
-        <label class="pipeline-field">
-          Source
-          <input type="text" name="fetch_source" placeholder="all" maxlength="64">
-        </label>
-        <label class="pipeline-field">
-          Hours
-          <input type="number" name="fetch_hours" value="2" min="1" max="720" style="width:5em">
-        </label>
         <button class="button pipeline-btn" name="pipeline_action" value="fetch">Fetch Articles</button>
       </div>
 
       <div class="pipeline-section">
-        <span class="pipeline-section__label">Process</span>
-        <label class="pipeline-field">
-          Limit
-          <input type="number" name="process_limit" value="500" min="1" max="10000" style="width:6em">
-        </label>
-        <button class="button pipeline-btn" name="pipeline_action" value="process">Process Articles</button>
+        <span class="pipeline-section__label">Analyze</span>
+        <button class="button pipeline-btn" name="pipeline_action" value="analyze">Analyze Live (LLM)</button>
+      </div>
+
+      <div class="pipeline-section">
+        <span class="pipeline-section__label">Annotate</span>
+        <button class="button pipeline-btn" name="pipeline_action" value="annotate">Annotate Articles</button>
       </div>
 
       <div class="pipeline-section">
         <span class="pipeline-section__label">Aggregate</span>
-        <label class="pipeline-field">
-          Hours
-          <input type="number" name="aggregate_hours" value="24" min="1" max="720" style="width:5em">
-        </label>
         <button class="button pipeline-btn" name="pipeline_action" value="aggregate">Aggregate Events</button>
       </div>
 
@@ -46,10 +35,17 @@
 
     </div>
     <p class="pipeline-note">
-      <strong>Run full pipeline → Events</strong> chains fetch → process → aggregate → tag as one
-      ordered job (uses the Fetch/Process/Aggregate values above), so Events reliably appear when
-      it finishes. The individual buttons run a single step on its own. Watch progress at
-      <a href="/admin/dashboard/">/admin/dashboard/</a>.
+      Each button force-dispatches one stage from the registry (fetch / analyze /
+      annotate / aggregate — using the stage's own selection and chunk size, same
+      as the dashboard's per-stage Reprocess buttons). <strong>Analyze</strong> is
+      the full cloud-LLM pass for freshly-fetched live articles only (needs
+      LIVE_LLM_ENABLED on) — historical/backfill articles always go through the
+      free on-prem <strong>Annotate</strong> pass instead. <strong>Run full
+      pipeline → Events</strong> dispatches every enabled stage in pipeline order
+      in one tick (fetch → analyze/annotate → refine → aggregate → tag → route) —
+      each stage still runs as its own queued job, not literally chained, so
+      Events may take a few worker cycles to appear.
+      Watch progress at <a href="/admin/dashboard/">/admin/dashboard/</a>.
     </p>
   </form>
 </div>

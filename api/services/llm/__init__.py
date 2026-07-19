@@ -477,6 +477,10 @@ class OllamaLLMService(BaseLLMService):
                     # (that needs OLLAMA_MAX_LOADED_MODELS set on the Ollama
                     # server itself; this app has no server-side control over it).
                     'keep_alive': '30s',
+                    # Constrained decoding: pass format='json' or a JSON schema
+                    # dict and Ollama guarantees the output parses/validates —
+                    # used by the refine stage's classification calls.
+                    **({'format': kwargs['format']} if kwargs.get('format') is not None else {}),
                     **(({'options': options}) if options else {}),
                 },
                 timeout=self._timeout,
@@ -685,6 +689,14 @@ def _get_backend(name: str, specs: dict[str, dict]) -> BaseLLMService | None:
         if name not in _backend_cache:
             _backend_cache[name] = _build_backend(name, spec)
         return _backend_cache[name]
+
+
+def get_provider(name: str) -> BaseLLMService | None:
+    """A single named provider backend (e.g. 'ollama_medium'), bypassing role
+    routing — None if that provider isn't configured. Used by callers that need
+    one specific provider's capabilities (the refine stage's Ollama JSON-schema
+    calls) rather than a failover chain."""
+    return _get_backend(name, _provider_specs())
 
 
 def get_llm_service(role: str = 'default') -> BaseLLMService:

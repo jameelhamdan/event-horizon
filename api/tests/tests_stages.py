@@ -27,7 +27,7 @@ def test_registry_pipeline_order():
     """Registry order IS pipeline order — upstream stages first."""
     from services.stages import REGISTRY
     names = list(REGISTRY)
-    assert names == ['fetch', 'score', 'process', 'aggregate', 'tag', 'route']
+    assert names == ['fetch', 'analyze', 'annotate', 'refine', 'aggregate', 'tag', 'route']
 
 
 def test_registry_queues_valid():
@@ -49,22 +49,35 @@ def test_singleton_stages_have_no_pending_ids():
     agg = REGISTRY['aggregate']
     assert agg.singleton
     assert agg.pending_ids is None
-    for name in ('fetch', 'score', 'process', 'tag', 'route'):
+    for name in ('fetch', 'analyze', 'annotate', 'refine', 'tag', 'route'):
         assert not REGISTRY[name].singleton, name
 
 
-def test_process_chunk_matches_analyzer_batch():
-    """One process chunk must map to exactly one batched LLM analysis call."""
-    from services.stages import REGISTRY
+def test_analyze_chunk_matches_llm_batch_size():
+    """One analyze chunk should map to one batched LLM analysis call."""
     from services.processing.analyzer import ArticleAnalyzer
-    assert REGISTRY['process'].chunk_size == ArticleAnalyzer.ANALYZE_BATCH_SIZE
-
-
-def test_score_chunk_matches_scorer_batch():
-    """One score chunk must map to exactly one batched LLM scoring call."""
     from services.stages import REGISTRY
-    from services.scoring import ArticleImportanceScorer
-    assert REGISTRY['score'].chunk_size == ArticleImportanceScorer.BATCH_SIZE
+    assert REGISTRY['analyze'].chunk_size == ArticleAnalyzer.ANALYZE_BATCH_SIZE
+
+
+def test_analyze_only_gated_by_live_llm_flag():
+    """Unlike annotate (always on) and refine (only gated when its provider
+    is an LLM), analyze is a pure LLM consumer — it must always defer to the
+    dashboard's live-LLM master switch."""
+    from services.stages import REGISTRY, _live_llm_enabled
+    assert REGISTRY['analyze'].enabled is _live_llm_enabled
+
+
+def test_annotate_chunk_is_bounded():
+    """Annotate chunks stay small — per-article local models, bounded job time."""
+    from services.stages import REGISTRY
+    assert 1 <= REGISTRY['annotate'].chunk_size <= 32
+
+
+def test_refine_chunk_is_bounded():
+    """Refine chunks stay small — the provider re-chunks internally."""
+    from services.stages import REGISTRY
+    assert 1 <= REGISTRY['refine'].chunk_size <= 32
 
 
 def test_claim_stages_also_release():
@@ -139,7 +152,7 @@ def test_dispatch_releases_unclaimed_on_enqueue_failure():
 
     claimed, released = [], []
     fake = _patched_stage(
-        S.REGISTRY['process'],
+        S.REGISTRY['annotate'],
         pending_ids=lambda limit: [1, 2, 3, 4],
         claim=lambda ids: claimed.extend(ids),
         release=lambda ids: released.extend(ids),
@@ -154,12 +167,12 @@ def test_dispatch_releases_unclaimed_on_enqueue_failure():
             raise RuntimeError('broker down')
         boom[0] = True  # first chunk fine, second raises
 
-    with patch.dict(S.REGISTRY, {'process': fake}), \
+    with patch.dict(S.REGISTRY, {'annotate': fake}), \
          patch.object(S, '_is_due', return_value=True), \
          patch.object(S, '_mark_dispatched'), \
          patch.object(S, '_enqueue_chunk', side_effect=enqueue_then_fail):
         try:
-            S.dispatch_stage('process')
+            S.dispatch_stage('annotate')
             assert False, 'expected RuntimeError'
         except RuntimeError:
             pass
@@ -184,6 +197,21 @@ def test_run_chunk_routes_to_handler():
     fake = _patched_stage(S.REGISTRY['tag'], handler=lambda ids: len(ids))
     with patch.dict(S.REGISTRY, {'tag': fake}):
         assert S.run_chunk('tag', [1, 2, 3]) == 3
+
+
+def test_is_backfill_reads_extra_data_marker():
+    """The analyze/annotate split hinges entirely on this: backfill-tagged
+    articles never reach 'analyze' regardless of how recently they were
+    created (see _analyze_ids / _annotate_ids)."""
+    from services.stages import _is_backfill
+
+    class _Art:
+        def __init__(self, extra_data):
+            self.extra_data = extra_data
+
+    assert _is_backfill(_Art({'backfill_day': '2024-01-01'})) is True
+    assert _is_backfill(_Art({})) is False
+    assert _is_backfill(_Art(None)) is False  # pre-migration rows: extra_data can be falsy
 
 
 def test_tag_pending_narrows_at_db_and_keeps_python_safety_net():
@@ -242,16 +270,16 @@ def test_run_due_stages_isolates_stage_failures():
     from services import stages as S
 
     def dispatch(name, force=False):
-        if name == 'score':
+        if name == 'refine':
             raise RuntimeError('kaboom')
         return 1 if name in ('fetch', 'tag') else 0
 
     with patch.object(S, 'dispatch_stage', side_effect=dispatch):
         results = S.run_due_stages()
-    assert results['score'] == -1     # failure is visible, not swallowed silently
+    assert results['refine'] == -1    # failure is visible, not swallowed silently
     assert results['fetch'] == 1
     assert results['tag'] == 1
-    assert 'process' not in results   # 0 jobs → omitted
+    assert 'annotate' not in results  # 0 jobs → omitted
 
 
 TESTS = [
@@ -260,8 +288,11 @@ TESTS = [
     test_registry_queues_valid,
     test_registry_positive_chunking,
     test_singleton_stages_have_no_pending_ids,
-    test_process_chunk_matches_analyzer_batch,
-    test_score_chunk_matches_scorer_batch,
+    test_analyze_chunk_matches_llm_batch_size,
+    test_analyze_only_gated_by_live_llm_flag,
+    test_is_backfill_reads_extra_data_marker,
+    test_annotate_chunk_is_bounded,
+    test_refine_chunk_is_bounded,
     test_claim_stages_also_release,
     test_dispatch_chunks_and_counts_jobs,
     test_dispatch_skips_when_not_due,

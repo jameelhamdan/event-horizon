@@ -10,7 +10,7 @@ source's strategy (WikipediaHistoricalService for the synthetic
 RSS sources), cross-source title-dedups within its chunk, fetches each
 article's title+body (live page first, Wayback Machine capture as fallback),
 saves via Article.objects.get_or_create (idempotent), and then immediately
-runs NLP processing (services.workflow.articles.process_articles) on the
+runs NLP annotation (services.workflow.articles.annotate_articles) on the
 newly-saved articles — see services/data/historical.py's and
 services/data/wikipedia.py's module docstrings for the full chain and its
 chunking trade-offs.
@@ -38,7 +38,7 @@ Examples:
         --start-date 2022-01-01 --end-date 2025-01-01 --background
 
 Each chunk runs the live pipeline's order on what it saves: LLM importance
-scoring → ARTICLE_MIN_IMPORTANCE_TO_PROCESS gate → NLP processing.
+the on-prem NLP annotation pass (importance included).
 
 After a backfill's chunks finish, aggregate the range into Events (the live
 aggregate stage only looks back 168h, so it will never reach them):

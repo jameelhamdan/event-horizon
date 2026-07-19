@@ -13,7 +13,7 @@ class Command(BaseCommand):
         parser.add_argument('--step-days', type=int, default=30,
                             help='Walk-forward fold size in days (default 30)')
         parser.add_argument('--output', type=str, default=None,
-                            help='Report path (default <repo>/eval/forecasting_report.json)')
+                            help='Report path (default <repo>/results/evaluate_forecasting/forecasting_report.json)')
 
     def handle(self, *args, **kwargs):
         from services.forecasting.evaluate import run_evaluation

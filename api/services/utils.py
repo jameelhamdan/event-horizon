@@ -1,5 +1,6 @@
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 STOP_WORDS: frozenset[str] = frozenset({
@@ -71,3 +72,15 @@ def map_concurrent(items, fn, *, max_workers: int = 8, default=None) -> list:
             except Exception:
                 results[i] = default
     return results
+
+
+def results_dir(name: str) -> Path:
+    """Directory for a test/eval command's report files —
+    ``<repo>/results/<name>/`` (git-ignored), created on first use. Every
+    report-writing command (eval_analyzer, evaluate_*, e2e_*) writes here so
+    generated artifacts never land in the working tree.
+    """
+    from django.conf import settings
+    path = Path(settings.BASE_DIR) / 'results' / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path

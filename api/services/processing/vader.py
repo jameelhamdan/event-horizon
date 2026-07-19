@@ -2,7 +2,7 @@
 
 VADER is rule-based (no model download, sub-ms per article) and English-tuned —
 a reasonable general-polarity signal alongside the domain-specific FinBERT
-score computed in cleaner.py.
+score computed in the same annotate pass (services.processing.annotator).
 """
 
 import logging

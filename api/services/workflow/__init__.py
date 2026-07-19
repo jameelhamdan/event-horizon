@@ -1,4 +1,10 @@
-from services.workflow.articles import fetch_source, fetch_sources, process_articles
+from services.workflow.articles import (
+    analyze_live_articles,
+    annotate_articles,
+    fetch_source,
+    fetch_sources,
+    refine_articles,
+)
 from services.workflow.events import aggregate_events, pipeline_coverage
 from services.workflow.topics import (
     _needs_tagging,
@@ -14,7 +20,9 @@ from services.workflow.topics import (
 __all__ = [
     'fetch_source',
     'fetch_sources',
-    'process_articles',
+    'analyze_live_articles',
+    'annotate_articles',
+    'refine_articles',
     'aggregate_events',
     'pipeline_coverage',
     '_needs_tagging',

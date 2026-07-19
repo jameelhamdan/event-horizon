@@ -36,18 +36,27 @@ class ImportanceFilter(admin.SimpleListFilter):
 
 
 class ArticleStageFilter(admin.SimpleListFilter):
-    """Filter articles by which pipeline stage they are stuck at (WA3.6)."""
-    title = "pipeline gap"
-    parameter_name = "stage_gap"
+    """Filter articles by pipeline position (the stored Article.stage field)."""
+    title = "pipeline stage"
+    parameter_name = "stage"
 
     def lookups(self, request, model_admin):
-        return [("unprocessed", "Unprocessed"), ("unlocated", "Processed but un-located")]
+        return [
+            ("fetched", "Fetched — awaiting annotation"),
+            ("refine", "Awaiting judge (refine)"),
+            ("annotated", "Annotated"),
+            ("refined", "Refined"),
+            ("unlocated", "Annotated but un-located"),
+        ]
 
     def queryset(self, request, queryset):
-        if self.value() == "unprocessed":
-            return queryset.filter(processed_on__isnull=True)
+        from core.models import Article
         if self.value() == "unlocated":
-            return queryset.filter(processed_on__isnull=False, location__isnull=True)
+            return queryset.filter(
+                stage__in=[Article.STAGE_ANNOTATED, Article.STAGE_REFINED], location__isnull=True,
+            )
+        if self.value():
+            return queryset.filter(stage=self.value())
         return queryset
 
 
@@ -196,36 +205,42 @@ class ArticleAdmin(ImportExportModelAdmin):
         "source_code",
         "source_type",
         "category",
+        "stage",
         "importance_score",
         "sentiment",
         "location",
         "published_on",
-        "processed_on",
         "created_on",
     ]
     date_hierarchy = "published_on"
-    list_filter = ["source_type", "source_code", "category", ArticleStageFilter, ImportanceFilter]
+    list_filter = ["source_type", "source_code", "category", ArticleStageFilter, "refined_by", ImportanceFilter]
     search_fields = ["title", "location", "category"]
     autocomplete_fields = ["related"]
-    actions = ["reprocess_selected", "score_importance_selected"]
+    actions = ["reannotate_selected", "rerefine_selected"]
 
-    @admin.action(description="Reprocess selected (NLP)")
-    def reprocess_selected(self, request, queryset):
+    @admin.action(description="Re-annotate selected (on-prem NLP, importance included)")
+    def reannotate_selected(self, request, queryset):
         from services.queue import enqueue
         from services.tasks import run_stage_chunk_task
         ids = [a.id for a in queryset]
         if ids:
-            enqueue(run_stage_chunk_task, 'process', ids, queue="heavy")
-        self.message_user(request, f"Reprocess enqueued for {len(ids)} article(s).", messages.SUCCESS)
+            enqueue(run_stage_chunk_task, 'annotate', ids, queue="heavy")
+        self.message_user(request, f"Re-annotation enqueued for {len(ids)} article(s).", messages.SUCCESS)
 
-    @admin.action(description="Score importance (LLM)")
-    def score_importance_selected(self, request, queryset):
+    @admin.action(description="Re-refine selected (judge again with the current REFINE_PROVIDER)")
+    def rerefine_selected(self, request, queryset):
+        """Manual override of the refine stage's own stage='refine' selection —
+        works on articles in any stage (annotated, refine, or already refined),
+        via services.workflow.articles.refine_articles' id-driven contract. Use
+        to re-judge with a newly-configured REFINE_PROVIDER, or to redo a
+        judgment now considered wrong; Article.refined_by is overwritten with
+        whichever provider produced the new verdict."""
         from services.queue import enqueue
         from services.tasks import run_stage_chunk_task
-        ids = [str(a.id) for a in queryset]
+        ids = [a.id for a in queryset]
         if ids:
-            enqueue(run_stage_chunk_task, 'score', ids, queue="heavy")
-        self.message_user(request, f"Importance scoring enqueued for {len(ids)} article(s).", messages.SUCCESS)
+            enqueue(run_stage_chunk_task, 'refine', ids, queue="heavy")
+        self.message_user(request, f"Re-refine enqueued for {len(ids)} article(s).", messages.SUCCESS)
 
     readonly_fields = [
         "id",
@@ -238,6 +253,9 @@ class ArticleAdmin(ImportExportModelAdmin):
         "latitude",
         "longitude",
         "processed_on",
+        "stage",
+        "refined_on",
+        "refined_by",
         "importance_score",
         "importance_source",
         "created_on",
@@ -293,7 +311,9 @@ class ArticleAdmin(ImportExportModelAdmin):
         # Stage names map 1:1 onto services/stages.py REGISTRY entries.
         stage = {
             "fetch": "fetch",
-            "process": "process",
+            "analyze": "analyze",
+            "annotate": "annotate",
+            "refine": "refine",
             "aggregate": "aggregate",
         }.get(action)
         if stage is None:

@@ -38,7 +38,7 @@ extra_data['backfill_day'].
 Multi-day iteration and NLP processing are NOT this module's job — they live
 in services.tasks.backfill_history_task (dispatcher: enumerates day windows ×
 source chunks) and backfill_day_chunk_task (worker: calls fetch_and_save_day
-then services.workflow.articles.process_articles on the new ids), so that
+then services.workflow.articles.annotate_articles on the new ids), so that
 each Celery task stays bounded to one day × a handful of sources instead of a
 whole multi-year range.
 
@@ -151,7 +151,7 @@ def _note_nonempty_day(source_code: str) -> None:
 class DayResult:
     day: datetime.datetime
     fetched: int                      # total candidates collected across the given sources
-    saved_ids: list = field(default_factory=list)  # newly-created Article ids (for process_articles)
+    saved_ids: list = field(default_factory=list)  # newly-created Article ids (for annotate_articles)
     # Per-source outcome for this day window:
     #   'fetched'  — discovery ran and returned candidates
     #   'empty'    — discovery ran cleanly but matched nothing (counts toward the
@@ -571,12 +571,10 @@ class HistoricalBackfillService:
     recency), candidates are merged and passed through the same title-dedup
     filter the live fetch path uses, article bodies are fetched inline, then
     saved via Article.objects.get_or_create() keyed on (source_code,
-    source_type, source_url) — fully idempotent. NLP processing is the
-    caller's job — services.tasks.backfill_day_chunk_task scores
-    ``result.saved_ids`` (LLM importance), applies the same
-    ARTICLE_MIN_IMPORTANCE_TO_PROCESS gate the live pipeline uses, and only
-    then runs services.workflow.articles.process_articles — the live
-    score → gate → process order.
+    source_type, source_url) — fully idempotent. NLP annotation is the
+    caller's job — services.tasks.backfill_day_chunk_task runs
+    services.workflow.articles.annotate_articles over ``result.saved_ids``
+    (the same on-prem pass the live annotate stage uses, importance included).
 
     Backfill metadata is stored in Article.extra_data under key:
       backfill_day — ISO date string of the day window the article was found in

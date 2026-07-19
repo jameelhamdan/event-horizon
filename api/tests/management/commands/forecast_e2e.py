@@ -8,7 +8,6 @@ subset (e.g. skip the slow backfill once PriceBar is seeded).
     python manage.py forecast_e2e --skip-backfill --skip-route   # train+run+score only
 """
 import json
-import os
 from datetime import datetime, timezone
 
 from django.core.management.base import BaseCommand
@@ -79,8 +78,8 @@ class Command(BaseCommand):
             step('backtest', lambda: run_backtest(symbols=symbols, years=min(opts['years'], 2)).get('results'))
 
         report['finished_at'] = datetime.now(timezone.utc).isoformat()
-        out = opts['output'] or os.path.join(
-            os.getcwd(), f'forecast_e2e_{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")}.json')
+        from services.utils import results_dir
+        out = opts['output'] or str(results_dir('forecast_e2e') / f'forecast_e2e_{datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")}.json')
         with open(out, 'w', encoding='utf-8') as fh:
             json.dump(report, fh, indent=2, default=str)
         self.stdout.write(self.style.SUCCESS(

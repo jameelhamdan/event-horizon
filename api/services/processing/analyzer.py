@@ -1,34 +1,32 @@
-import functools
+"""Cloud LLM prompt client for article analysis (route 'analyzer_lite').
+
+One batched prompt extracts category/sub-category, country/city, intensity and
+an abstractive EN title/summary. Two production callers, both orchestration —
+this module is never an entry point itself: services.workflow.articles.
+analyze_live_articles (the 'analyze' stage — every 3h, live-fetched articles
+only) uses it as the primary analyzer, and services.processing.refiner's
+'cloud' provider (the 'refine' stage) uses it as a second opinion on
+low-confidence on-prem output from historical/backfill articles. The
+'annotate' stage itself does everything on-prem and never touches this file.
+"""
+
 import json
 import logging
 
 from services.llm import strip_code_fences
+from services.processing.geocode import geocode as _geocode
+from services.processing.taxonomy import CATEGORIES as _CATEGORIES, SUB_CATEGORIES as _SUB_CATEGORIES
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
-
-# Two-level taxonomy (plan §Concepts) — top-level stays small, sub-category does the work.
-# protest → political/protest-policy; crime → conflict (terrorism/insurgency) or general.
-_CATEGORIES = {'conflict', 'disaster', 'economic', 'political', 'health', 'general'}
 
 # Neutral-low fallback when the LLM omits/garbles intensity on an otherwise-parsed
 # article — keeps the event in play without overstating it.
 _DEFAULT_INTENSITY = 0.3
 
-_SUB_CATEGORIES: dict[str, set[str]] = {
-    'conflict':  {'war', 'airstrike', 'insurgency', 'terrorism', 'border-clash', 'other'},
-    'disaster':  {'earthquake', 'flood', 'storm', 'wildfire', 'industrial-accident', 'other'},
-    'economic':  {'monetary-policy', 'energy', 'trade', 'tariffs', 'labor', 'markets', 'sanctions', 'other'},
-    'political': {'election', 'legislation', 'diplomacy', 'leadership-change', 'protest-policy', 'other'},
-    'health':    {'outbreak', 'pandemic', 'healthcare-system', 'other'},
-    'general':   {'other'},
-}
-
 # English-only schema — covers only the fields that need real judgment (taxonomy
-# classification, geo naming, severity rating). Sentiment is handled
-# locally (services.processing.vader — see cleaner.py);
-# Arabic is generated locally too, from the English fields below by
-# services.translation (MarianMT) — see add_arabic_translations.
+# classification, geo naming, severity rating). Sentiment and Arabic
+# translation are the annotate stage's job (services.processing.annotator).
 _OBJECT_SCHEMA = """\
 {
   "category": conflict|disaster|economic|political|health|general,
@@ -85,148 +83,6 @@ class ArticleAnalysis:
     error: str | None = None  # set when analysis fell back to _empty() — surfaced via mark_stage
 
 
-@functools.lru_cache(maxsize=1)
-def _city_index() -> dict[str, tuple[float, float]]:
-    """Lowercase city name → (lat, lon) of the most populous city with that name."""
-    import geonamescache
-    # population → (lat, lon) per name; keeps highest-population entry on collision
-    best: dict[str, tuple[int, float, float]] = {}
-    for c in geonamescache.GeonamesCache().get_cities().values():
-        name = c['name'].lower()
-        pop = int(c.get('population') or 0)
-        if name not in best or pop > best[name][0]:
-            best[name] = (pop, float(c['latitude']), float(c['longitude']))
-    return {name: (lat, lon) for name, (_, lat, lon) in best.items()}
-
-
-@functools.lru_cache(maxsize=1)
-def _country_index() -> dict[str, tuple[float, float]]:
-    """
-    Lowercase country name → (lat, lon).
-
-    Strategy per country:
-      1. Try the capital city name against the city index (fast, usually works).
-      2. Fall back to the most populous city in that country by country code
-         (robust against capital-name spelling mismatches like Kiev/Kyiv).
-    """
-    import geonamescache
-    gc = geonamescache.GeonamesCache()
-    city_idx = _city_index()
-
-    # country_code → (population, lat, lon) for the most populous city
-    top_by_cc: dict[str, tuple[int, float, float]] = {}
-    for c in gc.get_cities().values():
-        cc = c.get('countrycode', '')
-        pop = int(c.get('population') or 0)
-        lat, lon = float(c['latitude']), float(c['longitude'])
-        if cc and (cc not in top_by_cc or pop > top_by_cc[cc][0]):
-            top_by_cc[cc] = (pop, lat, lon)
-
-    index: dict[str, tuple[float, float]] = {}
-    for iso, cdata in gc.get_countries().items():
-        country_lower = cdata['name'].lower()
-        capital = (cdata.get('capital') or '').strip()
-
-        # 1. try capital name match
-        coords: tuple[float, float] | None = city_idx.get(capital.lower()) if capital else None
-
-        # 2. fall back to most populous city in this country
-        if not coords and iso in top_by_cc:
-            _, lat, lon = top_by_cc[iso]
-            coords = (lat, lon)
-
-        if coords:
-            index[country_lower] = coords
-
-    return index
-
-
-# Common LLM/name variants → the canonical geonamescache country name. The LLM
-# routinely returns "USA"/"UK"/"Russian Federation"/"Türkiye" etc.; geonamescache
-# only keys the canonical form, so without this map a correctly-identified country
-# silently fails to geocode (the root cause of the large un-located backlog).
-# Every value here is a verified canonical geonamescache country name.
-_COUNTRY_ALIASES: dict[str, str] = {
-    'usa': 'United States', 'us': 'United States', 'u.s.': 'United States',
-    'u.s.a.': 'United States', 'america': 'United States',
-    'united states of america': 'United States',
-    'uk': 'United Kingdom', 'u.k.': 'United Kingdom', 'britain': 'United Kingdom',
-    'great britain': 'United Kingdom', 'england': 'United Kingdom',
-    'scotland': 'United Kingdom', 'wales': 'United Kingdom',
-    'northern ireland': 'United Kingdom',
-    'russian federation': 'Russia',
-    'czech republic': 'Czechia',
-    'turkiye': 'Turkey', 'türkiye': 'Turkey',
-    'burma': 'Myanmar',
-    'dr congo': 'Democratic Republic of the Congo',
-    'drc': 'Democratic Republic of the Congo',
-    'congo-kinshasa': 'Democratic Republic of the Congo',
-    'congo (kinshasa)': 'Democratic Republic of the Congo',
-    'congo-brazzaville': 'Republic of the Congo',
-    'cape verde': 'Cabo Verde',
-    'swaziland': 'Eswatini',
-    'macedonia': 'North Macedonia',
-    'vatican city': 'Vatican', 'holy see': 'Vatican',
-    'uae': 'United Arab Emirates', 'u.a.e.': 'United Arab Emirates',
-    'the emirates': 'United Arab Emirates',
-    'south korea': 'South Korea', 'north korea': 'North Korea',
-}
-
-# Places geonamescache has no country entry for — direct coordinate fallback so
-# high-frequency conflict geographies still resolve. Keyed by normalized name;
-# matched against either the city or the country field.
-_EXTRA_PLACES: dict[str, tuple[float, float]] = {
-    'palestine': (31.9522, 35.2332), 'palestinian territories': (31.9522, 35.2332),
-    'west bank': (31.9522, 35.2332),
-    'gaza': (31.5, 34.47), 'gaza strip': (31.5, 34.47), 'gaza city': (31.5, 34.47),
-    'kosovo': (42.6026, 20.9030),
-}
-
-# City spellings the gazetteer lists under a different form.
-_CITY_ALIASES: dict[str, str] = {'kiev': 'kyiv'}
-
-
-def _norm(name: str) -> str:
-    """Normalize a place string for lookup: lowercase, trim, drop a leading
-    'the ', and strip surrounding quotes/whitespace. Cheap and allocation-light."""
-    n = name.strip().strip('"\'').lower()
-    if n.startswith('the '):
-        n = n[4:]
-    return n
-
-
-def _country_key(country: str) -> str:
-    """Alias-resolved, lowercased key into _country_index() for a country name."""
-    n = _norm(country)
-    canonical = _COUNTRY_ALIASES.get(n)
-    return canonical.lower() if canonical else n
-
-
-def _geocode(city: str | None, country: str | None = None) -> tuple[float | None, float | None]:
-    """
-    Try city first; fall back to the country's main city if city is absent or unknown.
-    Applies alias/normalization so common LLM name variants (USA, UK, Türkiye, …)
-    and gazetteer-less territories (Palestine, Gaza) still resolve.
-    Returns (None, None) if neither resolves.
-    """
-    if city:
-        n = _norm(city)
-        coords = _city_index().get(n) or _city_index().get(_CITY_ALIASES.get(n, n))
-        if coords:
-            return coords
-    # Territories geonamescache lacks — check both fields before the country index.
-    for raw in (city, country):
-        if raw:
-            coords = _EXTRA_PLACES.get(_norm(raw))
-            if coords:
-                return coords
-    if country:
-        coords = _country_index().get(_country_key(country))
-        if coords:
-            return coords
-    return None, None
-
-
 class ArticleAnalyzer:
     """
     Uses the LLM to extract category, sub-category, country, city, and intensity from
@@ -241,8 +97,8 @@ class ArticleAnalyzer:
     """
 
     # Multi-article batching — cuts LLM call count roughly by this factor vs.
-    # one call per article. Smaller than ArticleImportanceScorer.BATCH_SIZE
-    # (30) because full article content is included here, not just titles.
+    # one call per article. Kept small because full article content is
+    # included in the prompt, not just titles.
     ANALYZE_BATCH_SIZE = 8
     # Per-article content cap inside a multi-article prompt — keeps an
     # 8-article batch prompt within safe context/latency bounds.
@@ -251,9 +107,7 @@ class ArticleAnalyzer:
     def __init__(self) -> None:
         from services.llm import get_llm_service
         self._get_llm_service = get_llm_service
-        # Resolved lazily and cached — the LLM handles category/geo/intensity +
-        # EN translation; Arabic is added afterward via services.translation.
-        self._llm = None
+        self._llm = None  # resolved lazily and cached
 
     def _service(self):
         if self._llm is None:
@@ -285,22 +139,18 @@ class ArticleAnalyzer:
         except (TypeError, ValueError):
             return default
 
-    def analyze(self, text: str, translate: bool = True) -> ArticleAnalysis:
+    def analyze(self, text: str) -> ArticleAnalysis:
         """Analyze a single article. Returns a zeroed-out ArticleAnalysis on failure."""
-        return self.analyze_batch([text], translate=translate)[0]
+        return self.analyze_batch([text])[0]
 
-    def analyze_batch(self, texts: list[str], translate: bool = True) -> list[ArticleAnalysis]:
+    def analyze_batch(self, texts: list[str]) -> list[ArticleAnalysis]:
         """
         Analyze articles in batches of one LLM call each. Returns one ArticleAnalysis
         per input text, in order — failures fall back to _empty() per-item or per-chunk.
 
-        The LLM call itself only ever produces English output (category, geo,
-        intensity, EN translation) — sentiment is handled separately by VADER in
-        cleaner.py, on every document regardless of this flag.
-        translate=True additionally adds a locally-generated ('ar') translation
-        block via services.translation (MarianMT); translate=False skips that local
-        translation step (used for backfilled articles where Arabic localization
-        isn't needed).
+        Output is English-only (category, geo, intensity, EN title/summary) —
+        sentiment and the Arabic translation belong to the annotate stage
+        (services.processing.annotator), never to this prompt client.
 
         Batch size depends on which provider will actually serve the call: Ollama is
         a single local model server (one request at a time), so a route that
@@ -318,10 +168,10 @@ class ArticleAnalyzer:
 
         results: list[ArticleAnalysis] = []
         for i in range(0, len(texts), batch_size):
-            results.extend(self._analyze_chunk(texts[i : i + batch_size], translate, service))
+            results.extend(self._analyze_chunk(texts[i : i + batch_size], service))
         return results
 
-    def _analyze_chunk(self, texts: list[str], translate: bool, service) -> list[ArticleAnalysis]:
+    def _analyze_chunk(self, texts: list[str], service) -> list[ArticleAnalysis]:
         """Send one multi-article prompt (array-in, array-out) and parse it back."""
         user = '\n\n'.join(
             f'Article {i + 1}:\n{t[: self._BATCH_MAX_CHARS]}' for i, t in enumerate(texts)
@@ -348,8 +198,6 @@ class ArticleAnalyzer:
             else self._empty(error='LLM response missing/malformed result object for this article')
             for i in range(len(texts))
         ]
-        if translate:
-            self.add_arabic_translations(results)
         return results
 
     @staticmethod
@@ -372,41 +220,6 @@ class ArticleAnalyzer:
             for i, share in enumerate(shares):
                 share[field] = base + (1 if i < remainder else 0)
         return shares
-
-    @staticmethod
-    def add_arabic_translations(results: list[ArticleAnalysis]) -> None:
-        """Add a locally-generated ('ar') translation block to each result's
-        translations dict, derived from the LLM's ('en') block. Batches every
-        field across every result into a single translation-model call.
-
-        Public because ArticleCleaner drives it directly: it runs one EN-only
-        analyze_batch over a whole chunk, then adds Arabic only for the non-lite
-        subset (see services.processing.cleaner.ArticleCleaner.clean_batch).
-        """
-        from services.translation import translate_en_ar_batch
-
-        fields = ('title', 'summary', 'country', 'city')
-        flat_texts: list[str] = []
-        slots: list[tuple[int, str]] = []  # (result_index, field)
-        for i, r in enumerate(results):
-            en = r.translations.get('en') if isinstance(r.translations, dict) else None
-            if not isinstance(en, dict):
-                continue
-            for field in fields:
-                val = en.get(field)
-                if isinstance(val, str) and val.strip():
-                    slots.append((i, field))
-                    flat_texts.append(val)
-        if not flat_texts:
-            return
-
-        translated = translate_en_ar_batch(flat_texts)
-        ar_blocks: dict[int, dict] = {}
-        for (i, field), tr in zip(slots, translated):
-            if tr:
-                ar_blocks.setdefault(i, {})[field] = tr
-        for i, ar in ar_blocks.items():
-            results[i].translations['ar'] = ar
 
     @staticmethod
     def _loads(raw: str):

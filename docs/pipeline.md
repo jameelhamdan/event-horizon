@@ -2,9 +2,11 @@
 
 The article→event pipeline is declared as a **stage registry**
 (`api/services/stages.py`), not a set of per-step tasks. Each pull-based stage
-(fetch → score → process → aggregate → tag → route) declares
+(fetch → {analyze | annotate → refine} → aggregate → tag → route) declares
 how to find pending work, how to process it, and its own chunk size/queue/cadence.
-Exactly two Celery tasks execute every stage:
+`analyze` and `annotate` both select from `stage='fetched'` but partition
+disjointly by recency (see [Stage: analyze](#stage-analyze)), so every fetched
+article lands in exactly one of them. Exactly two Celery tasks execute every stage:
 
 - **`pipeline_tick_task`** (cron, every 10m) — dispatches every enabled stage that
   is due (past its own `every_minutes` cadence) and has pending work.
@@ -30,12 +32,16 @@ upstream output on its next due tick, not immediately.
 
 ```mermaid
 flowchart TD
-    F["fetch<br/><i>default · every 10m</i>"] --> A0[(Article · raw)]
-    A0 --> SC["score<br/><i>heavy · every 60m</i>"]
-    SC --> A1[(Article · scored)]
-    A1 --> P["process<br/><i>heavy · every 30m</i>"]
-    P --> A2[(Article · enriched)]
-    A2 --> AG["aggregate<br/><i>heavy · every 30m · singleton · trailing 72h</i>"]
+    F["fetch<br/><i>default · every 10m</i>"] --> A0[(Article · stage=fetched)]
+    A0 -->|"fresh, live<br/>(&lt; 6h old, not backfill)"| AZ["analyze<br/><i>heavy · every 3h · cloud LLM</i>"]
+    A0 -->|"backfill, or aged<br/>past the freshness window"| AN["annotate<br/><i>heavy · every 30m · on-prem NLP</i>"]
+    AZ --> A1[(Article · stage=annotated)]
+    AN --> A1
+    AN --> A1R[(Article · stage=refine<br/>low-confidence, historical only)]
+    A1R --> RJ["refine<br/><i>heavy · every 60m · judge (REFINE_PROVIDER)</i>"]
+    RJ --> A2[(Article · stage=refined)]
+    A1 --> AG["aggregate<br/><i>heavy · every 30m · singleton · trailing 72h</i>"]
+    A2 --> AG
     AF["aggregate_full_task<br/><i>heavy · daily 01:00 · full 168h</i>"] --> E
     AG --> E[(Event)]
     E --> T["tag<br/><i>heavy · every 60m</i>"]
@@ -51,7 +57,7 @@ flowchart TD
     EI --> GN["generate_newsletter_task<br/><i>heavy · daily 06:00</i>"]
 
     classDef q fill:#1a1a22,stroke:#7c9ef8,color:#e8e8f0;
-    class F,SC,P,GC,AG,T,RE,DT,RT,RF,SF,GN q;
+    class F,AZ,AN,RJ,AG,T,RE,DT,RT,RF,SF,GN q;
 ```
 
 Streams run independently on the `default` queue and feed `PriceTick` (and the SSE
@@ -93,56 +99,120 @@ python manage.py backfill_history <source> --start-date 2022-01-01 --end-date 20
 
 ---
 
-## Stage: score
+## Stage: analyze
 
-**Goal:** rate each unprocessed, unscored article's global significance (1.0–10.0)
-so low-value articles can be filtered out before the expensive `process` stage.
-**Code:** `services/scoring/` (`ArticleImportanceScorer`).
+**Goal:** the higher-quality path — full cloud-LLM analysis for articles that
+were *just* fetched. **Code:** `services/processing/analyzer.py`
+(`ArticleAnalyzer`) via `services.workflow.articles.analyze_live_articles`,
+same `LLM_ROUTES['analyzer_lite']` provider chain the refine stage's `cloud`
+provider uses. Chunks of 8 (`ArticleAnalyzer.ANALYZE_BATCH_SIZE`) = one
+batched LLM call.
 
-Batches of 30 titles per LLM call; applies source-weight multiplier +
-cross-source corroboration bonus + category floor. Gated by
-`ARTICLE_IMPORTANCE_SCORING_ENABLED`.
+**Why live-only:** cloud LLM cost/rate-limits don't scale to the full
+historical corpus (that's exactly why the `annotate`/`refine` on-prem path
+exists), but live volume — a trickle every 10 minutes from `fetch` — comfortably
+fits inside free-tier limits, and the extra judgment quality is worth spending
+on articles that are actually going to be shown live.
+
+**Selection:** `stage='fetched'`, not backfill-tagged (`extra_data.backfill_day`
+unset), and `created_on` within `LIVE_ANALYZE_FRESHNESS_HOURS` (`services/
+stages.py`, default 6h — 2× the stage's own 3h cadence, so one missed tick
+doesn't strand anything). Gated by `LIVE_LLM_ENABLED` (dashboard toggle).
+
+**Fallback, not a failure mode:** an article this stage doesn't reach in
+time — LLM outage, `LIVE_LLM_ENABLED` off, or simply not fetched recently
+enough — automatically falls through to `annotate` once it ages past the
+freshness window, since `annotate`'s own selection is "everything `analyze`
+doesn't claim" (backfill-tagged, or aged out). A live article is therefore
+never stranded by the LLM path being unavailable; it only ever degrades from
+"analyzed by the cloud LLM" to "analyzed for free on-prem", never to
+"unanalyzed".
+
+Produces the same fields `annotate` does — `category`, `sub_category`,
+`location`/`latitude`/`longitude`, `event_intensity`, `translations.en`
+(here: an *abstractive* LLM summary, vs. `annotate`'s extractive one) — plus
+the same local `sentiment`/`finbert_sentiment`/Arabic-translation/importance
+pipeline `annotate` uses (these are backend-agnostic; only the source of
+category/geo/intensity/summary changes). Terminal on success:
+`stage='annotated'` — the *same* value `annotate` uses, so `aggregate`/`tag`/
+`route` and the public API never need to know which analyzer produced a given
+article. A failed analysis leaves `stage='fetched'` unchanged, for this stage
+to retry on its next tick or for the fallback above to eventually claim.
+
+```bash
+python manage.py run_task dispatch_stage_task stage_name=analyze --sync
+```
 
 ---
 
-## Stage: process
+## Stage: annotate
 
-**Code:** `services/processing/` (`cleaner.py` drives it; `analyzer.py`,
-`vader.py`, `finbert.py` are called within, plus `services/translation/` for
-Arabic). Chunks of 8 articles = one batched LLM analysis call
-(`ArticleAnalyzer.ANALYZE_BATCH_SIZE`).
+**Goal:** every on-prem annotation in one pass — classification, geo, intensity,
+sentiment, importance, translations. No LLM anywhere; every model is a
+pretrained download, so the stage works from an empty database with no keys.
+Handles all historical/backfill volume (cheap, no rate limits) plus any live
+article the `analyze` stage above didn't reach in time.
+**Code:** `services/processing/annotator.py` (`NLPAnnotator`), taxonomy data in
+`taxonomy.py`, gazetteer in `geocode.py`, importance post-processing in
+`services/scoring/`. Chunks of 8; per-article handling, so one bad article can
+never fail its chunk.
 
 Per article, enrich in place:
 
 | Field | How |
 |-------|-----|
-| Locations (country/city) | LLM-named, resolved to lat/lng via geonamescache |
-| Category + **sub-category** | LLM, two-level taxonomy (see below) |
-| Intensity | LLM-rated newsworthiness/severity [0, 1] |
-| Sentiment | `Article.sentiment` — local VADER polarity [-1, 1], rule-based, no LLM call |
-| Sentiment (**FinBERT**) | `Article.finbert_sentiment` — news-domain, batched, computed **once at process time** |
-| i18n (en/ar) | LLM produces the English title/summary; Arabic is generated locally (MarianMT, `Helsinki-NLP/opus-mt-en-ar`) from that English text — `Article.translations` |
+| Category + **sub-category** | nearest taxonomy prototype by embedding cosine (shared MiniLM); the cosine confidence also decides the article's next stage |
+| Locations (country/city → lat/lng) | pretrained NER (`wikineural`) → gazetteer + aliases + country-of-city backfill; regex country-scan fallback |
+| Intensity | taxonomy prior + lexical severity cues (casualties, quake magnitude, escalation vocabulary) |
+| Importance (1.0–10.0) | intensity mapped to a 1–10 base, then source-weight multiplier + cross-source corroboration bonus + category floor |
+| Sentiment | `Article.sentiment` — local VADER polarity [-1, 1] |
+| Sentiment (**FinBERT**) | `Article.finbert_sentiment` — news-domain, batched, computed **once at annotate time** |
+| i18n (en/ar) | extractive English summary (leading sentences); Arabic generated locally (MarianMT) — skipped for lite/backfill articles |
+
+**Stage transition:** confident classification → `stage='annotated'` (terminal);
+cosine confidence below `ESCALATE_BELOW` → `stage='refine'`, queueing the
+article for the judge below. A *failed* annotation leaves `stage='fetched'` and
+is retried — no repair loop.
 
 **Two-level category taxonomy** (`EventCategory`): top-level stays small
-(`conflict, disaster, economic, political, health, general`); the LLM-produced
-`sub_category` does the work (e.g. `monetary-policy`, `airstrike`, `earthquake`).
-Legacy flat values (`protest`, `crime`) still validate for old data but are never
-assigned to new data.
-
-Both sentiment scores are stored so downstream features can use either; sentiment is
-always a **feature**, never the predictor.
+(`conflict, disaster, economic, political, health, general`); `sub_category`
+does the work (e.g. `monetary-policy`, `airstrike`, `earthquake`). Prototype
+sentences and intensity priors live in `taxonomy.py` — tuning classification is
+a data edit, not a code change.
 
 ```bash
 python manage.py process_articles --limit 5              # same predicate the stage uses
 python manage.py process_articles --source-code <code>
-python manage.py process_articles --reprocess             # re-run over already-processed rows
+python manage.py process_articles --reprocess             # re-run over already-annotated rows
+python manage.py eval_analyzer --limit 30 [--refine]      # live-sample eval report (results/eval_analyzer/)
 ```
 
-Geocoding is **not a separate stage** — it happens inline in `process`
-(`analyzer._geocode`, a local `geonamescache` lookup of the LLM's country/city).
-A processed article that resolves no location is terminal (it simply never
-aggregates into an event); a *failed* analysis stays unprocessed and is retried
-by the `process` stage rather than sitting in a repair loop.
+Geocoding is **not a separate stage** — it happens inline (a local
+`geonamescache` lookup in `services/processing/geocode.py`). An annotated
+article that resolves no location is terminal (it simply never aggregates into
+an event).
+
+---
+
+## Stage: refine
+
+**Goal:** a second opinion on the articles the annotate stage was unsure about
+(`stage='refine'`), re-judging category/sub-category — and, for LLM providers,
+geo/intensity/summary. **Code:** `services/processing/refiner.py`
+(`LLMRefiner`).
+
+One judge per deployment via `REFINE_PROVIDER`, each batched to its capacity:
+
+| Provider | What it is | Batch |
+|----------|------------|-------|
+| `zeroshot` (default) | mDeBERTa zero-shot NLI, on-prem; conflict-verdicts require concrete military/violence vocabulary (metaphor gate) | 16 |
+| `ollama` | local LLM (`ollama_medium`), JSON-schema constrained decoding — output cannot fail to parse | 1 |
+| `cloud` | the LLM prompt client (`analyzer.py`) via `LLM_ROUTES['analyzer_lite']`; also refreshes the abstractive EN summary | 8 |
+| `off` | stage never dispatches; flagged articles keep their prototype annotations | — |
+
+A verdict advances the article to `stage='refined'` (+ `refined_on`); a failed/
+unavailable judge leaves `stage='refine'` for retry. The LLM master switch
+(dashboard) gates this stage only when the provider is an actual LLM.
 
 ---
 

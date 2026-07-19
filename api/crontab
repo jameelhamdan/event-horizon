@@ -9,7 +9,7 @@
 
 # ── The pipeline ─────────────────────────────────────────────────────────
 # One tick dispatches every pipeline stage that is due and has pending work
-# (fetch → score → process → aggregate → tag → route). Per-stage
+# (fetch → {analyze | annotate → refine} → aggregate → tag → route). Per-stage
 # cadence, chunking, and queue live in services/stages.py — NOT here.
 */10 * * * *   python /app/manage.py run_task pipeline_tick_task
 

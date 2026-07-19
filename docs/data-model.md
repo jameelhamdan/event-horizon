@@ -65,7 +65,13 @@ erDiagram
 
 ## Article
 
-Raw news item from one source, enriched **in place** by the processing stage.
+Raw news item from one source, enriched **in place** by either the `analyze`
+stage (fresh live articles — full cloud LLM) or the `annotate` stage
+(historical/backfill — on-prem NLP; and, for low-confidence classifications,
+re-judged by the `refine` stage — see `stage`/`refined_on`/`refined_by`). A
+re-refine (admin action or CLI) overwrites `refined_by` and `refined_on`
+regardless of the article's current stage — the field always reflects
+whichever judge most recently decided it.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -81,19 +87,23 @@ Raw news item from one source, enriched **in place** by the processing stage.
 | `entities` | `[]` | Unused — retained for schema stability; not populated |
 | `sentiment` | float \| null | Local VADER polarity [-1, 1] (rule-based, no LLM call) |
 | `finbert_sentiment` | float \| null | **FinBERT** signed sentiment [-1, 1] — news-domain (new) |
-| `location` | str(255) \| null | `City, Country` from LLM analysis |
-| `event_intensity` | float \| null | LLM-rated newsworthiness/severity [0, 1] |
-| `category` | str → `EventCategory` | Top-level category (rule/LLM) |
-| `sub_category` | str(64) \| null | LLM sub-category within the top-level |
-| `processed_on` | datetime \| null | Set when NLP processing completes |
+| `location` | str(255) \| null | `City, Country` — NER + gazetteer (`annotate`) or LLM-named + geocoded (`analyze`) |
+| `event_intensity` | float \| null | Rule-rated (`annotate`) or LLM-rated (`analyze`) newsworthiness/severity [0, 1] |
+| `category` | str → `EventCategory` | Top-level category (prototype classifier / LLM / judge) |
+| `sub_category` | str(64) \| null | Sub-category within the top-level |
+| `processed_on` | datetime \| null | Set when analysis/annotation completes |
+| `stage` | str(16) | Pipeline position: `fetched → annotated \| refine → refined` (see [pipeline-state.md](pipeline-state.md)) — `analyze` and `annotate` both terminate at `annotated` |
+| `refined_on` | datetime \| null | Set when the refine stage re-judged the article |
+| `refined_by` | str \| null | Judge that produced the current verdict: `zeroshot` \| `ollama` \| `cloud` (see `REFINE_PROVIDER`) |
+| `importance_score` / `importance_source` | float \| str | 1–10 significance (rules post-processing over either analyzer's intensity) |
 | `banner_image_url` | URL(512) \| null | RSS media or OG-image fallback |
 | `latitude` / `longitude` | float \| null | Geocoded coordinates |
-| `translations` | `{}` | Per-language `{en:{...}, ar:{...}}` — `en` from the LLM, `ar` generated locally (MarianMT, `services/translation/`) |
-| `extra_data` | `{}` | Raw LLM payload etc. |
+| `translations` | `{}` | Per-language `{en:{...}, ar:{...}}` — `en` is `annotate`'s extractive summary, or an abstractive one from `analyze`/the cloud refine provider; `ar` always generated locally (MarianMT, `services/translation/`) |
+| `extra_data` | `{}` | Annotation payload (`llm` block: labels, `annotator`/`confidence` from `annotate`, or the raw LLM fields from `analyze`) etc. |
 | `updated_on` / `created_on` | datetime | Audit timestamps |
 
 **Indexes:** `created_on`, `source_code`, `author_slug`, `category`, `processed_on`,
-`location`.
+`location`, `stage`. (`refined_by` is not indexed — low cardinality, filtered via admin only.)
 
 ---
 

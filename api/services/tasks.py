@@ -4,7 +4,7 @@ These are Celery tasks (@shared_task) enqueued via services.queue.enqueue.
 Calling one directly as a plain function (func(**kwargs)) still runs it
 synchronously in-process — used by run_task.py --sync and TASK_QUEUE_ENABLED=False.
 
-The pull-based pipeline (fetch → score → process → aggregate → tag → route) is
+The pull-based pipeline (fetch → {analyze | annotate → refine} → aggregate → tag → route) is
 NOT a set of per-step tasks anymore — it's declared in
 services/stages.py and executed by exactly two tasks here:
 pipeline_tick_task (cron, dispatches due stages) and run_stage_chunk_task
@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from celery import shared_task
 
 from services.workflow import (
-    process_articles,
+    annotate_articles,
     refresh_topics,
     retroactive_tag_topic,
     discover_topics_from_events,
@@ -588,9 +588,8 @@ def backfill_day_chunk_task(
 ) -> dict:
     """
     Worker half of the backfill dispatcher: fetch + save + (unless dry_run)
-    score → gate → NLP-process one day window across a small chunk of sources
-    — the same order the live pipeline uses (score stage, then
-    ARTICLE_MIN_IMPORTANCE_TO_PROCESS gate, then process stage).
+    annotate one day window across a small chunk of sources — the same on-prem
+    NLP annotation pass the live annotate stage uses (importance included).
 
     Relies on the heavy queue's default ~10min time limit (no per-call
     job_timeout override) plus an internal wall-clock deadline
@@ -604,13 +603,12 @@ def backfill_day_chunk_task(
     done, so blocklisted/errored/deadline source-days remain resumable.
 
     Returns {'day': ISO date str, 'sources': [...], 'fetched', 'saved',
-    'scored', 'processed', 'outcomes': {source_code: outcome}}.
+    'processed', 'annotated' (whether annotation ran, vs. deferred), 'outcomes':
+    {source_code: outcome}}.
     """
-    from django.conf import settings
     import core.models as m
     from services.cache import redis_set_add
     from services.data.historical import HistoricalBackfillService
-    from services.workflow.articles import _apply_min_score_filter
 
     deadline = datetime.now(dt_timezone.utc) + timedelta(seconds=BACKFILL_CHUNK_DEADLINE_SECONDS)
 
@@ -618,44 +616,27 @@ def backfill_day_chunk_task(
     service = HistoricalBackfillService(sources=sources, top_n=top_n, delay_seconds=delay_seconds)
     result = service.fetch_and_save_day(day_start, day_end, dry_run=dry_run, deadline=deadline)
 
-    scored = processed = 0
-    # Backfill LLM switch OFF: fetch/save only — stop before the LLM-dependent
-    # score + process (annotation) steps and leave the saved articles for a later
-    # dedicated annotate + aggregate pass. Read from RuntimeConfig at execution
-    # time (dashboard-editable), so flipping it applies to this already-dispatched,
-    # in-flight backfill on the next chunk — no re-dispatch or restart.
+    processed = 0
+    # Backfill annotation switch OFF: fetch/save only — leave the saved
+    # articles for a later dedicated annotate + aggregate pass. Read from
+    # RuntimeConfig at execution time (dashboard-editable), so flipping it
+    # applies to this already-dispatched, in-flight backfill on the next chunk.
     from services.runtime_config import is_backfill_llm_enabled
     llm_enabled = is_backfill_llm_enabled()
     if not dry_run and not llm_enabled and result.saved_ids:
-        # Flag them so the live score/process stages skip them too (they'd
+        # Flag them so the live annotate stage skips them too (they'd
         # otherwise annotate these on the next tick, since their created_on is
         # recent). annotate_deferred_articles_task picks them up on demand.
         m.Article.objects.filter(id__in=result.saved_ids).update(annotation_deferred=True)
         logger.info(
-            '[backfill] backfill LLM switch OFF — saved %d article(s) for day=%s '
+            '[backfill] backfill annotation switch OFF — saved %d article(s) for day=%s '
             'with annotation deferred; run annotate_deferred_articles_task later',
             len(result.saved_ids), day_start.date(),
         )
     if not dry_run and llm_enabled and result.saved_ids:
-        # Same order as the live pipeline: score → gate → process. Without
-        # this, immediately-processed backfill articles would be skipped by
-        # the 'score' stage forever (its predicate is processed_on__isnull)
-        # and the min-importance process gate would never apply.
-        if settings.ARTICLE_IMPORTANCE_SCORING_ENABLED:
-            from services.scoring import score_unscored_articles
-            try:
-                scored = score_unscored_articles(article_ids=result.saved_ids)
-            except Exception:
-                # Scoring is best-effort here — a scoring failure must not
-                # strand saved articles unprocessed (they'd stay invisible).
-                logger.exception('[backfill] scoring failed for day=%s — processing ungated', day_start.date())
-        process_qs = _apply_min_score_filter(
-            m.Article.objects.filter(id__in=result.saved_ids),
-            settings.ARTICLE_MIN_IMPORTANCE_TO_PROCESS,
-        )
-        process_ids = list(process_qs.values_list('id', flat=True))
-        if process_ids:
-            processed = process_articles(ids=process_ids)
+        # One on-prem pass covers classification, geo, sentiment AND importance
+        # (the old separate score step is merged into annotate).
+        processed = annotate_articles(ids=result.saved_ids)
 
     if checkpoint_key and not dry_run:
         day_iso = day_start.date().isoformat()
@@ -670,7 +651,7 @@ def backfill_day_chunk_task(
     return {
         'day': day_start.date().isoformat(), 'sources': source_codes,
         'fetched': result.fetched, 'saved': result.saved,
-        'scored': scored, 'processed': processed,
+        'processed': processed,
         'annotated': llm_enabled,
         'outcomes': result.outcomes,
     }
@@ -679,8 +660,8 @@ def backfill_day_chunk_task(
 @shared_task(**_RETRY_KW)
 def annotate_deferred_articles_task(limit: int = 1000, batch_size: int = 50) -> dict:
     """Annotate articles a fetch-only backfill deferred (annotation_deferred=True,
-    saved with BACKFILL_LLM_ENABLED=False): score → min-importance gate → process,
-    the same order the live pipeline and backfill use, then clear the flag.
+    saved with BACKFILL_LLM_ENABLED=False): the same on-prem NLP annotation pass
+    the live pipeline uses (importance included), then clear the flag.
 
     Run this after a fetch-only backfill to annotate the saved articles, then
     aggregate them with aggregate_history_task over the same date range. Bounded
@@ -689,11 +670,9 @@ def annotate_deferred_articles_task(limit: int = 1000, batch_size: int = 50) -> 
 
         python manage.py run_task annotate_deferred_articles_task limit=2000 --sync
 
-    Returns {'selected', 'scored', 'processed', 'remaining'}.
+    Returns {'selected', 'processed', 'remaining'}.
     """
-    from django.conf import settings
     import core.models as m
-    from services.workflow.articles import _apply_min_score_filter
 
     def _remaining() -> int:
         return m.Article.objects.filter(
@@ -705,32 +684,17 @@ def annotate_deferred_articles_task(limit: int = 1000, batch_size: int = 50) -> 
         .order_by('created_on').values_list('id', flat=True)[:limit]
     )
 
-    scored = processed = 0
+    processed = 0
     for i in range(0, len(ids), batch_size):
         batch = ids[i:i + batch_size]
-        if settings.ARTICLE_IMPORTANCE_SCORING_ENABLED:
-            from services.scoring import score_unscored_articles
-            try:
-                scored += score_unscored_articles(article_ids=batch)
-            except Exception:
-                # Best-effort, mirroring backfill_day_chunk_task: a scoring
-                # failure must not strand the batch — process it ungated.
-                logger.exception('[annotate-deferred] scoring failed for a batch — processing ungated')
-        process_ids = list(
-            _apply_min_score_filter(
-                m.Article.objects.filter(id__in=batch),
-                settings.ARTICLE_MIN_IMPORTANCE_TO_PROCESS,
-            ).values_list('id', flat=True)
-        )
-        if process_ids:
-            processed += process_articles(ids=process_ids)
-        # Clear the flag for the whole batch — including below-gate articles that
-        # won't be processed — so re-runs make forward progress and the set
-        # rejoins normal pipeline/cleanup handling.
+        processed += annotate_articles(ids=batch)
+        # Clear the flag for the whole batch — including any articles whose
+        # annotation failed (they retry via the live annotate stage) — so
+        # re-runs make forward progress.
         m.Article.objects.filter(id__in=batch).update(annotation_deferred=False)
 
     result = {
-        'selected': len(ids), 'scored': scored,
+        'selected': len(ids),
         'processed': processed, 'remaining': _remaining(),
     }
     logger.info('annotate_deferred_articles_task: %s', result)
@@ -823,7 +787,7 @@ def run_forecast_task() -> int:
 
 
 # ── Article maintenance ───────────────────────────────────────────────────────
-# (Importance scoring itself is the 'score' stage in services/stages.py.)
+# (Importance scoring runs inside the 'annotate' stage — see services/stages.py.)
 # Article deletion is intentionally not implemented: every record is kept as
 # training/distillation data. There are no cleanup/prune tasks.
 
@@ -832,7 +796,8 @@ def adjust_source_weights_task() -> int:
     """
     Nudge Source.weight based on 30-day event yield rate.
     Sources whose articles consistently land in Events drift up; noisy sources drift down.
-    weight_locked=True sources are skipped. Independent of ARTICLE_IMPORTANCE_SCORING_ENABLED.
+    weight_locked=True sources are skipped. The adjusted weight feeds the
+    annotate stage's importance scoring (services/scoring/ImportanceScorer).
     """
     from core import models as core_models
 

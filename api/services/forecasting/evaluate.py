@@ -17,7 +17,6 @@ throughout (never ``started_at`` — see the leakage note on the Event model).
 
 import json
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 
 from django.conf import settings
@@ -166,7 +165,7 @@ def evaluate_return_mae(start, end, step_days=30, train_window_days=None):
 
 
 def run_evaluation(days=365, top_k=3, step_days=30, output_path=None) -> dict:
-    """Run both evaluations and write the JSON report (default: <repo>/eval/)."""
+    """Run both evaluations and write the JSON report (default: <repo>/results/evaluate_forecasting/)."""
     end = datetime.now(timezone.utc) - timedelta(days=2)  # let realized bars settle
     start = end - timedelta(days=days)
 
@@ -192,9 +191,8 @@ def run_evaluation(days=365, top_k=3, step_days=30, output_path=None) -> dict:
     }
 
     if output_path is None:
-        eval_dir = os.path.join(str(settings.BASE_DIR), 'eval')
-        os.makedirs(eval_dir, exist_ok=True)
-        output_path = os.path.join(eval_dir, 'forecasting_report.json')
+        from services.utils import results_dir
+        output_path = str(results_dir('evaluate_forecasting') / 'forecasting_report.json')
     with open(output_path, 'w', encoding='utf-8') as fh:
         json.dump(report, fh, indent=2, default=str)
     report['_output_path'] = output_path

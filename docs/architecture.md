@@ -72,11 +72,11 @@ queues it runs on; see [pipeline.md](pipeline.md) for the full stage list.
 - **`default`** — fast I/O: the `fetch` pipeline stage, `pipeline_tick_task`
   itself, `dispatch_stage_task`, price/notam/earthquake/forex streams
   (`run_stream_task`).
-- **`heavy`** — anything CPU- or LLM-bound: the `score`/`process`/
+- **`heavy`** — anything CPU- or model-bound: the `analyze`/`annotate`/`refine`/
   `aggregate`/`tag`/`route` pipeline stages (via `run_stage_chunk_task`),
   `discover_topics_task`, `refresh_topics_task`, `run_forecast_task`,
   `score_forecasts_task`, `train_forecast_model_task`, `generate_newsletter_task`,
-  `backfill_day_chunk_task` (one day × a few sources — fetch, save, process,
+  `backfill_day_chunk_task` (one day × a few sources — fetch, save, annotate,
   bounded to the queue's ~10min default time limit).
 - **`bulk`** — long one-shot jobs / pure dispatchers: `backfill_history_task`
   (dispatches `backfill_day_chunk_task` onto `heavy`, does no fetching itself),
@@ -92,7 +92,7 @@ flowchart TB
         D1[pipeline_tick_task] --- D2[fetch stage] --- D3[run_stream_task ×4]
     end
     subgraph HEAVY["heavy queue · worker-heavy · CPU / LLM"]
-        H1[score / process<br/>stages] --- H2[aggregate stage]
+        H1[analyze / annotate / refine<br/>stages] --- H2[aggregate stage]
         H3[tag stage / discover_topics] --- H4[route stage]
         H5[run_forecast / score_forecasts / train] --- H6[generate_newsletter]
         H7[backfill_day_chunk_task]
@@ -114,7 +114,7 @@ api/
                          selection/handling/chunking/cadence per stage
     tasks.py             all task functions (plain Python, no decorator); pipeline_tick_task
                          + run_stage_chunk_task execute every stage in stages.py
-    workflow/            articles.py (fetch/process), events.py (aggregate + coverage),
+    workflow/            articles.py (fetch/analyze/annotate/refine), events.py (aggregate + coverage),
                          topics.py (tag/discover/refresh)
     processing/         analyzer (LLM), vader (local), finbert (local), cleaner, clustering
     translation/        local EN→AR (MarianMT)

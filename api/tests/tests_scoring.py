@@ -172,17 +172,12 @@ def test_jaccard_consistency():
     assert jaccard(a, b) == scoring_jac(a, b) == data_jac(a, b)
 
 
-def test_importance_scorer_default_score():
-    """When LLM call fails, ArticleImportanceScorer falls back to DEFAULT_SCORE."""
-    from unittest.mock import patch
-    from services.scoring import ArticleImportanceScorer
+def test_importance_scorer_skips_articles_without_base():
+    """An article missing from ``bases`` (failed annotation) gets no score —
+    it will be rescored when the annotate stage retries it."""
+    from services.scoring import ImportanceScorer
 
-    scorer = ArticleImportanceScorer()
-    # Patch get_llm_service to raise LLMError
-    with patch('services.scoring.ArticleImportanceScorer.score_batch_llm',
-               side_effect=lambda titles, role='scoring': [scorer.DEFAULT_SCORE] * len(titles)):
-        scores = scorer.score_batch_llm(['Ukraine peace deal', 'Stock market crash'])
-    assert scores == [scorer.DEFAULT_SCORE, scorer.DEFAULT_SCORE]
+    assert ImportanceScorer().score([], {}) == {}
 
 
 def test_importance_scorer_weight_zero_honoured():
@@ -203,33 +198,11 @@ def test_importance_scorer_weight_zero_honoured():
     assert final == 1.0, f'Expected 1.0 (minimum), got {final}'
 
 
-def test_extract_json_array_trailing_prose():
-    """C1 fix: trailing prose with its own brackets must not corrupt the extracted array."""
-    from services.scoring import ArticleImportanceScorer
-
-    raw = '[7.5, 4.0, 8.0]\n\nNote: headline [2] is speculative.'
-    assert ArticleImportanceScorer._extract_json_array(raw) == '[7.5, 4.0, 8.0]'
-
-
-def test_extract_json_array_leading_prose():
-    from services.scoring import ArticleImportanceScorer
-
-    raw = 'Here are the scores:\n[7.5, 4.0, 8.0]'
-    assert ArticleImportanceScorer._extract_json_array(raw) == '[7.5, 4.0, 8.0]'
-
-
-def test_extract_json_array_none_found():
-    from services.scoring import ArticleImportanceScorer
-
-    assert ArticleImportanceScorer._extract_json_array('no array here') is None
-
-
 def test_importance_scorer_structural():
-    from services.scoring import ArticleImportanceScorer, score_unscored_articles
-    scorer = ArticleImportanceScorer()
-    assert scorer.BATCH_SIZE >= 1
-    assert 1.0 <= scorer.DEFAULT_SCORE <= 10.0
-    assert callable(score_unscored_articles)
+    from services.scoring import ImportanceScorer
+    scorer = ImportanceScorer()
+    assert 1.0 <= scorer.DEFAULT_BASE <= 10.0
+    assert callable(scorer.score)
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────
@@ -250,11 +223,8 @@ _TESTS = [
     test_filter_title_dupes_no_title,
     test_tokenize_consistency_scoring_vs_data,
     test_jaccard_consistency,
-    test_importance_scorer_default_score,
+    test_importance_scorer_skips_articles_without_base,
     test_importance_scorer_weight_zero_honoured,
-    test_extract_json_array_trailing_prose,
-    test_extract_json_array_leading_prose,
-    test_extract_json_array_none_found,
     test_importance_scorer_structural,
 ]
 

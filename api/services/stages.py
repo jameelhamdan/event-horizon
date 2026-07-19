@@ -1,7 +1,7 @@
 """Pipeline stage registry — the single definition of the article→event pipeline.
 
-Every pull-based pipeline step (fetch, score, process, aggregate, tag, route)
-is declared here as a Stage: how to find pending work
+Every pull-based pipeline step (fetch, analyze, annotate, refine, aggregate,
+tag, route) is declared here as a Stage: how to find pending work
 (``pending_ids``/``pending_count``), how to do it (``handler``), and how it is
 scheduled and chunked. Exactly two Celery tasks execute all of them —
 ``services.tasks.pipeline_tick_task`` (cron, every 10 min: dispatches every
@@ -32,9 +32,20 @@ logger = logging.getLogger(__name__)
 # Window an event stays eligible for tag/route repair — matches the aggregate
 # stage's own look-back so events can't age out before being tagged.
 EVENT_STAGE_WINDOW_HOURS = 168
-# Claim lease for the process stage — an article claimed by a dispatch is not
-# re-dispatched until this expires (protects against a backlogged heavy queue).
+# Claim lease for the annotate/analyze stages — an article claimed by a
+# dispatch is not re-dispatched until this expires (protects against a
+# backlogged heavy queue). Name kept from the old 'process' stage to match
+# Article.process_queued_at.
 PROCESS_CLAIM_TTL_HOURS = 6
+# How recently an article must have been fetched to be eligible for the
+# 'analyze' stage's full cloud-LLM pass, rather than the free on-prem
+# 'annotate' pass. 2x the analyze cadence (every_minutes=180 below) so one
+# missed/delayed tick doesn't strand an article — anything older falls
+# through to 'annotate' automatically (see _annotate_ids), which is also
+# what happens for the entire pre-existing backlog and any historical
+# backfill: this window is what makes "live" mean "just fetched", not merely
+# "not explicitly marked as backfill".
+LIVE_ANALYZE_FRESHNESS_HOURS = 6
 
 
 def _now() -> datetime:
@@ -65,72 +76,120 @@ def _fetch_handler(codes: list) -> int:
     return total
 
 
-def _score_pending():
-    from core import models as m
-    # exclude(annotation_deferred=True): fetch-only backfill articles
-    # (BACKFILL_LLM_ENABLED=False) wait for annotate_deferred_articles_task, not
-    # the live pipeline. exclude() matches False-or-unset, so pre-migration rows
-    # (which have no such field) are still included.
-    return (
-        m.Article.objects.filter(processed_on__isnull=True, importance_score__isnull=True)
-        .exclude(annotation_deferred=True)
-    )
-
-
-def _score_ids(limit: int) -> list:
-    return list(_score_pending().order_by('-created_on').values_list('id', flat=True)[:limit])
-
-
-def _score_handler(ids: list) -> int:
-    from services.scoring import score_unscored_articles
-    return score_unscored_articles(article_ids=ids)
-
-
 def _live_llm_enabled() -> bool:
-    """Dashboard-editable master switch for the live pipeline's LLM stages
-    (score/process). Off ⇒ those stages don't dispatch; articles keep being
-    fetched and accumulate as pending until it's turned back on."""
+    """Dashboard-editable master switch for live LLM usage. Gates the
+    'analyze' stage (the primary LLM consumer for freshly-fetched articles)
+    and the 'refine' stage only when its provider is an actual LLM
+    (ollama/cloud) — the 'annotate' stage and the zeroshot judge are fully
+    on-prem and always run regardless of this flag."""
     from services.runtime_config import is_live_llm_enabled
     return is_live_llm_enabled()
 
 
-def _score_enabled() -> bool:
-    from django.conf import settings
-    return bool(settings.ARTICLE_IMPORTANCE_SCORING_ENABLED) and _live_llm_enabled()
-
-
-def _process_pending():
-    from django.conf import settings
+def _claim_free_articles(stage: str):
+    """Articles at *stage* whose earlier dispatch (if any) isn't still
+    presumably in flight — shared claim-lease predicate for annotate/analyze,
+    which both use Article.process_queued_at (see PROCESS_CLAIM_TTL_HOURS)."""
     from django.db.models import Q
     from core import models as m
-    from services.workflow.articles import _apply_min_score_filter
     claim_cutoff = _now() - timedelta(hours=PROCESS_CLAIM_TTL_HOURS)
-    qs = m.Article.objects.filter(processed_on__isnull=True)
-    # Skip articles whose earlier dispatch is still (presumably) in flight.
+    qs = m.Article.objects.filter(stage=stage)
     qs = qs.filter(Q(process_queued_at__isnull=True) | Q(process_queued_at__lt=claim_cutoff))
     # Fetch-only backfill articles (BACKFILL_LLM_ENABLED=False) are annotated by
-    # annotate_deferred_articles_task, not the live pipeline.
-    qs = qs.exclude(annotation_deferred=True)
-    return _apply_min_score_filter(qs, settings.ARTICLE_MIN_IMPORTANCE_TO_PROCESS)
+    # annotate_deferred_articles_task, not the live pipeline. exclude() matches
+    # False-or-unset, so pre-migration rows are still included.
+    return qs.exclude(annotation_deferred=True)
 
 
-def _process_ids(limit: int) -> list:
-    return list(_process_pending().order_by('-importance_score').values_list('id', flat=True)[:limit])
+def _is_backfill(article) -> bool:
+    return bool((article.extra_data or {}).get('backfill_day'))
 
 
-def _process_claim(ids: list) -> None:
+def _analyze_pending():
+    """DB-narrowed candidate set for the 'analyze' stage: fetched articles
+    young enough to still be "live" (see LIVE_ANALYZE_FRESHNESS_HOURS).
+    Informational/coverage only — may include a few backfill-tagged articles
+    that happen to be this recent (rare: backfill and live fetch running at
+    the same time); _analyze_ids applies the precise exclusion below, the
+    same DB-narrow-then-Python-filter split the tag stage uses."""
+    from core import models as m
+    cutoff = _now() - timedelta(hours=LIVE_ANALYZE_FRESHNESS_HOURS)
+    return _claim_free_articles(m.Article.STAGE_FETCHED).filter(created_on__gte=cutoff)
+
+
+def _analyze_ids(limit: int) -> list:
+    qs = _analyze_pending().order_by('-created_on').only('id', 'extra_data')
+    return [a.id for a in qs.iterator() if not _is_backfill(a)][:limit]
+
+
+def _annotate_pending():
+    """DB-narrowed candidate set for the 'annotate' stage: every fetched
+    article, claim-free. Informational/coverage only — includes articles
+    'analyze' will actually claim first (they're still "pending" in the
+    honest sense: nothing has annotated them yet); _annotate_ids below is
+    where the real fetched↔fresh-live split is enforced."""
+    from core import models as m
+    return _claim_free_articles(m.Article.STAGE_FETCHED)
+
+
+def _annotate_ids(limit: int) -> list:
+    """Fetched articles NOT claimed by 'analyze': explicitly backfill-tagged,
+    or aged past LIVE_ANALYZE_FRESHNESS_HOURS. The latter is a deliberate
+    fallback, not a bug — if 'analyze' can't keep up (LLM outage,
+    LIVE_LLM_ENABLED off, provider exhausted), a live article is never
+    stranded: it just annotates for free once it's no longer "fresh", same
+    as it always would have before the 'analyze' stage existed."""
+    cutoff = _now() - timedelta(hours=LIVE_ANALYZE_FRESHNESS_HOURS)
+    qs = _annotate_pending().order_by('-created_on').only('id', 'created_on', 'extra_data')
+    ids = [
+        a.id for a in qs.iterator()
+        if _is_backfill(a) or a.created_on < cutoff
+    ]
+    return ids[:limit]
+
+
+def _annotate_claim(ids: list) -> None:
     from core import models as m
     m.Article.objects.filter(id__in=ids).update(process_queued_at=_now())
 
 
-def _process_release(ids: list) -> None:
+def _annotate_release(ids: list) -> None:
     from core import models as m
     m.Article.objects.filter(id__in=ids).update(process_queued_at=None)
 
 
-def _process_handler(ids: list) -> int:
-    from services.workflow.articles import process_articles
-    return process_articles(ids=ids)
+def _analyze_handler(ids: list) -> int:
+    from services.workflow.articles import analyze_live_articles
+    return analyze_live_articles(ids=ids)
+
+
+def _annotate_handler(ids: list) -> int:
+    from services.workflow.articles import annotate_articles
+    return annotate_articles(ids=ids)
+
+
+def _refine_pending():
+    from core import models as m
+    return m.Article.objects.filter(stage=m.Article.STAGE_REFINE).exclude(annotation_deferred=True)
+
+
+def _refine_ids(limit: int) -> list:
+    return list(_refine_pending().order_by('-created_on').values_list('id', flat=True)[:limit])
+
+
+def _refine_handler(ids: list) -> int:
+    from services.workflow.articles import refine_articles
+    return refine_articles(ids=ids)
+
+
+def _refine_enabled() -> bool:
+    from django.conf import settings
+    provider = getattr(settings, 'REFINE_PROVIDER', 'zeroshot')
+    if provider == 'off':
+        return False
+    if provider == 'zeroshot':
+        return True  # on-prem judge — not subject to the LLM master switch
+    return _live_llm_enabled()
 
 
 def _aggregate_handler(_ids) -> int:
@@ -251,33 +310,52 @@ REGISTRY: dict[str, Stage] = {s.name: s for s in [
         coverage=False,
     ),
     Stage(
-        # chunk_size matches ArticleImportanceScorer.BATCH_SIZE — one chunk =
-        # one batched LLM scoring call. Selection is simply "no score yet"
-        # (no created_on window), so articles that missed a scoring run are
-        # recovered automatically on a later tick.
-        name='score', label='Unprocessed & unscored', model='article',
-        queue='heavy', chunk_size=30, limit=300, every_minutes=60,
-        handler=_score_handler, pending_ids=_score_ids,
-        pending_count=_count(_score_pending), pending_qs=_score_pending,
-        enabled=_score_enabled,
+        # Full cloud-LLM analysis (services/processing/analyzer.py via
+        # LLM_ROUTES['analyzer_lite']) for articles fetched within the last
+        # LIVE_ANALYZE_FRESHNESS_HOURS — the higher-quality path, reserved for
+        # live traffic because its cost/rate-limits don't scale to the whole
+        # historical corpus. Terminal on success (stage='annotated', same as
+        # the on-prem path — nothing downstream needs to know which analyzer
+        # produced it). Anything this stage doesn't reach in time falls
+        # through to 'annotate' below — see _annotate_ids.
+        name='analyze', label='Live-fetched — awaiting full LLM analysis', model='article',
+        queue='heavy', chunk_size=8, limit=500, every_minutes=180,
+        handler=_analyze_handler, pending_ids=_analyze_ids,
+        pending_count=_count(_analyze_pending), pending_qs=_analyze_pending,
+        claim=_annotate_claim, release=_annotate_release,
+        enabled=_live_llm_enabled,
+        error_stage_key='analyze',
+        job_timeout=1200,
     ),
     Stage(
-        # chunk_size matches ArticleAnalyzer.ANALYZE_BATCH_SIZE — one chunk =
-        # one batched LLM analysis call.
-        name='process', label='Unprocessed & eligible (awaiting dispatch)', model='article',
+        # Full on-prem NLP annotation (services/processing/annotator.py) —
+        # classification, geo, intensity, sentiment, translations AND
+        # importance in one pass. Geocoding is inline (a local geonamescache
+        # lookup); there is no separate geocode stage. Confident articles land
+        # at stage='annotated'; low-confidence ones at stage='refine' for the
+        # judge below. Handles all historical/backfill volume (cheap, no rate
+        # limits) plus any live article 'analyze' didn't reach in time.
+        name='annotate', label='Fetched — awaiting annotation', model='article',
         queue='heavy', chunk_size=8, limit=500, every_minutes=30,
-        handler=_process_handler, pending_ids=_process_ids,
-        pending_count=_count(_process_pending), pending_qs=_process_pending,
-        claim=_process_claim, release=_process_release,
-        enabled=_live_llm_enabled,   # dashboard master switch for live LLM
-        error_stage_key='process',
-        # When Ollama is the effective primary (no cloud keys, or all exhausted),
-        # analyzer.py degrades analyze_batch to one LLM call per article instead
-        # of one per 8-article chunk — the heavy queue's 600s default would
-        # SIGKILL such a chunk mid-flight and silently drop its progress, so give
-        # the process job extra headroom. Geocoding is done inline here (a local
-        # geonamescache lookup of the LLM's country/city — analyzer._geocode);
-        # there is no separate geocode stage.
+        handler=_annotate_handler, pending_ids=_annotate_ids,
+        pending_count=_count(_annotate_pending), pending_qs=_annotate_pending,
+        claim=_annotate_claim, release=_annotate_release,
+        error_stage_key='annotate',
+        # First job on a fresh worker lazy-loads several models (MiniLM, NER,
+        # FinBERT, MarianMT) — give it headroom over the 600s queue default.
+        job_timeout=1200,
+    ),
+    Stage(
+        # Second-opinion judge for low-confidence annotations
+        # (services/processing/refiner.py). Provider set by REFINE_PROVIDER;
+        # the handler re-chunks internally to the provider's capacity
+        # (zeroshot 16 / cloud 8 / ollama 1).
+        name='refine', label='Low-confidence — awaiting judge', model='article',
+        queue='heavy', chunk_size=16, limit=500, every_minutes=60,
+        handler=_refine_handler, pending_ids=_refine_ids,
+        pending_count=_count(_refine_pending), pending_qs=_refine_pending,
+        enabled=_refine_enabled,
+        error_stage_key='refine',
         job_timeout=1200,
     ),
     Stage(
@@ -309,16 +387,16 @@ def select_ids(stage_name: str, limit: int, source_code: str | None = None) -> l
     uses — CLI/e2e entry point, so manual runs can't drift from the pipeline.
 
     source_code narrows to one source (article stages only; currently just
-    'process' needs it).
+    'annotate' needs it).
     """
     stage = REGISTRY[stage_name]
     if stage.singleton:
         return []
     if source_code:
-        if stage_name != 'process':
+        if stage_name != 'annotate':
             raise ValueError(f'source filtering not supported for stage {stage_name!r}')
-        qs = _process_pending().filter(source_code=source_code)
-        return list(qs.order_by('-importance_score').values_list('id', flat=True)[:limit])
+        qs = _annotate_pending().filter(source_code=source_code)
+        return list(qs.order_by('-created_on').values_list('id', flat=True)[:limit])
     return stage.pending_ids(limit)
 
 

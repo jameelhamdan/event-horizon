@@ -13,7 +13,7 @@ Usage::
 Examples::
 
     python manage.py run_task pipeline_tick_task
-    python manage.py run_task dispatch_stage_task stage_name=process
+    python manage.py run_task dispatch_stage_task stage_name=annotate
     python manage.py run_task generate_newsletter_task --require-flag NEWSLETTER_ENABLED
 
 Params are ``key=value`` pairs, coerced to bool / null / int / float / JSON /

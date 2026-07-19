@@ -489,10 +489,10 @@ def _coverage():
 
 
 def _article_states():
-    """Article census by pipeline_state (Article.pipeline_state), computed with
-    index-backed DB counts that mirror the property's precedence so the numbers
-    can't drift from what the stages actually select. 'processed' is split into
-    located / no-location for visibility into location coverage.
+    """Article census by pipeline stage (the stored Article.stage field — the
+    same field the annotate/refine stage predicates filter on, so the numbers
+    can't drift from what the stages actually select). Terminal articles are
+    split into located / no-location for visibility into location coverage.
 
     Returns a list of {key, label, count, tone, hint} ordered fetched→located.
     """
@@ -501,25 +501,28 @@ def _article_states():
 
     A = m.Article.objects
     live = A.exclude(annotation_deferred=True)  # deferred is its own bucket
-    processed = live.filter(processed_on__isnull=False)
+    # Terminal = annotated-confident or refined (both fully analysed).
+    terminal = live.filter(stage__in=[m.Article.STAGE_ANNOTATED, m.Article.STAGE_REFINED])
     no_loc = Q(location__isnull=True) | Q(location='')
 
     rows = [
-        ('fetched', 'Fetched — awaiting score', 'muted',
-         live.filter(processed_on__isnull=True, importance_score__isnull=True).count(),
-         'ingested, not yet importance-scored'),
-        ('scored', 'Scored — awaiting process', 'muted',
-         live.filter(processed_on__isnull=True, importance_score__isnull=False).count(),
-         'rated, queued for NLP/LLM analysis'),
-        ('located', 'Processed · located', 'ok',
-         processed.filter(location__isnull=False).exclude(location='').count(),
+        ('fetched', 'Fetched — awaiting analysis', 'muted',
+         live.filter(stage=m.Article.STAGE_FETCHED).count(),
+         'queued for analyze (fresh live traffic, cloud LLM) or annotate '
+         '(historical/backfill, on-prem NLP) — see the coverage table below '
+         'for the exact split'),
+        ('refine', 'Annotated — awaiting judge', 'muted',
+         live.filter(stage=m.Article.STAGE_REFINE).count(),
+         'low-confidence classification, queued for the refine stage'),
+        ('located', 'Annotated · located', 'ok',
+         terminal.filter(location__isnull=False).exclude(location='').count(),
          'geocoded inline — flows on to events'),
-        ('no_location', 'Processed · no location', 'muted',
-         processed.filter(no_loc).count(),
+        ('no_location', 'Annotated · no location', 'muted',
+         terminal.filter(no_loc).count(),
          'analysed but no place resolved — terminal (never aggregates), kept for training'),
-        ('deferred', 'Deferred — awaiting (re)processing', 'warn',
+        ('deferred', 'Deferred — awaiting (re)annotation', 'warn',
          A.filter(annotation_deferred=True).count(),
-         'backfill + reset analysis-failures; parked off the live LLM pipeline'),
+         'backfill + reset analysis-failures; parked off the live pipeline'),
     ]
     total = sum(r[3] for r in rows)
     return {
@@ -582,10 +585,10 @@ def _month_buckets(months_back):
 
 def _activity_chart():
     """Events per month (stacked by category) plus articles per month, for
-    the last 10 years — exact counts of what's actually in the database.
-    Volume is bounded upstream by importance-score retention in the pipeline
-    (see ``services.tasks.cap_monthly_article_importance_task``), not by
-    sampling or slicing here.
+    the last 10 years — exact counts of what's actually in the database. No
+    deletion/capping task exists anywhere in the pipeline (every article is
+    kept as training data — see CLAUDE.md), so these are true totals, not a
+    sample or a slice.
 
     Events are fetched as one ranged query (``category``, ``started_at``
     only) and bucketed in Python — the codebase bans the ``__date`` ORM

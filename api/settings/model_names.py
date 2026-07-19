@@ -13,3 +13,6 @@ the Docker build layer, before the rest of the app exists in the image (see
 CLUSTER_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 FINBERT_MODEL_NAME = "ProsusAI/finbert"
 TRANSLATION_MODEL_NAME = "Helsinki-NLP/opus-mt-en-ar"
+# Two-stage analyzer (services/processing/annotator.py + refiner.py) — pretrained, no finetuning.
+NER_MODEL_NAME = "Babelscape/wikineural-multilingual-ner"
+ZEROSHOT_MODEL_NAME = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"

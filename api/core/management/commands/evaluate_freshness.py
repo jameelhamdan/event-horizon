@@ -3,7 +3,6 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from django.conf import settings
 from django.core.management.base import BaseCommand
 
 
@@ -15,7 +14,7 @@ class Command(BaseCommand):
         parser.add_argument('--days', type=int, default=30,
                             help='Look-back window in days (default 30)')
         parser.add_argument('--output', type=str, default=None,
-                            help='Report path (default <repo>/eval/freshness_report.json)')
+                            help='Report path (default <repo>/results/evaluate_freshness/freshness_report.json)')
 
     def handle(self, *args, **kwargs):
         import numpy as np
@@ -70,7 +69,8 @@ class Command(BaseCommand):
 
         output = kwargs['output']
         if output is None:
-            eval_dir = os.path.join(str(settings.BASE_DIR), 'eval')
+            from services.utils import results_dir
+            eval_dir = str(results_dir('evaluate_freshness'))
             os.makedirs(eval_dir, exist_ok=True)
             output = os.path.join(eval_dir, 'freshness_report.json')
         with open(output, 'w', encoding='utf-8') as fh:

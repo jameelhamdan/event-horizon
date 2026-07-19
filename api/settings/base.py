@@ -253,11 +253,6 @@ OPENROUTER_MODELS = config('OPENROUTER_MODELS', default='openrouter/free')
 OPENROUTER_DYNAMIC_MODELS = config('OPENROUTER_DYNAMIC_MODELS', default=True, cast=bool)
 OPENROUTER_MODELS_COUNT = config('OPENROUTER_MODELS_COUNT', default=5, cast=int)
 
-# ── Article importance scoring ────────────────────────────────────────────────
-# LLM-based 1.0–10.0 significance rating. Articles below the threshold are skipped
-# by the process stage (not deleted — every record is kept as training data).
-ARTICLE_IMPORTANCE_SCORING_ENABLED = config('ARTICLE_IMPORTANCE_SCORING_ENABLED', default=True, cast=bool)
-ARTICLE_MIN_IMPORTANCE_TO_PROCESS = config('ARTICLE_MIN_IMPORTANCE_TO_PROCESS', default=2.0, cast=float)  # below this → process stage skips the article
 # Window the every-30-min 'aggregate' stage re-clusters. Kept below the 168h
 # tag/route repair lookback (services.stages.EVENT_STAGE_WINDOW_HOURS) so each
 # tick doesn't re-cluster a full week; aggregate_full_task sweeps the full 168h
@@ -282,14 +277,37 @@ WAYBACK_PROXY_URL = config('WAYBACK_PROXY_URL', default='')
 # value the first time RuntimeConfig is created (fail-open fallback if Mongo read
 # ever fails).
 #
-# LIVE_LLM_ENABLED gates the live score/process stages. When off, the
-# live pipeline keeps fetching but stops LLM annotation — articles accumulate as
-# pending and resume when re-enabled.
+# LIVE_LLM_ENABLED gates the 'analyze' stage (full cloud-LLM analysis of
+# freshly-fetched live articles, every 3h — services/processing/analyzer.py
+# via services.workflow.articles.analyze_live_articles) and the 'refine'
+# stage only when REFINE_PROVIDER is an actual LLM ('ollama'/'cloud'). When
+# off, live articles simply fall through to the free on-prem 'annotate' stage
+# once they age past LIVE_ANALYZE_FRESHNESS_HOURS (services/stages.py) instead
+# of being stranded — see analyze_live_articles' docstring.
 # BACKFILL_LLM_ENABLED gates historical backfill annotation. When off,
 # backfill_day_chunk_task fetches + saves and defers annotation
 # (annotation_deferred=True) for a later annotate_deferred_articles_task pass.
+# Backfill articles never reach 'analyze' regardless of this flag — see
+# ANALYZER_BACKEND note below, 'analyze' is live-only by design (cost/rate
+# limits don't scale to the historical corpus).
 LIVE_LLM_ENABLED = config('LIVE_LLM_ENABLED', default=True, cast=bool)
 BACKFILL_LLM_ENABLED = config('BACKFILL_LLM_ENABLED', default=True, cast=bool)
+
+# Judge used by the 'refine' pipeline stage — the second-opinion pass over
+# HISTORICAL/BACKFILL articles the on-prem annotate stage flagged as
+# low-confidence (services/processing/refiner.py). Live-fetched articles never
+# reach refine: they either get the full cloud LLM directly (the 'analyze'
+# stage, gated by LIVE_LLM_ENABLED above) or fall through to on-prem annotate.
+# The annotate stage itself has no options: it is always the fully local NLP
+# pass (services/processing/annotator.py — prototype embeddings + NER + rules;
+# per-model opt-outs NER_ENABLED / ZEROSHOT_ENABLED env vars).
+#   'zeroshot' (default) — mDeBERTa NLI, on-prem, $0, no rate limits.
+#   'ollama'             — local LLM (ollama_medium), JSON-schema constrained.
+#   'cloud'              — LLM_ROUTES['analyzer_lite'] chain; also refreshes
+#                          the abstractive EN summary.
+#   'off'                — refine stage disabled; low-confidence articles keep
+#                          their prototype annotations at stage='refine'.
+REFINE_PROVIDER = config('REFINE_PROVIDER', default='zeroshot')
 
 # Ollama (self-hosted, no key) — three model tiers for different task complexities.
 OLLAMA_BASE_URL = config('OLLAMA_BASE_URL', default='http://localhost:11434')
@@ -377,8 +395,6 @@ LLM_ROUTES = {
     # failover to openrouter → ollama. (sentiment/translation are local — see below)
     'analyzer_lite': [{'groq', 'cerebras', 'mistral'}, 'openrouter', 'ollama_medium'],
     'newsletter':    ['cerebras', 'openrouter', 'ollama_large'],           # long-form, low volume
-    'scoring':       ['groq', 'cerebras', 'openrouter', 'ollama_small'],
-    'historical':    ['groq', 'cerebras', 'openrouter', 'ollama_small'],
     'topics':        ['groq', 'cerebras', 'openrouter', 'ollama_medium'],  # enrichment/discovery only — tagging is local (embeddings)
 }
 

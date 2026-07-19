@@ -19,7 +19,7 @@ What it exercises (with real data):
  11. Bootstrap guard        — idempotency of bootstrap_initial_data_task
 
 Pure/no-DB checks that used to live here (enqueue() sync return value, mark_stage,
-tokenize/jaccard, strip_code_fences, ArticleImportanceScorer structure, model field
+tokenize/jaccard, strip_code_fences, ImportanceScorer structure, model field
 existence, title dedup) now live in the dependency-light api/tests/tests_*.py suite
 (tests_queue.py, tests_utils.py, tests_scoring.py, tests_models.py) — this command is
 only for checks that genuinely need live MongoDB/network/LLM.
@@ -36,7 +36,6 @@ network/LLM and won't fail the run when an environment is offline.
     python manage.py e2e_full --skip-forecast --output /tmp/e2e.json
 """
 import json
-import os
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 
@@ -154,7 +153,8 @@ class Command(BaseCommand):
         report['finished_at'] = datetime.now(dt_timezone.utc).isoformat()
 
         ts = datetime.now(dt_timezone.utc).strftime('%Y%m%dT%H%M%S')
-        out = Path(opts['output'] or os.path.join(os.getcwd(), f'e2e_full_{ts}.json'))
+        from services.utils import results_dir
+        out = Path(opts['output']) if opts['output'] else results_dir('e2e_full') / f'e2e_full_{ts}.json'
         out.write_text(json.dumps(report, indent=2, default=str), encoding='utf-8')
 
         s = report['summary']
@@ -244,7 +244,7 @@ class Command(BaseCommand):
             c.soft('process.has_pending', False, 'no unprocessed articles — skipping')
             return
         try:
-            jobs = dispatch_stage('process', force=True)
+            jobs = dispatch_stage('annotate', force=True)
             c.hard('process.dispatch_returns_int', isinstance(jobs, int))
             self.stdout.write(f'    dispatched {jobs} per-record process job(s)')
         except Exception as exc:  # noqa: BLE001
@@ -257,7 +257,7 @@ class Command(BaseCommand):
         c.soft('process.produced_processed', sample is not None)
         if sample is not None:
             ss = sample.stage_status or {}
-            c.soft('process.stage_status_process', (ss.get('process') or {}).get('ok') is True,
+            c.soft('process.stage_status_annotate', (ss.get('annotate') or {}).get('ok') is True,
                    f'stage_status={ss}')
 
     # ── Stage 4: aggregate ────────────────────────────────────────────────
@@ -346,7 +346,7 @@ class Command(BaseCommand):
             return
         c.hard('coverage.runs', isinstance(cov, list) and len(cov) >= 1)
         stages = {row.get('stage') for row in cov}
-        c.hard('coverage.has_stages', {'process', 'tag', 'route'} <= stages,
+        c.hard('coverage.has_stages', {'annotate', 'tag', 'route'} <= stages,
                f'{sorted(stages)}')
         shape_ok = all({'stage', 'label', 'need', 'action'} <= set(row) for row in cov)
         c.hard('coverage.row_shape', shape_ok)

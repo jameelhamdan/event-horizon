@@ -156,3 +156,4 @@ forecast_backtest_*.json
 forecast_e2e_*.json
 
 capstone/*
+results/*

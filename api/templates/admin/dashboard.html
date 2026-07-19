@@ -15,7 +15,7 @@
       <form method="post" class="ops-tile">
         {% csrf_token %}
         <button class="button" name="dashboard_action" value="run_pipeline">▶ Run full sync</button>
-        <p class="ops-tile-desc">Dispatch every enabled pipeline stage right now (fetch → score → process → aggregate → tag → route), skipping the normal per-stage cadence gates.</p>
+        <p class="ops-tile-desc">Dispatch every enabled pipeline stage right now (fetch → analyze/annotate → refine → aggregate → tag → route), skipping the normal per-stage cadence gates.</p>
       </form>
       <form method="post" class="ops-tile">
         {% csrf_token %}
@@ -46,7 +46,7 @@
         <input type="hidden" name="flag" value="live">
         <input type="hidden" name="enabled" value="{% if llm_flags.live %}false{% else %}true{% endif %}">
         <button class="button" type="submit">{% if llm_flags.live %}Disable{% else %}Enable{% endif %} live-pipeline LLM</button>
-        <p class="ops-tile-desc">Currently <strong>{% if llm_flags.live %}ON{% else %}OFF{% endif %}</strong>. Master switch for the live pipeline's LLM stages (score → process). When OFF, articles keep being fetched and pile up as pending, then resume annotating when re-enabled. Applies on the next tick — no restart.</p>
+        <p class="ops-tile-desc">Currently <strong>{% if llm_flags.live %}ON{% else %}OFF{% endif %}</strong>. Master switch for live LLM usage — gates the <em>analyze</em> stage (full cloud-LLM analysis of freshly-fetched articles, every 3h) and the refine stage when REFINE_PROVIDER is an actual LLM (ollama/cloud). Annotation and the default zeroshot judge are fully on-prem and unaffected. When OFF, live articles aren't stranded — they fall through to free on-prem annotation once they age past the analyze freshness window. Applies on the next tick — no restart.</p>
       </form>
       <form method="post" class="ops-tile">
         {% csrf_token %}
@@ -54,7 +54,7 @@
         <input type="hidden" name="flag" value="backfill">
         <input type="hidden" name="enabled" value="{% if llm_flags.backfill %}false{% else %}true{% endif %}">
         <button class="button" type="submit">{% if llm_flags.backfill %}Disable{% else %}Enable{% endif %} historical-backfill LLM</button>
-        <p class="ops-tile-desc">Currently <strong>{% if llm_flags.backfill %}ON{% else %}OFF{% endif %}</strong>. When OFF, historical backfill fetches + saves articles but defers annotation (no scoring/processing) — including the in-flight backfill, on its next chunk. Annotate them later with <em>Annotate deferred</em> below.</p>
+        <p class="ops-tile-desc">Currently <strong>{% if llm_flags.backfill %}ON{% else %}OFF{% endif %}</strong>. When OFF, historical backfill fetches + saves articles but defers annotation — including the in-flight backfill, on its next chunk. Annotate them later with <em>Annotate deferred</em> below.</p>
       </form>
     </div>
 
@@ -97,7 +97,7 @@
           <input type="number" name="limit" min="1" placeholder="Max articles (default 2000)" style="flex:1">
           <button class="button" type="submit">Annotate deferred</button>
         </div>
-        <p class="ops-tile-desc">Score + process articles a fetch-only backfill deferred (saved while historical-backfill LLM was OFF). Bulk queue, re-run until the task reports <code>remaining=0</code>, then <strong>Aggregate history</strong> above.</p>
+        <p class="ops-tile-desc">Run the on-prem annotate pass (classification + geo + sentiment + importance) over articles a fetch-only backfill deferred. Bulk queue, re-run until the task reports <code>remaining=0</code>, then <strong>Aggregate history</strong> above.</p>
       </form>
     </div>
 
@@ -172,7 +172,7 @@
       <form method="post" class="ops-tile">
         {% csrf_token %}
         <button class="button" name="dashboard_action" value="adjust_source_weights">Adjust source weights</button>
-        <p class="ops-tile-desc">Recompute per-source importance weighting used by the score stage.</p>
+        <p class="ops-tile-desc">Recompute per-source importance weighting applied by the annotate stage's importance scoring.</p>
       </form>
       <form method="post" class="ops-tile">
         {% csrf_token %}

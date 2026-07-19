@@ -2,7 +2,7 @@ from core.management.base import BaseTaskCommand
 
 
 class Command(BaseTaskCommand):
-    help = 'Run NLP pipeline (LLM analysis + FinBERT + categorization) on unprocessed articles'
+    help = 'Run the on-prem NLP annotate stage (classification + geo + sentiment + importance) on fetched articles'
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -26,8 +26,8 @@ class Command(BaseTaskCommand):
         if kwargs['background']:
             from services.queue import enqueue
             from services.tasks import dispatch_stage_task
-            enqueue(dispatch_stage_task, 'process', queue='default')
-            self.stdout.write(self.style.SUCCESS('Enqueued process stage dispatch'))
+            enqueue(dispatch_stage_task, 'annotate', queue='default')
+            self.stdout.write(self.style.SUCCESS('Enqueued annotate stage dispatch'))
             return
 
         source_code = kwargs.get('source_code')
@@ -44,8 +44,8 @@ class Command(BaseTaskCommand):
         else:
             # Same predicate the pipeline dispatcher uses (services/stages.py).
             from services.stages import select_ids
-            ids = select_ids('process', limit, source_code=source_code)
+            ids = select_ids('annotate', limit, source_code=source_code)
 
-        from services.workflow import process_articles
-        count = process_articles(ids=ids) if ids else 0
-        self.stdout.write(self.style.SUCCESS(f'Processed {count} articles'))
+        from services.workflow import annotate_articles
+        count = annotate_articles(ids=ids) if ids else 0
+        self.stdout.write(self.style.SUCCESS(f'Annotated {count} articles'))

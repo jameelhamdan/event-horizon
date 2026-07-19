@@ -94,7 +94,7 @@ class Article(models.Model):
         blank=True
     )
 
-    # NLP fields — populated by process_articles
+    # NLP fields — populated by annotate_articles (and, for judged fields, refine_articles)
     entities = models.JSONField(default=list, blank=True)  # unused — retained for schema stability; not populated
     # sentiment = VADER polarity [-1, 1] (local, rule-based).
     sentiment = models.FloatField(null=True, blank=True)
@@ -113,31 +113,54 @@ class Article(models.Model):
     sub_category = models.CharField(max_length=64, null=True, blank=True)
     processed_on = models.DateTimeField(null=True, blank=True)
 
-    # Set by the 'process' pipeline stage (services/stages.py) when a job is
-    # enqueued for this article; not cleared explicitly — once processed_on is
-    # set the article is excluded from selection regardless of this value.
-    # Prevents re-dispatch while an earlier job for the same article is still
-    # sitting in the queue (see stages.PROCESS_CLAIM_TTL_HOURS).
+    # Pipeline position — the single stored "where is this article" field,
+    # advanced by the annotate/refine stage handlers (services/stages.py
+    # predicates are pure equality filters on it):
+    #   fetched   → ingested, awaiting the annotate stage
+    #   annotated → NLP-annotated with confident classification — terminal
+    #   refine    → NLP-annotated but low-confidence — queued for the judge
+    #   refined   → re-judged by the refine stage — terminal
+    STAGE_FETCHED = 'fetched'
+    STAGE_ANNOTATED = 'annotated'
+    STAGE_REFINE = 'refine'
+    STAGE_REFINED = 'refined'
+    stage = models.CharField(max_length=16, default='fetched', db_index=True)
+    # When the refine stage re-judged this article (stage='refined').
+    refined_on = models.DateTimeField(null=True, blank=True)
+    # Which judge produced the current category/sub_category verdict —
+    # 'zeroshot' | 'ollama' | 'cloud' (see settings.REFINE_PROVIDER /
+    # services/processing/refiner.py). Set by refine_articles, overwritten on
+    # every re-refine so it always reflects the provider that judged the
+    # article's PRESENT fields, not necessarily the first judge it ever saw.
+    refined_by = models.CharField(max_length=16, null=True, blank=True)
+
+    # Set by the 'annotate' pipeline stage (services/stages.py) when a job is
+    # enqueued for this article; not cleared explicitly — once the stage
+    # advances past 'fetched' the article is excluded from selection regardless
+    # of this value. Prevents re-dispatch while an earlier job for the same
+    # article is still sitting in the queue (see stages.PROCESS_CLAIM_TTL_HOURS).
     process_queued_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
-    # Importance scoring — set by the 'score' pipeline stage (LLM batch).
-    # null = unscored (treated as medium priority in the process queue).
-    # importance_source: 'llm' | 'default'
+    # Importance scoring — computed in the annotate stage (rules: intensity base
+    # + source weight + corroboration + category floors).
+    # importance_source: 'rules' | 'llm' (pre-migration rows) | 'default'
     importance_score = models.FloatField(null=True, blank=True, db_index=True)
     importance_source = models.CharField(max_length=16, null=True, blank=True)
 
     # Per-stage pipeline outcome tracking — written by each per-record worker.
-    # Shape: {"process": {"ok": true, "at": "ISO-8601", "error": null},
-    #         "score": {"ok": false, "at": "...", "error": "LLM unavailable"}, ...}
+    # Shape: {"analyze": {"ok": true, "at": "ISO-8601", "error": null},
+    #         "annotate": {"ok": true, "at": "...", "error": null},
+    #         "refine": {"ok": false, "at": "...", "error": "judge unavailable"}, ...}
     # Makes the *reason* a stage is missing visible (not just that it's missing).
     stage_status = models.JSONField(default=dict, blank=True)
 
-    # Media — populated during fetch (RSS) or process_articles (OG image fallback)
+    # Media — populated during fetch (RSS) or annotate_articles (OG image fallback)
     banner_image_url = models.URLField(max_length=512, null=True, blank=True)
 
-    # Geocoding — populated by process_articles (analyzer.py's country/city →
-    # services.processing.analyzer._geocode, a local geonamescache lookup). NOT
-    # set by aggregate_events; the Event carries its own lat/lon separately.
+    # Geocoding — populated by annotate_articles (NLPAnnotator's NER-extracted
+    # country/city → services.processing.geocode.geocode(), a local geonamescache
+    # lookup), and re-set by refine_articles if the judge's own place resolves.
+    # NOT set by aggregate_events; the Event carries its own lat/lon separately.
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
 
@@ -146,16 +169,18 @@ class Article(models.Model):
     #  "ar": {"title": "...", "summary": "...", "country": "...", "city": "..."}}
     translations = models.JSONField(default=dict, blank=True)
 
-    # LLM call metadata written by process_articles.
+    # Annotation provenance, written by annotate_articles. On-prem annotation
+    # is always {"provider": "nlp"}; only the refine stage's 'cloud' provider
+    # (services/processing/analyzer.py) fills in model/token counts.
     # {"provider": "groq", "model": "llama-3.1-8b-instant",
     #  "prompt_tokens": 420, "completion_tokens": 180, "total_tokens": 600}
     llm_usage = models.JSONField(default=dict, blank=True)
 
     # Set on articles saved by a fetch-only backfill (BACKFILL_LLM_ENABLED=False):
-    # they are fetched + stored but not scored/processed, and the live score/process
-    # pipeline stages skip them (via .exclude(annotation_deferred=True)) so a large
-    # historical backfill doesn't flood the LLM. annotate_deferred_articles_task
-    # scores + processes them later and clears this flag.
+    # they are fetched + stored but not annotated, and the live annotate pipeline
+    # stage skips them (via .exclude(annotation_deferred=True)) so a large
+    # historical backfill doesn't flood the annotator. annotate_deferred_articles_task
+    # annotates them later and clears this flag.
     annotation_deferred = models.BooleanField(default=False)
 
     updated_on = models.DateTimeField(auto_now=True)
@@ -182,7 +207,7 @@ class Article(models.Model):
             models.Index(fields=['processed_on']),
             models.Index(fields=['location']),
             # annotate_deferred_articles_task selects the (small) deferred set;
-            # the live score/process stages exclude it from their pending queries.
+            # the live annotate stage excludes it from its pending query.
             models.Index(fields=['annotation_deferred'], name='core_article_annot_defer_idx'),
             # aggregate_events' primary query filters processed_on + published_on range.
             models.Index(fields=['processed_on', 'published_on'], name='core_article_proc_pub_idx'),
@@ -194,30 +219,18 @@ class Article(models.Model):
     def __str__(self):
         return self.title
 
-    # Canonical annotation-pipeline states — the single vocabulary for "where is
-    # this article". Kept in sync with the stage predicates in services/stages.py.
-    STATE_DEFERRED = 'deferred'    # backfill / reset failures, parked for the local annotator
-    STATE_FETCHED = 'fetched'      # ingested, not yet importance-scored
-    STATE_SCORED = 'scored'        # scored, awaiting the process stage (or parked below threshold)
-    STATE_PROCESSED = 'processed'  # analysed — terminal, with or without a resolved location
-
     @property
     def pipeline_state(self) -> str:
-        """Where this article sits in the annotation pipeline, derived from the
-        SAME signals services/stages.py selects on (never stored, so it can't
-        drift from the stage predicates). See docs/pipeline-state.md.
+        """Where this article sits in the annotation pipeline — the stored
+        ``stage`` field, except that backfill-deferred articles surface as
+        'deferred' (annotation_deferred parks them off the live pipeline
+        regardless of stage). See docs/pipeline-state.md.
 
-        Location is an attribute of a processed article, not a pipeline step: a
-        processed article with no resolved location is still 'processed' (it just
-        never aggregates into an event). STATE_SCORED covers both process-eligible
-        and parked-below-threshold articles — the threshold gate lives in the
-        process stage, not here.
+        Location is an attribute of an annotated article, not a pipeline step:
+        an annotated article with no resolved location is still terminal (it
+        just never aggregates into an event).
         """
-        if self.annotation_deferred:
-            return self.STATE_DEFERRED
-        if self.processed_on is None:
-            return self.STATE_SCORED if self.importance_score is not None else self.STATE_FETCHED
-        return self.STATE_PROCESSED
+        return 'deferred' if self.annotation_deferred else self.stage
 
 
 class Event(models.Model):
@@ -734,10 +747,20 @@ class RuntimeConfig(models.Model):
     directly) so there is always exactly one to read and mutate.
     """
 
-    # Master LLM switches. When off, the corresponding pipeline pauses its
-    # LLM-consuming work (the articles simply accumulate as pending and resume
-    # when re-enabled) — see services/stages.py (live) and backfill_day_chunk_task.
-    live_llm_enabled = models.BooleanField(default=True)       # live score/process stages
+    # Master LLM switches. The annotate stage is always fully on-prem and is
+    # NOT gated by either flag. live_llm_enabled gates the 'analyze' stage
+    # (full cloud-LLM analysis of freshly-fetched live articles, every 3h) and
+    # also pauses the refine stage when REFINE_PROVIDER is an actual LLM
+    # ('ollama'/'cloud') — see services/stages.py::_live_llm_enabled /
+    # _refine_enabled; the default 'zeroshot' judge and annotation itself keep
+    # running regardless. When live_llm_enabled is off, live articles aren't
+    # stranded — they fall through to the free on-prem annotate stage once
+    # they age past LIVE_ANALYZE_FRESHNESS_HOURS (services/stages.py).
+    # backfill_llm_enabled pauses historical-backfill annotation entirely
+    # (fetch/save still happens, annotation is deferred) — see
+    # services/tasks.py::backfill_day_chunk_task. The flag is read at
+    # execution time in both cases (no restart needed).
+    live_llm_enabled = models.BooleanField(default=True)       # 'analyze' stage + refine's LLM providers
     backfill_llm_enabled = models.BooleanField(default=True)   # historical backfill annotation
 
     created_on = models.DateTimeField(auto_now_add=True)
@@ -761,7 +784,8 @@ class RuntimeConfig(models.Model):
 
 
 # ---------------------------------------------------------------------------
-# NLP data transfer objects — used by services/cleaning and services/core/tasks
+# NLP data transfer objects — used by services/processing/annotator.py
+# (ArticleDocument in, ArticleFeatures out) and services/workflow/articles.py
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -780,19 +804,24 @@ class ArticleDocument:
 
 @dataclass
 class ArticleFeatures:
-    """NLP output for a single article, returned by ArticleCleaner."""
+    """NLP output for a single article, returned by NLPAnnotator."""
     id: str
     sentiment: float        # VADER polarity [-1, 1] (local, rule-based)
     finbert_sentiment: float | None  # FinBERT signed sentiment [-1, 1], news-domain
-    location: str | None    # 'City, Country' from LLM analysis
+    location: str | None    # 'City, Country' from NER + gazetteer
     latitude: float | None  # from geonamescache city lookup
     longitude: float | None # from geonamescache city lookup
-    event_intensity: float  # LLM-rated newsworthiness/severity [0, 1]
-    category: str           # LLM-assigned category slug
-    sub_category: str | None  # LLM-assigned sub-category slug within category
-    llm_data: dict          # raw LLM response — stored in article.extra_data['llm']
+    event_intensity: float  # rule-rated newsworthiness/severity [0, 1]
+    category: str           # classifier-assigned category slug
+    sub_category: str | None  # classifier-assigned sub-category slug within category
+    llm_data: dict          # annotation summary — stored in article.extra_data['llm']
     translations: dict      # i18n subdocument — stored in article.translations
-    llm_usage: dict         # {provider, model, prompt_tokens, completion_tokens, total_tokens}
-    llm_error: str | None = None  # set when LLM analysis fell back to empty — see mark_stage('process')
+    llm_usage: dict         # {provider, ...} — provenance of the annotation
+    confidence: float = 1.0  # classifier confidence [0, 1] — the caller (services.
+    # workflow.articles) compares this against NLPAnnotator.ESCALATE_BELOW to
+    # decide whether Article.stage becomes 'annotated' or 'refine'. Deciding
+    # the *stage* is a pipeline-orchestration concern, not an annotation one —
+    # NLPAnnotator reports confidence and stays free of any Article import.
+    llm_error: str | None = None  # set when annotation failed — see mark_stage('annotate')
 
 
