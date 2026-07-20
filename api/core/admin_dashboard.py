@@ -77,11 +77,6 @@ def _handle_action(request):
         elif action == 'backfill_prices':
             enqueue(T.backfill_prices_task, years=10, queue='bulk', job_timeout=-1)
             _ok(request, 'Price backfill enqueued (10y, all active symbols).')
-        elif action == 'backfill_articles':
-            from datetime import datetime, timedelta, timezone as dt_timezone
-            now = datetime.now(dt_timezone.utc)
-            enqueue(T.backfill_history_task, now - timedelta(days=14), now, None, queue='bulk')
-            _ok(request, 'Article backfill enqueued (weighted per-source, all sources).')
         elif action == 'backfill_articles_until':
             _handle_backfill_until(request)
         elif action == 'annotate_deferred':
@@ -483,9 +478,28 @@ def _llm_status():
         return []
 
 
+# Pipeline position for each stage — mirrors the fetch → {analyze | annotate →
+# refine} → aggregate → tag → route diagram in CLAUDE.md. analyze/annotate
+# share step 2: they're parallel branches over the same 'fetched' input,
+# partitioned by article freshness (see services/stages.py), not a sequence.
+# Used to number the Stages table and to tie the Actions tab's historical-range
+# equivalents (Backfill & history) to the same terminology/order.
+_STAGE_STEP = {'fetch': 1, 'analyze': 2, 'annotate': 2, 'refine': 3, 'aggregate': 4, 'tag': 5, 'route': 6}
+
+# 'aggregate' is a singleton stage (no per-record Reprocess button — see
+# pipeline_coverage) whose only manual trigger for a historical date range
+# lives in the Actions tab instead of here; point there rather than leaving
+# the row's action cell silently empty.
+_STAGE_NOTE = {'aggregate': 'historical range: see Backfill & history ↓'}
+
+
 def _coverage():
     from services.workflow import pipeline_coverage
-    return pipeline_coverage()
+    rows = pipeline_coverage()
+    for row in rows:
+        row['step'] = _STAGE_STEP.get(row['stage'])
+        row['note'] = _STAGE_NOTE.get(row['stage'])
+    return rows
 
 
 def _article_states():
@@ -787,6 +801,10 @@ def dashboard_view(request):
     context = {
         **admin.site.each_context(request),
         'title': 'Operations Dashboard',
+        # Prefills the merged "Backfill articles" date field with its old
+        # one-click default (14 days back) so dropping that separate button
+        # didn't lose the common case — just leave the field as-is to use it.
+        'default_backfill_until': (datetime.now(timezone.utc) - timedelta(days=14)).date().isoformat(),
         **results,
     }
     return render(request, 'admin/dashboard.html', context)

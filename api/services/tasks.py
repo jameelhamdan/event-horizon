@@ -519,54 +519,65 @@ def aggregate_history_task(
     window_days: int = 30,
     tag: bool = True,
 ) -> dict:
-    """Aggregate backfilled articles into Events across a historical range.
+    """Dispatcher: enumerate clustering-grid-aligned windows covering
+    [start_date, end_date) (services.workflow.events.iter_aggregate_windows)
+    and enqueue one aggregate_history_window_task per window. Does no
+    clustering/tagging itself — that's NLP work (embedding models) and
+    belongs on the heavy queue, not this bulk-queue orchestrator.
 
     The live 'aggregate' stage only looks back EVENT_STAGE_WINDOW_HOURS (168h),
     so articles saved by backfill_history_task would otherwise never form
-    Events (and never appear on the map). This walks [start_date, end_date) in
-    clustering-grid-aligned windows (services.workflow.events
-    .iter_aggregate_windows), running the SAME aggregate_events the live stage
-    uses on each — idempotent (upsert keyed on location/category/day), routing
-    inline as always. Each window's new/updated events are then topic-tagged
-    (``tag=False`` to skip), since the tag repair stage's 168h lookback can't
-    reach them either.
-
-    Run it AFTER a backfill's day-chunks have finished processing (the
-    dispatcher can't await them). Long single job → bulk queue:
+    Events (and never appear on the map). Run this AFTER a backfill's
+    day-chunks have finished processing (the dispatcher can't await them):
         python manage.py run_task aggregate_history_task \\
             start_date=2021-07-01 end_date=2026-07-01 --sync
 
-    Returns {'windows', 'created', 'updated', 'tagged'}.
+    Returns {'windows', 'windows_dispatched'}.
     """
-    from core import models as m
-    from services.workflow import _needs_tagging, aggregate_events, tag_events_by_ids
+    from services.queue import enqueue
     from services.workflow.events import iter_aggregate_windows
 
     start_date = _parse_backfill_date(start_date)
     end_date = _parse_backfill_date(end_date)
 
-    windows = created_total = updated_total = tagged_total = 0
+    windows = 0
     for w_start, w_end in iter_aggregate_windows(start_date, end_date, window_days=window_days):
         windows += 1
-        created, updated = aggregate_events(start=w_start, end=w_end)
-        created_total += created
-        updated_total += updated
-        if tag and (created or updated):
-            qs = m.Event.objects.filter(
-                started_at__gte=w_start, started_at__lt=w_end,
-            ).only('pk', 'topics', 'topics_source')
-            ids = [e.pk for e in qs if _needs_tagging(e.topics) or e.topics_source == 'keyword']
-            if ids:
-                tagged_total += tag_events_by_ids(ids)
-        logger.info(
-            '[aggregate-history] window %s → %s: created=%d updated=%d',
-            w_start.date(), w_end.date(), created, updated,
-        )
+        enqueue(aggregate_history_window_task, w_start, w_end, tag, queue='heavy')
 
-    return {
-        'windows': windows, 'created': created_total,
-        'updated': updated_total, 'tagged': tagged_total,
-    }
+    logger.info('aggregate_history_task dispatched %d window(s)', windows)
+    return {'windows': windows, 'windows_dispatched': windows}
+
+
+@shared_task(**_RETRY_KW)
+def aggregate_history_window_task(w_start: datetime, w_end: datetime, tag: bool = True) -> dict:
+    """Worker half of the historical-aggregate dispatcher: cluster one window's
+    articles into Events (services.workflow.aggregate_events — same function
+    and upsert semantics the live 'aggregate' stage uses) and topic-tag
+    whatever it created/updated. Runs on the heavy queue, same as the live
+    aggregate/tag stages, since both load embedding models.
+
+    Returns {'created', 'updated', 'tagged'}.
+    """
+    from core import models as m
+    from services.workflow import _needs_tagging, aggregate_events, tag_events_by_ids
+
+    created, updated = aggregate_events(start=w_start, end=w_end)
+
+    tagged = 0
+    if tag and (created or updated):
+        qs = m.Event.objects.filter(
+            started_at__gte=w_start, started_at__lt=w_end,
+        ).only('pk', 'topics', 'topics_source')
+        ids = [e.pk for e in qs if _needs_tagging(e.topics) or e.topics_source == 'keyword']
+        if ids:
+            tagged = tag_events_by_ids(ids)
+
+    logger.info(
+        '[aggregate-history] window %s → %s: created=%d updated=%d tagged=%d',
+        w_start.date(), w_end.date(), created, updated, tagged,
+    )
+    return {'created': created, 'updated': updated, 'tagged': tagged}
 
 
 # Source-day outcomes that count as "done" for resume checkpointing — the fetch

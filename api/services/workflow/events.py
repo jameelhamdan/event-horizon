@@ -75,9 +75,10 @@ def aggregate_events(
 
     Default window is the trailing ``hours`` (the live pipeline's aggregate
     stage). Pass explicit ``start``/``end`` (both required together) to
-    aggregate a historical range instead — used by aggregate_history_task to
-    surface backfilled articles as Events, which the trailing window can never
-    reach. Safe to re-run over the same range: the upsert below is keyed on
+    aggregate a historical range instead — used by aggregate_history_window_task
+    (one window per call, dispatched by aggregate_history_task) to surface
+    backfilled articles as Events, which the trailing window can never reach.
+    Safe to re-run over the same range: the upsert below is keyed on
     (location_name, category, calendar day).
     """
     from core.models import Article, Event

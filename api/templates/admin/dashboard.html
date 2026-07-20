@@ -58,27 +58,33 @@
       </form>
     </div>
 
-    <h3 class="ops-group-title">Backfill &amp; history</h3>
+    <h3 class="ops-group-title" id="backfill-history">Backfill &amp; history
+      <span class="ops-muted" style="font-weight:normal">— same fetch → annotate → aggregate stages as above, run over an explicit historical range instead of the live pipeline's rolling window. Run them in order.</span>
+    </h3>
     <div class="ops-tiles">
       <form method="post" class="ops-tile">
         {% csrf_token %}
         <button class="button" name="dashboard_action" value="backfill_prices">Backfill prices</button>
-        <p class="ops-tile-desc">Enqueue a 10-year OHLC price backfill for every active market symbol. Bulk queue, no time cap.</p>
-      </form>
-      <form method="post" class="ops-tile">
-        {% csrf_token %}
-        <button class="button" name="dashboard_action" value="backfill_articles">Backfill articles</button>
-        <p class="ops-tile-desc">Enqueue an RSS article backfill for the last 14 days across all sources.</p>
+        <p class="ops-tile-desc">Enqueue a 10-year OHLC price backfill for every active market symbol (independent of the article pipeline below). Bulk queue, no time cap.</p>
       </form>
       <form method="post" class="ops-tile ops-tile-wide">
         {% csrf_token %}
         <input type="hidden" name="dashboard_action" value="backfill_articles_until">
         <div class="ops-tile-row">
-          <input type="date" name="until_date" required>
+          <input type="date" name="until_date" value="{{ default_backfill_until }}" required>
           <input type="text" name="source_code" placeholder="Source code (blank = all)" style="flex:1">
-          <button class="button" type="submit">Backfill until date</button>
+          <button class="button" type="submit">1. Fetch articles</button>
         </div>
-        <p class="ops-tile-desc">Pull articles from now back to the chosen date, for one source or (if blank) every enabled RSS source.</p>
+        <p class="ops-tile-desc">Pull articles from now back to the chosen date (defaults to 14 days), for one source or (if blank) every enabled RSS source. Equivalent to the <em>fetch</em> stage above, for a historical range.</p>
+      </form>
+      <form method="post" class="ops-tile ops-tile-wide">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="annotate_deferred">
+        <div class="ops-tile-row">
+          <input type="number" name="limit" min="1" placeholder="Max articles (default 2000)" style="flex:1">
+          <button class="button" type="submit">2. Annotate deferred</button>
+        </div>
+        <p class="ops-tile-desc">Equivalent to the <em>annotate</em> stage above: on-prem classification + geo + sentiment + importance, over articles the fetch above deferred (only needed if historical-backfill LLM was off). Re-run until <code>remaining=0</code>, then step 3.</p>
       </form>
       <form method="post" class="ops-tile ops-tile-wide">
         {% csrf_token %}
@@ -86,18 +92,9 @@
         <div class="ops-tile-row">
           <input type="date" name="start_date" required title="Range start (UTC)">
           <input type="date" name="end_date" required title="Range end (UTC, exclusive)">
-          <button class="button" type="submit">Aggregate history → Events</button>
+          <button class="button" type="submit">3. Aggregate → Events</button>
         </div>
-        <p class="ops-tile-desc">Build map Events from already-backfilled articles over a date range. The live aggregate stage only looks back 168h, so <strong>run this after every article backfill</strong> or the backfilled articles will never form Events.</p>
-      </form>
-      <form method="post" class="ops-tile ops-tile-wide">
-        {% csrf_token %}
-        <input type="hidden" name="dashboard_action" value="annotate_deferred">
-        <div class="ops-tile-row">
-          <input type="number" name="limit" min="1" placeholder="Max articles (default 2000)" style="flex:1">
-          <button class="button" type="submit">Annotate deferred</button>
-        </div>
-        <p class="ops-tile-desc">Run the on-prem annotate pass (classification + geo + sentiment + importance) over articles a fetch-only backfill deferred. Bulk queue, re-run until the task reports <code>remaining=0</code>, then <strong>Aggregate history</strong> above.</p>
+        <p class="ops-tile-desc">Equivalent to the <em>aggregate</em> stage above: build map Events from the annotated articles over this range. The live stage only looks back 168h, so <strong>always run this last</strong> — backfilled articles never become Events otherwise.</p>
       </form>
     </div>
 
@@ -193,19 +190,23 @@
 
   {# ── Stages ──────────────────────────────────────────────────────── #}
   <section class="ops-card">
-    <h2>Stages</h2>
+    <h2>Stages
+      <span class="ops-muted" style="font-weight:normal">— live pipeline order: fetch → analyze/annotate → refine → aggregate → tag → route</span>
+    </h2>
     <table class="ops-table">
       <thead><tr>
+        <th title="Position in the pipeline; analyze/annotate share a step — parallel branches over the same input">#</th>
         <th>Stage</th><th>Pending</th>
         <th title="Waiting less than 1 hour">&lt;1h</th>
         <th title="Waiting 1–24 hours">1–24h</th>
         <th title="Waiting 1–7 days">1–7d</th>
         <th title="Waiting more than 1 week — likely stuck">&gt;1w</th>
-        <th>Last dispatch</th><th>Last error</th><th></th>
+        <th>Last dispatch</th><th>Last error</th><th>Reprocess</th>
       </tr></thead>
       <tbody>
       {% for c in coverage %}
         <tr{% if c.need and not c.action %} class="ops-informational"{% endif %}>
+          <td class="ops-muted">{{ c.step|default:"—" }}</td>
           <td>{{ c.label }}</td>
           <td class="{% if c.need and c.action %}ops-warn{% elif c.need %}ops-muted{% endif %}">{{ c.need|default_if_none:"—" }}</td>
           {% if c.age %}
@@ -226,11 +227,13 @@
               <input type="hidden" name="stage" value="{{ c.action }}">
               <button class="button" type="submit">Reprocess</button>
             </form>
+            {% elif c.note %}
+            <a href="#backfill-history" class="ops-muted">{{ c.note }}</a>
             {% endif %}
           </td>
         </tr>
       {% empty %}
-        <tr><td colspan="9" class="ops-muted">No coverage data.</td></tr>
+        <tr><td colspan="10" class="ops-muted">No coverage data.</td></tr>
       {% endfor %}
       </tbody>
     </table>
