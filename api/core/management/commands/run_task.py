@@ -17,30 +17,17 @@ Examples::
     python manage.py run_task generate_newsletter_task --require-flag NEWSLETTER_ENABLED
 
 Params are ``key=value`` pairs, coerced to bool / null / int / float / JSON /
-str (in that order). The task's queue is auto-selected from the maps below
-unless ``--queue`` overrides it. ``--require-flag`` makes the run a no-op when
-the named ``settings`` flag is falsy, so feature-gated tasks can stay in the
-crontab unconditionally.
+str (in that order). The task's queue is auto-selected via
+services.task_registry.queue_for_task unless ``--queue`` overrides it.
+``--require-flag`` makes the run a no-op when the named ``settings`` flag is
+falsy, so feature-gated tasks can stay in the crontab unconditionally.
 """
 import json
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
-# Authoritative queue per task. Anything not listed runs on 'default' (light I/O).
-# Pipeline stages pick their own queue in services/stages.py — pipeline_tick_task
-# and dispatch_stage_task are light dispatchers and correctly default here.
-HEAVY_TASKS = frozenset({
-    'refresh_topics_task',
-    'discover_topics_task',
-    'generate_newsletter_task',
-})
-BULK_TASKS = frozenset({
-    'backfill_prices_task',
-    'train_forecast_model_task',
-    'run_forecast_task',
-    'annotate_deferred_articles_task',
-})
+from services.task_registry import queue_for_task, resolve_task
 
 
 def _coerce(value: str):
@@ -61,18 +48,6 @@ def _coerce(value: str):
         except ValueError:
             pass
     return value
-
-
-def _resolve(name: str):
-    """Find a *_task function in services.tasks or newsletter.tasks."""
-    from newsletter import tasks as newsletter_tasks
-    from services import tasks as service_tasks
-
-    for module in (service_tasks, newsletter_tasks):
-        func = getattr(module, name, None)
-        if callable(func):
-            return func
-    return None
 
 
 class Command(BaseCommand):
@@ -98,7 +73,7 @@ class Command(BaseCommand):
             self.stdout.write(f'Skipping {name}: {flag} is disabled.')
             return
 
-        func = _resolve(name)
+        func = resolve_task(name)
         if func is None:
             raise CommandError(f'Unknown task: {name!r}')
 
@@ -109,9 +84,7 @@ class Command(BaseCommand):
                 raise CommandError(f'Bad param {item!r} — expected key=value')
             kwargs[key] = _coerce(raw)
 
-        queue = options['queue'] or (
-            'bulk' if name in BULK_TASKS else 'heavy' if name in HEAVY_TASKS else 'default'
-        )
+        queue = options['queue'] or queue_for_task(name)
 
         if options['sync']:
             result = func(**kwargs)

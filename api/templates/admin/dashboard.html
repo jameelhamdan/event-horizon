@@ -71,20 +71,23 @@
         {% csrf_token %}
         <input type="hidden" name="dashboard_action" value="backfill_articles_until">
         <div class="ops-tile-row">
-          <input type="date" name="until_date" value="{{ default_backfill_until }}" required>
+          <input type="date" name="start_date" value="{{ default_backfill_start }}" required title="Range start (UTC)">
+          <input type="date" name="end_date" value="{{ default_backfill_end }}" required title="Range end (UTC, exclusive)">
           <input type="text" name="source_code" placeholder="Source code (blank = all)" style="flex:1">
           <button class="button" type="submit">1. Fetch articles</button>
         </div>
-        <p class="ops-tile-desc">Pull articles from now back to the chosen date (defaults to 14 days), for one source or (if blank) every enabled RSS source. Equivalent to the <em>fetch</em> stage above, for a historical range.</p>
+        <p class="ops-tile-desc">Pull articles over this range (defaults to the last 14 days), for one source or (if blank) every enabled RSS source. Equivalent to the <em>fetch</em> stage above, for a historical range.</p>
       </form>
       <form method="post" class="ops-tile ops-tile-wide">
         {% csrf_token %}
         <input type="hidden" name="dashboard_action" value="annotate_deferred">
         <div class="ops-tile-row">
+          <input type="date" name="start_date" title="Range start (UTC) — optional, blank = every deferred article">
+          <input type="date" name="end_date" title="Range end (UTC, exclusive) — optional, blank = every deferred article">
           <input type="number" name="limit" min="1" placeholder="Max articles (default 2000)" style="flex:1">
           <button class="button" type="submit">2. Annotate deferred</button>
         </div>
-        <p class="ops-tile-desc">Equivalent to the <em>annotate</em> stage above: on-prem classification + geo + sentiment + importance, over articles the fetch above deferred (only needed if historical-backfill LLM was off). Re-run until <code>remaining=0</code>, then step 3.</p>
+        <p class="ops-tile-desc">Equivalent to the <em>annotate</em> stage above: on-prem classification + geo + sentiment + importance, over articles the fetch above deferred (only needed if historical-backfill LLM was off). Leave the dates blank for every deferred article, or set both to target one month/period. Dispatches onto the heavy queue and returns immediately — watch the "Deferred" row in Article states below, re-run once it hits 0, then step 3.</p>
       </form>
       <form method="post" class="ops-tile ops-tile-wide">
         {% csrf_token %}

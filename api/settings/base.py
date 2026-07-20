@@ -422,7 +422,8 @@ _REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')
 _JOB_TIMEOUT = 600
 
 # Task queue names (default/heavy/bulk) are selected per-call via enqueue(queue=...)
-# and run_task.py's HEAVY_TASKS/BULK_TASKS maps — no static CELERY_TASK_ROUTES needed.
+# and services.task_registry's HEAVY_TASKS/BULK_TASKS maps — no static
+# CELERY_TASK_ROUTES needed.
 CELERY_BROKER_URL = _REDIS_URL
 CELERY_RESULT_BACKEND = None  # core.models.TaskRun is the source of truth for task history/status
 # pickle (not Celery's JSON default) — task args include datetime objects

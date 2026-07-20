@@ -20,48 +20,41 @@ logger = logging.getLogger(__name__)
 
 # ── POST action handlers ─────────────────────────────────────────────────────
 
-# One-click crontab-task triggers: action value → (task name, queue, message).
-# Every standalone crontab task gets a button so any stalled stage can be
-# resumed from the dashboard without shell access. Queues mirror run_task.py's
-# authoritative map (HEAVY_TASKS / BULK_TASKS, everything else 'default').
-# The template renders 'generate_newsletter' (sends real email to subscribers)
-# behind an are-you-sure confirm() — keep it that way if you add destructive
-# ones. Article deletion tasks are intentionally NOT exposed here: deletion is
-# disabled (records are kept as training data).
+# One-click crontab-task triggers: action value → (task name, message). The
+# queue is never hardcoded here — it's derived from services.task_registry
+# (the same map manage.py run_task uses) so a task can't drift onto a
+# different queue in one caller and not the other. Every standalone crontab
+# task gets a button so any stalled stage can be resumed from the dashboard
+# without shell access. The template renders 'generate_newsletter' (sends
+# real email to subscribers) behind an are-you-sure confirm() — keep it that
+# way if you add destructive ones. Article deletion tasks are intentionally
+# NOT exposed here: deletion is disabled (records are kept as training data).
 _TASK_ACTIONS = {
-    'refresh_topics': ('refresh_topics_task', 'heavy', 'Topic refresh enqueued (Wikipedia current events + LLM enrichment).'),
-    'discover_topics': ('discover_topics_task', 'heavy', 'Topic discovery enqueued (LLM over recent events).'),
-    'generate_newsletter': ('generate_newsletter_task', 'heavy', 'Newsletter generation enqueued — WILL EMAIL SUBSCRIBERS when it completes.'),
-    'pipeline_health': ('pipeline_health_task', 'default', 'Health report enqueued — the Health section refreshes on next page load.'),
-    'adjust_source_weights': ('adjust_source_weights_task', 'default', 'Source-weight adjustment enqueued.'),
-    'score_forecasts': ('score_forecasts_task', 'default', 'Forecast scoring enqueued.'),
-    'refresh_openrouter_models': ('refresh_openrouter_models_task', 'default', 'OpenRouter model refresh enqueued.'),
+    'refresh_topics': ('refresh_topics_task', 'Topic refresh enqueued (Wikipedia current events + LLM enrichment).'),
+    'discover_topics': ('discover_topics_task', 'Topic discovery enqueued (LLM over recent events).'),
+    'generate_newsletter': ('generate_newsletter_task', 'Newsletter generation enqueued — WILL EMAIL SUBSCRIBERS when it completes.'),
+    'pipeline_health': ('pipeline_health_task', 'Health report enqueued — the Health section refreshes on next page load.'),
+    'adjust_source_weights': ('adjust_source_weights_task', 'Source-weight adjustment enqueued.'),
+    'score_forecasts': ('score_forecasts_task', 'Forecast scoring enqueued.'),
+    'refresh_openrouter_models': ('refresh_openrouter_models_task', 'OpenRouter model refresh enqueued.'),
 }
 
 _STREAM_NAMES = ('prices', 'notam', 'earthquakes', 'forex')
 
 
-def _resolve_task(name: str):
-    """Find a *_task function in services.tasks or newsletter.tasks — same
-    resolution rule as manage.py run_task."""
-    from newsletter import tasks as newsletter_tasks
-    from services import tasks as service_tasks
-    for module in (service_tasks, newsletter_tasks):
-        func = getattr(module, name, None)
-        if callable(func):
-            return func
-    raise ValueError(f'Unknown task {name!r}')
-
-
 def _handle_action(request):
     from services.queue import enqueue
     from services import tasks as T
+    from services.task_registry import queue_for_task, resolve_task
 
     action = request.POST.get('dashboard_action', '')
     try:
         if action in _TASK_ACTIONS:
-            task_name, queue, msg = _TASK_ACTIONS[action]
-            enqueue(_resolve_task(task_name), queue=queue)
+            task_name, msg = _TASK_ACTIONS[action]
+            func = resolve_task(task_name)
+            if func is None:
+                raise ValueError(f'Unknown task {task_name!r}')
+            enqueue(func, queue=queue_for_task(task_name))
             _ok(request, msg)
         elif action == 'run_stream':
             _handle_run_stream(request)
@@ -80,9 +73,7 @@ def _handle_action(request):
         elif action == 'backfill_articles_until':
             _handle_backfill_until(request)
         elif action == 'annotate_deferred':
-            limit = _int_or(request.POST.get('limit'), 2000)
-            enqueue(T.annotate_deferred_articles_task, limit=limit, queue='bulk', job_timeout=-1)
-            _ok(request, f'Deferred-article annotation enqueued (up to {limit}; re-run until remaining=0).')
+            _handle_annotate_deferred(request)
         elif action == 'retrain_forecast':
             enqueue(T.train_forecast_model_task, queue='bulk', job_timeout=-1)
             enqueue(T.run_forecast_task, queue='bulk', job_timeout=-1)
@@ -138,31 +129,56 @@ def _handle_set_llm_flag(request):
     _ok(request, f'{label} LLM {"enabled" if enabled else "disabled"}.')
 
 
-def _handle_backfill_until(request):
-    """Backfill articles from now backward to an operator-chosen date.
+def _parse_date_range(request, required: bool):
+    """Parse the POST ``start_date``/``end_date`` fields (YYYY-MM-DD) into UTC
+    datetimes — the one date-range convention shared by every "Backfill &
+    history" action (fetch/annotate/aggregate all take the same two fields).
 
-    Mirrors ``manage.py backfill_history --until``. ``source_code`` is
-    optional — blank means all enabled RSS sources.
+    ``required=True``: both must be present. ``required=False``: both blank
+    means "no filter" — returns ``(None, None)``; exactly one filled is an
+    error (give both or neither).
+
+    Returns ``(start, end)`` on success. On invalid input, records a
+    ``messages.error`` and returns ``None`` — the caller should check for that
+    and return without proceeding.
     """
     from datetime import date, datetime, timezone as dt_timezone
 
+    raws = {f: request.POST.get(f, '').strip() for f in ('start_date', 'end_date')}
+    if not required and not any(raws.values()):
+        return None, None
+    if not required and not all(raws.values()):
+        messages.error(request, 'Give both start_date and end_date, or leave both blank.')
+        return None
+
+    parsed = {}
+    for field, raw in raws.items():
+        try:
+            d = date.fromisoformat(raw)
+        except ValueError:
+            messages.error(request, f'Invalid {field} {raw!r} — expected YYYY-MM-DD.')
+            return None
+        parsed[field] = datetime(d.year, d.month, d.day, tzinfo=dt_timezone.utc)
+    if parsed['start_date'] >= parsed['end_date']:
+        messages.error(request, 'start_date must be before end_date.')
+        return None
+    return parsed['start_date'], parsed['end_date']
+
+
+def _handle_backfill_until(request):
+    """Backfill articles over an explicit [start_date, end_date) range.
+
+    Mirrors ``manage.py backfill_history``. ``source_code`` is optional —
+    blank means all enabled RSS sources.
+    """
     from services.queue import enqueue
     from services import tasks as T
 
-    until_raw = request.POST.get('until_date', '').strip()
+    date_range = _parse_date_range(request, required=True)
+    if date_range is None:
+        return
+    start_date, end_date = date_range
     source_code = request.POST.get('source_code', '').strip()
-
-    try:
-        until = date.fromisoformat(until_raw)
-    except ValueError:
-        messages.error(request, f'Invalid date {until_raw!r} — expected YYYY-MM-DD.')
-        return
-
-    start_date = datetime(until.year, until.month, until.day, tzinfo=dt_timezone.utc)
-    end_date = datetime.now(dt_timezone.utc)
-    if start_date >= end_date:
-        messages.error(request, 'Date must be in the past.')
-        return
 
     if source_code:
         import core.models as m
@@ -170,10 +186,31 @@ def _handle_backfill_until(request):
             messages.error(request, f'Source "{source_code}" not found.')
             return
         enqueue(T.backfill_history_task, start_date, end_date, source_code, queue='bulk')
-        _ok(request, f'Article backfill enqueued for "{source_code}" back to {until}.')
+        _ok(request, f'Article backfill enqueued for "{source_code}": {start_date.date()} → {end_date.date()}.')
     else:
         enqueue(T.backfill_history_task, start_date, end_date, None, queue='bulk')
-        _ok(request, f'Article backfill enqueued (all sources) back to {until}.')
+        _ok(request, f'Article backfill enqueued (all sources): {start_date.date()} → {end_date.date()}.')
+
+
+def _handle_annotate_deferred(request):
+    """Dispatch on-prem annotation for deferred articles, optionally narrowed
+    to one date range (blank = every deferred article)."""
+    from services.queue import enqueue
+    from services import tasks as T
+
+    date_range = _parse_date_range(request, required=False)
+    if date_range is None:
+        return
+    start_date, end_date = date_range
+    limit = _int_or(request.POST.get('limit'), 2000)
+    enqueue(
+        T.annotate_deferred_articles_task, limit=limit,
+        start_date=start_date, end_date=end_date,
+        queue='bulk', job_timeout=-1,
+    )
+    period = f' for {start_date.date()} → {end_date.date()}' if start_date else ''
+    _ok(request, f'Deferred-article annotation dispatched (up to {limit}{period}, onto the heavy queue) — '
+                  'check the "Deferred" row in Article states below, re-run once it hits 0.')
 
 
 def _handle_run_stream(request):
@@ -199,24 +236,13 @@ def _handle_aggregate_history(request):
     location/category/day). Mirrors bootstrap_initial_data_task's usage —
     bulk queue, no time cap.
     """
-    from datetime import date, datetime, timezone as dt_timezone
-
     from services.queue import enqueue
     from services import tasks as T
 
-    parsed = []
-    for field in ('start_date', 'end_date'):
-        raw = request.POST.get(field, '').strip()
-        try:
-            d = date.fromisoformat(raw)
-        except ValueError:
-            messages.error(request, f'Invalid {field} {raw!r} — expected YYYY-MM-DD.')
-            return
-        parsed.append(datetime(d.year, d.month, d.day, tzinfo=dt_timezone.utc))
-    start_date, end_date = parsed
-    if start_date >= end_date:
-        messages.error(request, 'start_date must be before end_date.')
+    date_range = _parse_date_range(request, required=True)
+    if date_range is None:
         return
+    start_date, end_date = date_range
     enqueue(T.aggregate_history_task, start_date, end_date, queue='bulk', job_timeout=-1)
     _ok(request, f'Historical aggregation enqueued for {start_date.date()} → {end_date.date()} (bulk queue).')
 
@@ -798,13 +824,14 @@ def dashboard_view(request):
     for name, exc in errors.items():
         messages.warning(request, f'{name} unavailable: {exc}')
 
+    now = datetime.now(timezone.utc)
     context = {
         **admin.site.each_context(request),
         'title': 'Operations Dashboard',
-        # Prefills the merged "Backfill articles" date field with its old
-        # one-click default (14 days back) so dropping that separate button
-        # didn't lose the common case — just leave the field as-is to use it.
-        'default_backfill_until': (datetime.now(timezone.utc) - timedelta(days=14)).date().isoformat(),
+        # Prefills "1. Fetch articles" so the common case (last 14 days, all
+        # sources) needs no typing — submit the fields as shown.
+        'default_backfill_start': (now - timedelta(days=14)).date().isoformat(),
+        'default_backfill_end': now.date().isoformat(),
         **results,
     }
     return render(request, 'admin/dashboard.html', context)

@@ -669,47 +669,75 @@ def backfill_day_chunk_task(
 
 
 @shared_task(**_RETRY_KW)
-def annotate_deferred_articles_task(limit: int = 1000, batch_size: int = 50) -> dict:
-    """Annotate articles a fetch-only backfill deferred (annotation_deferred=True,
-    saved with BACKFILL_LLM_ENABLED=False): the same on-prem NLP annotation pass
-    the live pipeline uses (importance included), then clear the flag.
+def annotate_deferred_articles_task(
+    limit: int = 1000, batch_size: int = 50,
+    start_date=None, end_date=None,
+) -> dict:
+    """Dispatcher: select up to ``limit`` articles a fetch-only backfill deferred
+    (annotation_deferred=True, saved with BACKFILL_LLM_ENABLED=False), optionally
+    narrowed to ``[start_date, end_date)`` by ``published_on`` (pass both or
+    neither — same convention as aggregate_history_task/backfill_history_task),
+    and enqueue one annotate_deferred_batch_task per batch of ``batch_size``.
+    Does no annotation itself — that's NLP work (the same model stack the live
+    annotate stage uses) and belongs on the heavy queue, not this bulk-queue
+    orchestrator.
 
     Run this after a fetch-only backfill to annotate the saved articles, then
-    aggregate them with aggregate_history_task over the same date range. Bounded
-    to ``limit`` articles per call and re-runnable — returns ``remaining`` so you
-    can loop until it hits 0. Long job → run on bulk queue or --sync:
+    aggregate them with aggregate_history_task over the same date range.
+    Re-runnable — call again (or watch the Article states / Stages sections on
+    the dashboard) until no deferred articles remain:
 
         python manage.py run_task annotate_deferred_articles_task limit=2000 --sync
+        python manage.py run_task annotate_deferred_articles_task \\
+            start_date=2022-03-01 end_date=2022-04-01 --sync
 
-    Returns {'selected', 'processed', 'remaining'}.
+    Returns {'selected', 'batches_dispatched'}.
     """
     import core.models as m
+    from services.queue import enqueue
 
-    def _remaining() -> int:
-        return m.Article.objects.filter(
-            annotation_deferred=True, processed_on__isnull=True,
-        ).count()
+    if (start_date is None) != (end_date is None):
+        raise ValueError('annotate_deferred_articles_task: start_date and end_date must be given together')
+
+    window = {}
+    if start_date is not None:
+        window = {
+            'published_on__gte': _parse_backfill_date(start_date),
+            'published_on__lt': _parse_backfill_date(end_date),
+        }
 
     ids = list(
-        m.Article.objects.filter(annotation_deferred=True, processed_on__isnull=True)
+        m.Article.objects.filter(annotation_deferred=True, processed_on__isnull=True, **window)
         .order_by('created_on').values_list('id', flat=True)[:limit]
     )
 
-    processed = 0
+    batches = 0
     for i in range(0, len(ids), batch_size):
         batch = ids[i:i + batch_size]
-        processed += annotate_articles(ids=batch)
-        # Clear the flag for the whole batch — including any articles whose
-        # annotation failed (they retry via the live annotate stage) — so
-        # re-runs make forward progress.
-        m.Article.objects.filter(id__in=batch).update(annotation_deferred=False)
+        enqueue(annotate_deferred_batch_task, batch, queue='heavy')
+        batches += 1
 
-    result = {
-        'selected': len(ids),
-        'processed': processed, 'remaining': _remaining(),
-    }
-    logger.info('annotate_deferred_articles_task: %s', result)
-    return result
+    logger.info('annotate_deferred_articles_task: selected=%d batches_dispatched=%d', len(ids), batches)
+    return {'selected': len(ids), 'batches_dispatched': batches}
+
+
+@shared_task(**_RETRY_KW)
+def annotate_deferred_batch_task(ids: list) -> int:
+    """Worker half of the deferred-annotation dispatcher: run the on-prem
+    annotate pass (services.processing.annotator, same as the live annotate
+    stage) over one batch, then clear annotation_deferred. Runs on the heavy
+    queue, same as the live annotate/analyze stages, since it loads the same
+    model stack.
+
+    Clears the flag for the whole batch — including any article whose
+    annotation failed (it retries via the live annotate stage) — so re-runs of
+    the dispatcher make forward progress. Returns the processed count.
+    """
+    import core.models as m
+
+    processed = annotate_articles(ids=ids)
+    m.Article.objects.filter(id__in=ids).update(annotation_deferred=False)
+    return processed
 
 
 def _parse_backfill_date(value) -> datetime:
