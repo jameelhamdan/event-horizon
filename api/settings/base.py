@@ -462,7 +462,7 @@ CELERY_QUEUE_TIME_LIMITS = {
 # should render instantly even when a queue's workers are down.
 CELERY_QUEUE_WORKERS = {
     'default': 4,
-    'heavy': 2,
+    'heavy': 1,
     'bulk': 1,
 }
 

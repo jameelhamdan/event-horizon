@@ -59,20 +59,30 @@ services:
     volumes:
       - ./media_data:/app/media
       - static_data:/app/.static
+    # 1g is generous for plain Django/uvicorn (no ML models load in this
+    # codepath — that's all on the celery queues below); capped so a leak
+    # can't pressure the host outside cgroup accounting. See the memory
+    # budget note above worker-bulk for how this fits the full host.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    memswap_limit: 1g
 
-  # Steady NLP/LLM work — 2 workers. NOTE: each prefork child lazily loads its
-  # own copy of the local ML stack (MiniLM + FinBERT + MarianMT, ~1.5-2GB
-  # warm), so RAM scales with --concurrency; max-tasks-per-child recycles
-  # children periodically as a leak backstop. Keep --concurrency in sync with
-  # CELERY_QUEUE_WORKERS in api/settings/base.py (dashboard display).
+  # Steady NLP/LLM work — 1 worker. Each prefork child lazily loads its own
+  # copy of the local ML stack (MiniLM + FinBERT + MarianMT + NER +
+  # zero-shot mDeBERTa — measured ~1.1GB RSS warm with all 5 loaded and
+  # exercised), so RAM scales with --concurrency; max-tasks-per-child
+  # recycles children periodically as a leak backstop. Keep --concurrency in
+  # sync with CELERY_QUEUE_WORKERS in api/settings/base.py (dashboard display).
   worker-heavy:
     <<: *api-build
     restart: always
-    # max-memory-per-child (KB) recycles a child once its own RSS crosses ~2.4GB
-    # (above the ~1.5-2GB warm-model baseline, so normal operation never trips
-    # it) — a tighter, per-process complement to max-tasks-per-child that
-    # catches a leak by memory instead of task count.
-    command: sh -c "celery -A app worker -Q heavy --concurrency=2 --pool=prefork -O fair --max-tasks-per-child=200 --max-memory-per-child=2400000 -n heavy@%h"
+    # max-memory-per-child (KB) recycles a child once its own RSS crosses
+    # 2.4GB — over 2x the measured warm baseline, so normal operation never
+    # trips it — a tighter, per-process complement to max-tasks-per-child
+    # that catches a leak by memory instead of task count.
+    command: sh -c "celery -A app worker -Q heavy --concurrency=1 --pool=prefork -O fair --max-tasks-per-child=200 --max-memory-per-child=2400000 -n heavy@%h"
     environment:
       # Celery's prefork pool forks per-task worker processes — safety default
       # in case anything ever loads an HF tokenizer in the parent (its background
@@ -86,14 +96,18 @@ services:
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
-    # 2 children x ~1.5-2GB warm ML models (MiniLM + FinBERT + MarianMT)
-    # = ~3-4GB baseline; this caps the container well above that so a slow
-    # per-task leak gets OOM-killed (and restarted) before it can pressure the
-    # host, instead of growing unbounded.
+    # 6g is well above the ~1.1GB measured baseline — pure leak/spike
+    # headroom, not baseline need. This is the only queue that runs
+    # continuously (annotate + refine, every 30-60min), so it gets the
+    # largest slice of the shared host budget — see the accounting note
+    # above worker-bulk. memswap_limit == memory: no extra swap beyond the
+    # hard cap, so an overrun is killed immediately instead of
+    # swapping/thrashing the host into an unresponsive state.
     deploy:
       resources:
         limits:
           memory: 6g
+    memswap_limit: 6g
 
   # Fast I/O (fetchers, stream collectors, dispatchers) — 4 workers.
   worker-light:
@@ -110,7 +124,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2g
+          memory: 1g
+    memswap_limit: 1g
 
   # Long one-shot jobs (multi-year backfills, model training) — 1 worker, isolated
   # so a hours-long job never blocks the live pipeline on the heavy queue.
@@ -127,12 +142,25 @@ services:
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
-    # Single worker, but jobs (backfills, LightGBM training over the full
-    # symbol panel) can legitimately use several GB transiently.
+    # Single worker; jobs (backfills, LightGBM training) can spike, but this
+    # queue is idle almost all the time — not the continuous live pipeline —
+    # so it gets a smaller slice than worker-heavy. An overrun is OOM-killed
+    # and retried: a contained, recoverable failure.
+    #
+    # Host memory budget (32GB total, shared with llm-api/ollama, capped
+    # separately at 16g/10g reservation): api 1g + worker-heavy 6g +
+    # worker-light 1g + worker-bulk 2g + mongo 4g + redis 0.5g + flower
+    # 0.25g = 14.75g, + ollama 16g = 30.75g, leaving ~1.25g for the host OS
+    # and Docker daemon — tight, hence vm.swappiness/earlyoom on the host
+    # matter too. Every cap has memswap_limit == memory (no swap beyond the
+    # hard cap, clean OOM-kill instead of host-wide thrashing). If a service
+    # needs more, trim another service's cap first — the sum is the
+    # constraint, not any one line.
     deploy:
       resources:
         limits:
-          memory: 6g
+          memory: 2g
+    memswap_limit: 2g
 
   # Celery ground truth — live worker/task state straight from broker events
   # (CELERY_WORKER_SEND_TASK_EVENTS), independent of TaskRun rows, which a
@@ -150,7 +178,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512m
+          memory: 256m
+    memswap_limit: 256m
 
   # Daily forced restart of api + the Celery workers — a backstop against slow
   # memory growth the per-service `deploy.resources.limits.memory` caps alone
@@ -167,9 +196,20 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
+  # redis usage is normally tiny (SSE pub/sub + broker), but a stuck
+  # consumer letting a channel's backlog grow could still pressure the host.
+  # maxmemory + noeviction makes redis itself refuse new writes (visible,
+  # recoverable) instead of growing past the container cap and getting
+  # OOM-killed (opaque, drops in-flight broker/SSE state).
   redis:
     image: redis:7-alpine
     restart: always
+    command: redis-server --maxmemory 384mb --maxmemory-policy noeviction
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    memswap_limit: 512m
 
   mongo:
     image: mongo:8.2
@@ -181,7 +221,7 @@ services:
     # unclean restarts in 13h). Two guards, both required:
     #   1. Cap the container so a runaway mongod can't starve the host. 4g is
     #      conservative but comfortably covers the working set for this dataset
-    #      alongside worker-heavy (10g), llm-api/ollama, and ~20 other containers.
+    #      alongside worker-heavy, llm-api/ollama, and the rest of the stack.
     #   2. Size the WiredTiger cache to fit *inside* that cap rather than the
     #      host — Mongo's own guidance is ~50% of (RAM − 1GB) → 1.5GB here,
     #      leaving ~2.5GB headroom for connections, journal, and other mongod
@@ -198,6 +238,7 @@ services:
       resources:
         limits:
           memory: 4g
+    memswap_limit: 4g
 
 volumes:
   static_data:

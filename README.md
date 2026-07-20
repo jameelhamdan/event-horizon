@@ -57,7 +57,7 @@ python manage.py migrate
 python manage.py runserver     # Django on :8000
 
 # Workers (separate terminals, from api/)
-celery -A app worker -Q heavy --concurrency=2
+celery -A app worker -Q heavy --concurrency=1
 celery -A app worker -Q default --concurrency=4
 
 # Frontend (separate terminal)
