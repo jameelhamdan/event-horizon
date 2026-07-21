@@ -13,6 +13,7 @@ from api.views.newsletter import (
     NewsletterListView, NewsletterLatestView, NewsletterDetailView,
 )
 from api.views.forecasts import ForecastLatestView, ForecastAccuracyView
+from api.views.articles import HistoricalArticleListView
 
 urlpatterns = [
     # ── Events & sources ──────────────────────────────────────────────────────
@@ -49,6 +50,9 @@ urlpatterns = [
 
     # ── Server-Sent Events ────────────────────────────────────────────────────
     path('sse/', SSEStreamView.as_view(), name='sse-stream'),
+
+    # ── Internal (staff-only) — read already-ingested articles ────────────────
+    path('internal/articles/historical/', HistoricalArticleListView.as_view(), name='internal-articles-historical'),
 
     # ── Newsletter ────────────────────────────────────────────────────────────
     path('newsletter/', NewsletterListView.as_view(), name='newsletter-list'),

@@ -33,6 +33,30 @@ class ArticleSerializer(serializers.ModelSerializer):
         ]
 
 
+class HistoricalArticleSerializer(serializers.ModelSerializer):
+    """Staff-only, full-fidelity Article read — internal tooling only (see
+    api/views/articles.py). Unlike ArticleSerializer (the public map's
+    stripped-down shape), this exposes pipeline-internal fields (content,
+    sub_category, stage, refined_by) so eval/analysis scripts can read
+    already-ingested articles as production ground truth instead of
+    live-fetching — see .claude/skills/pipeline-eval-live."""
+    id = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = Article
+        fields = [
+            'id',
+            'source_code', 'source_url',
+            'title', 'content',
+            'category', 'sub_category',
+            'location', 'latitude', 'longitude',
+            'stage', 'refined_by',
+            'sentiment', 'finbert_sentiment', 'event_intensity', 'importance_score',
+            'translations',
+            'published_on',
+        ]
+
+
 class EventSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
     title_ar = serializers.SerializerMethodField()
