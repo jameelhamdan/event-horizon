@@ -84,6 +84,7 @@ from services.data.bodies import (  # noqa: F401
     fetch_article_page,
     fetch_wayback_page,
     is_junk_page_title,
+    is_non_article_url,
 )
 
 if TYPE_CHECKING:
@@ -202,6 +203,10 @@ def iter_days(
 
 _SITEMAP_NS = 'http://www.sitemaps.org/schemas/sitemap/0.9'
 _NEWS_NS = 'http://www.google.com/schemas/sitemap-news/0.9'
+# is_non_article_url (tag/category/author/staff/advisor index, image-asset slug,
+# homepage) is imported from services/data/bodies.py above — one definition,
+# shared so sitemap discovery here and the is_junk_article soft-delete detector
+# stay in sync.
 
 
 def _strip_feed_subdomain(netloc: str) -> str:
@@ -851,6 +856,19 @@ def _extract_sitemap_entry(url_el: ET.Element) -> dict | None:
     if loc_el is None or not loc_el.text:
         return None
     url = loc_el.text.strip()
+    # A root/index URL ("https://site.com/", "https://site.com/section/")
+    # is never an article page — with no <news:title> either, _slug_from_url
+    # falls back to the whole URL as the title (observed live: cnet-tech
+    # sitemap listed the bare homepage, producing an article literally
+    # titled "Https://Www.Cnet.Com/").
+    if not urlparse(url).path.rstrip('/'):
+        return None
+    # Non-article page shapes that still land in a site's news/article
+    # sitemap (observed live: Brookings' sitemap lists staff bio pages under
+    # /people/, ingested as an "article" literally titled "Contact Brookings").
+    # Shape-based, not full-path match, so this works across sites/CMSes.
+    if is_non_article_url(url):
+        return None
 
     # Date: prefer <news:publication_date>, fall back to <lastmod>
     date: datetime.datetime | None = None

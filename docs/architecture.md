@@ -9,7 +9,7 @@
 | Task queue | Celery + Redis — three queues: `default` (light I/O), `heavy` (NLP/LLM), `bulk` (long one-shot jobs) |
 | Scheduling | supercronic + `api/crontab` → `manage.py run_task` (runs in `api` container) |
 | Ingestion | feedparser (RSS) + requests |
-| NLP | LLM (category/sub-category · geo naming · intensity) · VADER (sentiment, rule-based) · sentence-transformers (clustering + topic matching) · **FinBERT** (financial sentiment) · MarianMT (Arabic translation) · geonamescache (geocode) |
+| NLP | **zero-shot NLI** (on-prem category classification, `deberta-v3-base-zeroshot-v2.0` + `bge-m3` ensemble) · LLM (live-traffic category/sub-category · geo naming · intensity) · VADER (sentiment, rule-based) · sentence-transformers (clustering + topic matching + sub-category prototypes) · **FinBERT** (financial sentiment) · MarianMT (Arabic translation) · geonamescache (geocode) |
 | LLM | Multi-provider via `services/llm/` — Groq/Cerebras/Mistral/OpenRouter (free-tier cloud, primary) with Ollama (local, CPU) as last-resort fallback; per-use-case routing + fallback chains (`settings.LLM_ROUTES`) |
 | Forecasting | as-of feature engineering + **LightGBM** (optional dep) |
 | Frontend | React 19 + Vite + react-router-dom + react-leaflet (TypeScript) |

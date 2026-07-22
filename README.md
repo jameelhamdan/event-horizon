@@ -16,7 +16,7 @@ See [docs/](docs/README.md) for architecture, pipeline, forecasting, and operati
 | Task queue | Redis + Celery |
 | Storage | MongoDB 8 |
 | Ingestion | feedparser (RSS) + requests |
-| NLP | LLM category/geo/intensity + VADER (sentiment) + sentence-transformers (clustering + topic matching) + FinBERT + MarianMT (Arabic translation) + geonamescache geocoding |
+| NLP | on-prem zero-shot NLI category classification + LLM (live category/geo/intensity) + VADER (sentiment) + sentence-transformers (clustering + topic matching + sub-category) + FinBERT + MarianMT (Arabic translation) + geonamescache geocoding |
 | Email | AWS SES (prod) / SMTP (dev) |
 | Newsletter | LLM-generated daily briefing → subscriber list |
 | Frontend | React 19 + Vite + react-leaflet |

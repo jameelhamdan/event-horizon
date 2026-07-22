@@ -33,10 +33,11 @@ per-task routing, automatic fallback across self-hosted and hosted providers, an
 discovery service that probes and caches currently-available free models — addressing the
 operational reality that hosted LLM availability and rate limits fluctuate continuously. A
 related engineering principle is a deliberately **narrow LLM scope**: sentiment, translation,
-topic tagging, and event routing run on small specialised local models, and the LLM handles
-only tasks that genuinely require open-ended judgement (taxonomy
-classification, geo naming, severity rating, free-form prose) — reducing both cost and latency
-without a perceptible quality regression, on commodity CPU-only hardware.
+topic tagging, event routing, and the high-volume backfill classification path (category by
+zero-shot NLI, geo by NER, severity by rules) all run on small specialised local models, and the
+LLM is reserved for low-volume live-traffic analysis and free-form prose (topic enrichment,
+newsletter) — reducing both cost and latency without a perceptible quality regression, on
+commodity CPU-only hardware.
 
 ---
 
@@ -94,9 +95,9 @@ is lagged and largely priced-in.
    backtest with three ablation arms.
 3. A **provider-agnostic LLM orchestration layer** with per-role routing, cross-provider
    fallback, and daily dynamic discovery of available free models — paired with a deliberately
-   **narrow LLM scope**: sentiment, translation, topic tagging, and event routing run on
-   specialised local models, leaving the LLM responsible only for tasks that need open-ended
-   judgement.
+   **narrow LLM scope**: sentiment, translation, topic tagging, event routing, and the
+   high-volume backfill classification path run on specialised local models, leaving the LLM
+   responsible only for low-volume live-traffic analysis and free-form prose.
 4. An **honest empirical study** reporting near-baseline predictive performance, framed as a
    research-grade signal rather than alpha.
 
@@ -113,13 +114,14 @@ or transaction-cost modelling is performed.
 The work sits at the intersection of three research areas:
 
 - **Event extraction and enrichment** from news, traditionally addressed with a mix of
-  sequence-labelling and classification models. This work assigns sentiment to a lexicon-based
-  scorer, keeping only category/sub-category classification, event severity rating, and geo
-  naming on the LLM — a case study in matching model capacity to task complexity rather than
-  defaulting to the
-  largest available model for every sub-task.
-- **Geoparsing**, the resolution of place mentions to coordinates, here handled by the LLM's
-  named-location output (country/city) with gazetteer-assisted coordinate resolution.
+  sequence-labelling and classification models. This work runs category/sub-category
+  classification, event severity rating, and geo naming on purpose-built local models (zero-shot
+  NLI, prototype embeddings, NER, rules) for the high-volume backfill path, reserving the LLM for
+  low-volume live traffic — a case study in matching model capacity to task complexity rather
+  than defaulting to the largest available model for every sub-task.
+- **Geoparsing**, the resolution of place mentions to coordinates, here handled by pretrained NER
+  over a gazetteer (with demonym/country fallbacks) on the on-prem path, or the LLM's
+  named-location output on the live path — both with gazetteer-assisted coordinate resolution.
 - **News-driven financial prediction**, a long literature relating textual sentiment and event
   signals to asset returns, with the persistent finding that public-news signals are weak,
   lagged, and partially priced-in. This motivates the thesis's baseline-first evaluation stance.
@@ -165,36 +167,51 @@ in a fan-out pattern so a slow stage never blocks collection.
 ## 5. The Natural-Language Understanding Pipeline
 
 Each article is enriched by a hybrid pipeline that deliberately splits language understanding
-between one LLM call and several specialised local models, each matched to the complexity of
-its sub-task:
+across several specialised local models and — for live traffic only — a single LLM call, each
+matched to the complexity of its sub-task. Classification runs on **two disjoint paths** chosen
+by recency, so identical output fields are produced either way:
 
 - **Category, sub-category, geolocation (country/city), and event intensity (severity/
-  newsworthiness)** are obtained from a single, batched LLM analysis call, together with an
-  English title and summary. These are the sub-tasks judged to genuinely require open-ended
-  reasoning — a closed six-way category taxonomy with per-category sub-slugs, free-form place
-  naming, and a subjective severity rating — so the LLM's marginal cost is justified. Code-fence
-  stripping and robust JSON parsing are applied to every response, and the batch is idempotent
-  under provider failure (each item independently falls back to a neutral default).
+  newsworthiness)** are produced by whichever path an article falls into. The overwhelming
+  majority of throughput — all historical/backfill volume, plus any live article not reached in
+  time — is classified **entirely on-prem, with no LLM call**: top-level category by zero-shot
+  natural-language-inference *entailment* (an ensemble of purpose-built zero-shot classifiers
+  asking "what is this story *about*", rather than topical word-overlap), corrected by post-hoc
+  evidence gates; sub-category by nearest prototype cosine *within* the chosen category (so a sub
+  prototype can never drag in the wrong parent); geolocation by pretrained NER over a gazetteer
+  with demonym and country-name fallbacks; and intensity by lexical severity rules. A confidence
+  threshold escalates only genuinely ambiguous rows to a second-opinion refine judge. This path
+  is cheap, deterministic, and unconstrained by external rate limits, which is what makes a
+  multi-year backfill of the corpus feasible. Only **live traffic** — a low-volume trickle that
+  comfortably fits free-tier limits and where marginal quality is worth most — is instead sent
+  through a single batched LLM analysis call producing the same fields plus an abstractive
+  English summary; code-fence stripping and robust JSON parsing are applied to every response,
+  and the batch is idempotent under provider failure (each item independently falls back to a
+  neutral default).
 - **General sentiment** is scored locally by a lexicon-based (VADER) analyser: sentiment
   polarity does not require the reasoning capacity of an LLM, and a rule-based scorer is
   deterministic, auditable, and effectively free to run at scale.
 - **Arabic translation** is generated by a dedicated local sequence-to-sequence translation
-  model (MarianMT) from the LLM's English title/summary, rather than asking the LLM to produce
-  both languages directly — translation is itself a narrow, well-studied task better served by
-  a model trained specifically for it than by prompting a general-purpose LLM.
+  model (MarianMT) from the English title/summary (extractive on the on-prem path, abstractive
+  on the live LLM path), rather than asking an LLM to produce both languages directly —
+  translation is itself a narrow, well-studied task better served by a model trained
+  specifically for it than by prompting a general-purpose LLM.
 - **Financial sentiment** is scored by a dedicated **FinBERT** model and retained as a separate
   numeric feature for forecasting, because a calibrated finance-domain sentiment score is more
   reliable than either the LLM or the general VADER score for this quantitative feature.
 - **Importance scoring** (1–10) gates the pipeline: low-scoring articles are skipped before the
   expensive analysis stage and pruned after a grace period, conserving compute and LLM quota.
 
-This division reflects a deliberate cost/quality trade-off: the LLM is reserved for the
-sub-tasks that need real judgement (taxonomy
-classification, geo naming, severity rating, free-form prose), while every sub-task with a
-narrow, well-defined shape — general sentiment, translation — runs on a
-small, purpose-built local model. The practical effect is a large reduction in LLM call volume
-and token count per article with no observed quality regression, and it removes several of the
-pipeline's highest-frequency calls from dependency on external provider rate limits entirely.
+This division reflects a deliberate cost/quality trade-off. Classification, geo naming, and
+severity rating — once thought to need an LLM — are met on the high-volume path by purpose-built
+local models (zero-shot NLI, prototype embeddings, NER, rules) that match the task's shape
+without a network call, while narrow sub-tasks (general sentiment, translation, financial
+sentiment) have always run locally. The LLM is now reserved for the two places open-ended
+generation genuinely pays off: the live-traffic analysis call and free-form prose (topic
+enrichment, the daily newsletter). The practical effect is that the pipeline's highest-frequency
+classification calls no longer depend on external provider rate limits at all — the precondition
+for backfilling and continuously re-classifying a multi-year corpus — with category accuracy on a
+labelled benchmark rising from the single generic-NLI baseline to the ensembled on-prem judge.
 
 ---
 
@@ -356,11 +373,12 @@ and evaluation commands' JSON reports for the final manuscript.)*
 
 - **News is lagged and priced-in.** The predictive ceiling for public-news features on liquid
   instruments is low by construction; results should be read against the naïve baseline.
-- **LLM non-determinism.** Where the LLM is still used (category/geo/intensity classification,
-  topic enrichment/discovery, newsletter generation), its output is non-deterministic; the
-  deterministic rule router removes non-determinism from the routing feature entirely. Entity
-  extraction, sentiment, translation, topic tagging, and event routing never touch the LLM,
-  further narrowing where this concern applies.
+- **LLM non-determinism.** Where the LLM is still used (live-traffic category/geo/intensity
+  classification, topic enrichment/discovery, newsletter generation), its output is
+  non-deterministic; the deterministic rule router removes non-determinism from the routing
+  feature entirely. The high-volume backfill classification path, entity extraction, sentiment,
+  translation, topic tagging, and event routing never touch the LLM, confining this concern to
+  the live-traffic trickle and free-form prose.
 - **Coverage and source bias.** Source selection, language coverage, and feed latency bias which
   events are seen at all.
 - **Geolocation ambiguity.** Place disambiguation is imperfect; mis-geolocated events introduce

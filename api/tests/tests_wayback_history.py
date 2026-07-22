@@ -162,8 +162,12 @@ def test_fetch_day_end_to_end_with_mocked_http():
 
     source = MagicMock(code='bbc-world', name='BBC World', author_slug='bbc')
     svc = WaybackHistoricalService(source, max_candidates=2)
+    # Isolate from the shared Redis source-blocklist: this test mocks all I/O,
+    # so a real timeout from an earlier test (or a prior live run) leaving
+    # 'bbc-world' temporarily blocked must not make it flake.
     with patch.object(wayback, 'cdx_snapshots', return_value=['20210915113000']), \
-         patch.object(wayback, '_wayback_get', return_value=_resp(200, text=_FRONTPAGE_HTML)):
+         patch.object(wayback, '_wayback_get', return_value=_resp(200, text=_FRONTPAGE_HTML)), \
+         patch.object(wayback, '_is_source_blocked', return_value=False):
         datums = svc.fetch_day(_dt(2021, 9, 15), _dt(2021, 9, 16))
 
     assert len(datums) == 2  # capped, keeping top-of-page rank order

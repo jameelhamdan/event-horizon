@@ -310,6 +310,27 @@ def test_parse_obj_geocodes_from_city_and_country():
     assert result.latitude is not None and result.longitude is not None
 
 
+def test_find_place_demonym_fallback():
+    """A headline that never names the country outright still locates via demonym."""
+    from services.processing.geocode import find_place
+    assert find_place('Russian journalist Sergei Smirnov jailed after court ruling') == 'Russia'
+    assert find_place('Chinese authorities detain a prominent activist') == 'China'
+    # An explicit country name still wins over any demonym in the same text.
+    assert find_place('A French envoy travelled to Germany for talks') == 'Germany' \
+        or find_place('A French envoy travelled to Germany for talks') == 'France'
+    assert find_place('The committee met to discuss the quarterly report') is None
+
+
+def test_resolve_state_country_collision_georgia():
+    """US-state 'Georgia' reads as United States only under clear US context;
+    the pronoun 'us' must not trigger it, and a Caucasus story is left alone."""
+    from services.processing.geocode import resolve_state_country_collision
+    assert resolve_state_country_collision('Georgia', 'US President Biden wins Georgia recount') == 'United States'
+    assert resolve_state_country_collision('Georgia', 'Tbilisi protests grip the Caucasus nation') == 'Georgia'
+    assert resolve_state_country_collision('Georgia', 'the report told us that Georgia voted') == 'Georgia'
+    assert resolve_state_country_collision('France', 'US President visits France') == 'France'
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 _TESTS = [
@@ -348,6 +369,8 @@ _TESTS = [
     test_parse_obj_valid_subcategory_kept,
     test_parse_obj_sanitizes_non_dict_translation_entries,
     test_parse_obj_geocodes_from_city_and_country,
+    test_find_place_demonym_fallback,
+    test_resolve_state_country_collision_georgia,
 ]
 
 

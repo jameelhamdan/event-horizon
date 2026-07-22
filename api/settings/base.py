@@ -270,10 +270,17 @@ ARTICLE_DEDUP_TITLE_ENABLED = True        # Jaccard dedup on titles (Redis-backe
 ARTICLE_DEDUP_JACCARD_THRESHOLD = 0.75
 ARTICLE_DEDUP_HOURS = 24
 
-# Optional egress proxy for Wayback Machine requests during historical backfill
-# (front-page mining + dead-URL body fallback — see services/data/wayback.py).
-# Wayback rate-limits per IP; leave empty to go direct.
+# Optional egress proxies for historical backfill fetching. At scale the limit
+# is per-IP rate limiting / IP blocks from news sites and the Wayback Machine,
+# not CPU — rotating across a pool of egress IPs spreads the load and lets a
+# blocked request retry from a fresh IP (services/data/proxy.py). All empty =
+# go direct (the default). Set to a comma-separated list of proxy URLs.
+#   WAYBACK_PROXY_URL  — legacy single proxy (still honoured; folds into the pool)
+#   WAYBACK_PROXY_POOL — Wayback Machine requests (services/data/wayback.py)
+#   EGRESS_PROXY_POOL  — live article-page fetches (services/data/bodies.py)
 WAYBACK_PROXY_URL = config('WAYBACK_PROXY_URL', default='')
+WAYBACK_PROXY_POOL = config('WAYBACK_PROXY_POOL', default='')
+EGRESS_PROXY_POOL = config('EGRESS_PROXY_POOL', default='')
 
 # LLM master switches. These are only the *seed defaults* — the live values are
 # stored in core.RuntimeConfig and edited from the admin dashboard's Actions

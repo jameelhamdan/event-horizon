@@ -88,6 +88,29 @@ def test_country_of_city_backfills_canonical_country():
     assert country_of_city('Zzqxv Nowhere') is None
 
 
+def test_city_country_conflict_detects_mismatched_pair():
+    """Confirmed live bug: a Kyiv/EU-diplomacy piece geocoded as "Kyiv,
+    Russia" — a city paired with an unrelated country mentioned elsewhere."""
+    from services.processing.geocode import city_country_conflict
+    assert city_country_conflict('Kyiv', 'Russia') is True
+
+
+def test_city_country_conflict_allows_matching_pair():
+    from services.processing.geocode import city_country_conflict
+    assert city_country_conflict('Kyiv', 'Ukraine') is False
+
+
+def test_city_country_conflict_false_when_either_missing():
+    from services.processing.geocode import city_country_conflict
+    assert city_country_conflict(None, 'Russia') is False
+    assert city_country_conflict('Kyiv', None) is False
+
+
+def test_city_country_conflict_false_for_unresolvable_city():
+    from services.processing.geocode import city_country_conflict
+    assert city_country_conflict('Zzqxv Nowhere', 'Russia') is False
+
+
 # ── rule-based intensity ──────────────────────────────────────────────────────
 
 def test_intensity_starts_from_taxonomy_prior():
@@ -174,14 +197,17 @@ def _fake_prototype_world():
         annotator._prototypes.cache_clear()
 
 
-def test_classify_batch_exact_prototype_match_with_confidence():
+def test_classify_cosine_exact_prototype_match_with_confidence():
+    # classify_batch's primary path is now zero-shot NLI; the nearest-prototype
+    # cosine matcher is the fallback (_classify_cosine). This exercises that
+    # fallback's exact-match property directly.
     from services.processing.annotator import NLPAnnotator
     from services.processing.taxonomy import PROTOTYPES
 
     with _fake_prototype_world():
         war_text = PROTOTYPES[('conflict', 'war')][0]
         flood_text = PROTOTYPES[('disaster', 'flood')][0]
-        got = NLPAnnotator().classify_batch([war_text, flood_text])
+        got = NLPAnnotator()._classify_cosine([war_text, flood_text])
     assert [(c, s) for c, s, _ in got] == [('conflict', 'war'), ('disaster', 'flood')]
     assert all(conf >= 0.99 for _, _, conf in got)
 
@@ -238,6 +264,55 @@ def test_annotate_batch_reports_low_confidence():
     assert f.confidence < ESCALATE_BELOW
 
 
+# ── _locate: NER person-name collisions + city/country conflicts ────────────
+
+def test_locate_drops_loc_entity_matching_person_name_token():
+    """Confirmed live bug: "Trump endorses Jim Jordan for House Speaker" was
+    geocoded to the country Jordan — the NER model mistagged the surname LOC.
+    A same-document PER span for the full name ("Jim Jordan") excludes the
+    single-token LOC reading of the same word."""
+    from services.processing import annotator
+    from services.processing.annotator import NLPAnnotator
+
+    fake_raw = [[
+        {'entity_group': 'PER', 'word': 'Jim Jordan', 'score': 0.99},
+        {'entity_group': 'LOC', 'word': 'Jordan', 'score': 0.95},
+    ]]
+
+    with patch.object(annotator, '_ner_pipeline', return_value=(lambda texts, batch_size=8: fake_raw)):
+        [(city, country)] = NLPAnnotator()._locate(['Trump endorses Jim Jordan for House Speaker'])
+    assert city is None
+    assert country is None
+
+
+def test_locate_keeps_loc_entity_with_no_person_name_collision():
+    from services.processing import annotator
+    from services.processing.annotator import NLPAnnotator
+
+    fake_raw = [[{'entity_group': 'LOC', 'word': 'Jordan', 'score': 0.95}]]
+
+    with patch.object(annotator, '_ner_pipeline', return_value=(lambda texts, batch_size=8: fake_raw)):
+        [(_city, country)] = NLPAnnotator()._locate(['Aid convoy crosses into Jordan from Syria'])
+    assert country == 'Jordan'
+
+
+def test_locate_resolves_city_country_conflict_to_citys_own_country():
+    """Confirmed live bug: a Kyiv/EU-diplomacy piece geocoded as "Kyiv,
+    Russia" — the real city's own country wins over a mismatched mention."""
+    from services.processing import annotator
+    from services.processing.annotator import NLPAnnotator
+
+    fake_raw = [[
+        {'entity_group': 'LOC', 'word': 'Kyiv', 'score': 0.95},
+        {'entity_group': 'LOC', 'word': 'Russia', 'score': 0.9},
+    ]]
+
+    with patch.object(annotator, '_ner_pipeline', return_value=(lambda texts, batch_size=8: fake_raw)):
+        [(city, country)] = NLPAnnotator()._locate(['Diplomatic push continues amid Kyiv EU talks'])
+    assert city == 'Kyiv'
+    assert country == 'Ukraine'
+
+
 def test_annotate_batch_classifier_failure_marks_error_for_retry():
     from services.processing.annotator import NLPAnnotator
 
@@ -256,17 +331,24 @@ _TESTS = [
     test_canonical_country_resolves_aliases_and_rejects_noise,
     test_is_city_covers_aliases,
     test_country_of_city_backfills_canonical_country,
+    test_city_country_conflict_detects_mismatched_pair,
+    test_city_country_conflict_allows_matching_pair,
+    test_city_country_conflict_false_when_either_missing,
+    test_city_country_conflict_false_for_unresolvable_city,
     test_intensity_starts_from_taxonomy_prior,
     test_intensity_casualties_escalate_by_magnitude,
     test_intensity_earthquake_magnitude_and_clamp,
     test_intensity_opinion_framing_penalized,
     test_summary_takes_leading_sentences_bounded,
     test_summary_empty_content_returns_empty,
-    test_classify_batch_exact_prototype_match_with_confidence,
+    test_classify_cosine_exact_prototype_match_with_confidence,
     test_best_sub_within_category,
     test_annotate_batch_end_to_end_with_fakes,
     test_annotate_batch_reports_low_confidence,
     test_annotate_batch_classifier_failure_marks_error_for_retry,
+    test_locate_drops_loc_entity_matching_person_name_token,
+    test_locate_keeps_loc_entity_with_no_person_name_collision,
+    test_locate_resolves_city_country_conflict_to_citys_own_country,
 ]
 
 

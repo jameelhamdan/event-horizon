@@ -277,6 +277,240 @@ def test_aggregate_events_requires_both_range_bounds():
         raise AssertionError('expected ValueError for start without end')
 
 
+# ── _extract_title_and_text boilerplate removal ─────────────────────────────
+# Fixtures shaped after real BBC (semantic <nav>/<article>, a linked
+# "related articles" block) and Brookings (sidebar widget with an unrelated
+# country name) page structures — the confirmed source of the category/geo
+# contamination this fix targets: the old regex pulled every <p> on the page,
+# nav chrome included, ahead of or alongside the real article text.
+
+_BBC_SHAPED_HTML = """
+<html><head><title>Israel-Gaza war: Hostage families demand action - BBC News</title></head>
+<body>
+<nav class="orb-nav-links"><ul>
+<li><a href="/news">Home</a></li><li><a href="/news/business">Business</a></li>
+<li><a href="/news/technology">Technology</a></li><li><a href="/news/health">Health</a></li>
+<li><a href="/culture">Culture</a></li><li><a href="/arts">Arts</a></li>
+</ul></nav>
+<article>
+<p>Families of hostages held by Hamas in Gaza gathered outside the Israeli defence ministry on Tuesday to demand the government do more to secure their release.</p>
+<p>The protest came as Israeli forces continued strikes on targets in Gaza City, with the military saying it had hit dozens of militant positions overnight.</p>
+</article>
+<div class="related-articles"><p><a href="/a">Read more: Gaza crisis explained</a> <a href="/b">Analysis: What next</a></p></div>
+<footer class="site-footer"><p>BBC. Copyright 2023.</p></footer>
+</body></html>
+"""
+
+_BROOKINGS_SHAPED_HTML = """
+<html><head><title>Springfield council approves zoning plan - Local News</title></head>
+<body>
+<aside class="sidebar"><div class="widget"><p>Related topics: Iran Foreign Policy Middle East Nuclear Deal</p></div></aside>
+<main>
+<p>The city council in Springfield voted Tuesday to approve a new zoning ordinance that will reshape the downtown business district over the next decade.</p>
+<p>Supporters of the plan say it will bring much-needed housing and retail investment to the area.</p>
+</main>
+</body></html>
+"""
+
+# No semantic <article>/<main> wrapper at all — nav is a bare <div><p> of
+# links, not a <nav> tag, so only the link-density/short-paragraph shape
+# heuristic (not the structural-tag strip) can catch it.
+_NO_SEMANTIC_TAGS_HTML = """
+<html><head><title>Refinery blast kills workers - Wire Service</title></head>
+<body>
+<div class="header"><p><a href="/1">Business</a> <a href="/2">Technology</a> <a href="/3">Health</a> <a href="/4">Sport</a></p></div>
+<div class="content">
+<p>An explosion at an oil refinery in the country's south killed at least four workers and injured a dozen more on Wednesday, officials said.</p>
+<p>The blast, which occurred during a routine maintenance shutdown, sent a plume of smoke visible for miles.</p>
+</div>
+</body></html>
+"""
+
+
+def test_extract_title_and_text_strips_bbc_style_nav_and_related_links():
+    from services.data.bodies import _extract_title_and_text
+    title, text = _extract_title_and_text(_BBC_SHAPED_HTML)
+    assert title == 'Israel-Gaza war: Hostage families demand action - BBC News'
+    assert 'hostages held by Hamas' in text
+    assert 'Israeli defence ministry' in text
+    for chrome in ('Business', 'Technology', 'Culture', 'Arts', 'Read more', 'Copyright'):
+        assert chrome not in text
+
+
+def test_extract_title_and_text_strips_sidebar_contamination():
+    """The bug that geocoded an unrelated Springfield zoning story to Iran:
+    a sidebar widget's stray country name must not reach Article.content."""
+    from services.data.bodies import _extract_title_and_text
+    _title, text = _extract_title_and_text(_BROOKINGS_SHAPED_HTML)
+    assert 'Springfield' in text
+    assert 'zoning ordinance' in text
+    assert 'Iran' not in text
+
+
+def test_extract_title_and_text_link_density_catches_unwrapped_nav():
+    from services.data.bodies import _extract_title_and_text
+    _title, text = _extract_title_and_text(_NO_SEMANTIC_TAGS_HTML)
+    assert 'explosion at an oil refinery' in text
+    for chrome in ('Business', 'Technology', 'Health', 'Sport'):
+        assert chrome not in text
+
+
+def test_is_boilerplate_paragraph_short_label_no_punctuation():
+    from services.data.bodies import _is_boilerplate_paragraph
+    assert _is_boilerplate_paragraph('<p>Technology</p>', 'Technology') is True
+
+
+def test_is_boilerplate_paragraph_real_sentence_kept():
+    from services.data.bodies import _is_boilerplate_paragraph
+    p_html = '<p>Officials said the death toll was expected to rise as search efforts continued.</p>'
+    plain = 'Officials said the death toll was expected to rise as search efforts continued.'
+    assert _is_boilerplate_paragraph(p_html, plain) is False
+
+
+def test_is_boilerplate_paragraph_link_dense_short_block_dropped():
+    from services.data.bodies import _is_boilerplate_paragraph
+    p_html = '<p><a href="/1">Business</a> <a href="/2">Technology</a> <a href="/3">Health</a></p>'
+    plain = 'Business Technology Health'
+    assert _is_boilerplate_paragraph(p_html, plain) is True
+
+
+def test_is_boilerplate_paragraph_long_paragraph_with_one_inline_link_kept():
+    """A real paragraph that happens to contain one inline link must survive —
+    only short, mostly-linked blocks (the menu/nav shape) should be dropped."""
+    from services.data.bodies import _is_boilerplate_paragraph
+    p_html = (
+        '<p>According to a <a href="/report">newly published report</a>, the '
+        'agency found that emergency response times in the region had worsened '
+        'significantly over the past two years, prompting renewed calls for reform.</p>'
+    )
+    plain = (
+        'According to a newly published report, the agency found that emergency '
+        'response times in the region had worsened significantly over the past '
+        'two years, prompting renewed calls for reform.'
+    )
+    assert _is_boilerplate_paragraph(p_html, plain) is False
+
+
+# ── Large-HTML extraction (trafilatura must see body past the regex cap) ────────
+
+def test_extract_title_and_text_body_survives_past_regex_cap():
+    """Regression: the pre-trafilatura truncation used to cut the article body
+    off large pages (The Guardian front-loads ~200 KB of inline scripts before
+    the body), stranding trafilatura and forcing the nav-only regex fallback.
+    A body past 200 KB of leading <script> must still be extracted."""
+    from services.data.bodies import _extract_title_and_text
+    body = (
+        '<article><p>Wildfires continued to threaten swaths of forest and fields '
+        'in Israel on Thursday, though firefighters successfully reopened the main '
+        'road linking the two principal cities. Officials declared a national '
+        'emergency and ordered evacuations as strong winds spread the flames.</p>'
+        '<p>The prime minister said additional aircraft had been requested from '
+        'neighbouring countries to help bring the fires under control by nightfall.</p>'
+        '</article>'
+    )
+    html = (
+        '<html><head><title>Israel declares national emergency | The Guardian</title></head>'
+        '<body><script>' + ('var x=1;' * 30000) + '</script>' + body + '</body></html>'
+    )
+    assert len(html) > 200_000
+    _title, text = _extract_title_and_text(html)
+    assert text and 'national emergency' in text
+    assert 'firefighters successfully reopened' in text
+
+
+# ── Paywall body detection ──────────────────────────────────────────────────────
+
+def test_is_paywall_body_drops_leading_wall_text():
+    from services.data.bodies import _is_paywall_body
+    ft = ('UK inflation falls more than expected to 2.6% in June Subscribe to '
+          'unlock this article Try unlimited access Only 1 euro for 4 weeks')
+    ps = ('Available exclusively to PS subscribers, PS Deep Dives delivers a '
+          'weekly expert commentary examining a major global challenge')
+    assert _is_paywall_body(ft) is True
+    assert _is_paywall_body(ps) is True
+
+
+def test_is_paywall_body_keeps_real_article_with_trailing_cta():
+    """A full article that merely closes with a subscribe CTA (marker deep in
+    the text) must be kept — only walls that interrupt early are dropped."""
+    from services.data.bodies import _is_paywall_body
+    real_lead = ('China targets panda bond reform, mandates global credit '
+                 'mapping to lure foreign capital. ') * 20
+    assert _is_paywall_body(real_lead + 'Subscribe to read more like this.') is False
+    assert _is_paywall_body(real_lead) is False
+
+
+# ── Non-article URL / junk detection ────────────────────────────────────────────
+
+def test_is_non_article_url_image_asset_and_sections():
+    from services.data.bodies import is_non_article_url
+    assert is_non_article_url('https://www.technologyreview.com/205x205_property-1the-checkup-mail-icon/') is True
+    assert is_non_article_url('https://www.forbes.com/advisor/ca/personal-loans/personal-loan-requirements/') is True
+    assert is_non_article_url('https://arstechnica.com/tag/clip-art/') is True
+    assert is_non_article_url('https://example.com/') is True
+
+
+def test_is_non_article_url_keeps_real_articles():
+    from services.data.bodies import is_non_article_url
+    assert is_non_article_url('https://www.theguardian.com/world/2025/may/01/israel-fires-wildfires-jerusalem') is False
+    assert is_non_article_url('https://www.propublica.org/article/nike-cambodia-factory-heat') is False
+
+
+# ── Egress proxy rotation ───────────────────────────────────────────────────────
+
+def test_proxy_pool_parses_and_defaults_empty():
+    from unittest.mock import patch
+    from services.data import proxy
+    assert proxy._parse_pool('') == []
+    assert proxy._parse_pool('http://a:1, http://b:2 ') == ['http://a:1', 'http://b:2']
+    # legacy WAYBACK_PROXY_URL folds into the wayback pool when the pool is unset
+    with patch.object(proxy.settings, 'WAYBACK_PROXY_POOL', ''), \
+         patch.object(proxy.settings, 'WAYBACK_PROXY_URL', 'http://legacy:9'):
+        assert proxy.WAYBACK_PROXIES.urls() == ['http://legacy:9']
+
+
+def test_proxy_pool_attempt_order_direct_first_and_always_nonempty():
+    from unittest.mock import patch
+    from services.data import proxy
+    with patch.object(proxy.settings, 'EGRESS_PROXY_POOL', ''):
+        assert proxy.EGRESS_PROXIES.attempt_order() == [None]   # empty pool → one direct attempt
+    with patch.object(proxy.settings, 'EGRESS_PROXY_POOL', 'http://p:1'):
+        order = proxy.EGRESS_PROXIES.attempt_order()
+        assert order[0] is None and 'http://p:1' in order
+
+
+def test_proxy_pool_get_retries_proxy_on_block():
+    from unittest.mock import MagicMock, patch
+    from services.data import proxy
+    seen = []
+
+    def fake_get(url, headers=None, timeout=15, proxies=None, **kw):
+        seen.append(proxies)
+        r = MagicMock()
+        r.status_code = 200 if proxies else 403  # direct blocked, proxy ok
+        return r
+
+    with patch.object(proxy.settings, 'EGRESS_PROXY_POOL', 'http://p:1'), \
+         patch('services.data.proxy.requests.get', side_effect=fake_get):
+        resp = proxy.EGRESS_PROXIES.get('http://x', headers={}, timeout=5)
+    assert resp.status_code == 200
+    assert seen[0] is None and seen[1] == {'http': 'http://p:1', 'https': 'http://p:1'}
+
+
+def test_proxy_pool_get_preserves_exception_type():
+    import requests
+    from unittest.mock import patch
+    from services.data import proxy
+
+    with patch.object(proxy.settings, 'EGRESS_PROXY_POOL', 'http://p:1'), \
+         patch('services.data.proxy.requests.get', side_effect=requests.Timeout('t')):
+        try:
+            proxy.EGRESS_PROXIES.get('http://x', headers={}, timeout=5)
+            raise AssertionError('expected Timeout')
+        except requests.Timeout:
+            pass
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 _TESTS = [
@@ -298,6 +532,22 @@ _TESTS = [
     test_iter_aggregate_windows_grid_aligned_and_covering,
     test_iter_aggregate_windows_small_window_days_still_advances,
     test_aggregate_events_requires_both_range_bounds,
+    test_extract_title_and_text_strips_bbc_style_nav_and_related_links,
+    test_extract_title_and_text_strips_sidebar_contamination,
+    test_extract_title_and_text_link_density_catches_unwrapped_nav,
+    test_is_boilerplate_paragraph_short_label_no_punctuation,
+    test_is_boilerplate_paragraph_real_sentence_kept,
+    test_is_boilerplate_paragraph_link_dense_short_block_dropped,
+    test_is_boilerplate_paragraph_long_paragraph_with_one_inline_link_kept,
+    test_extract_title_and_text_body_survives_past_regex_cap,
+    test_is_paywall_body_drops_leading_wall_text,
+    test_is_paywall_body_keeps_real_article_with_trailing_cta,
+    test_is_non_article_url_image_asset_and_sections,
+    test_is_non_article_url_keeps_real_articles,
+    test_proxy_pool_parses_and_defaults_empty,
+    test_proxy_pool_attempt_order_direct_first_and_always_nonempty,
+    test_proxy_pool_get_retries_proxy_on_block,
+    test_proxy_pool_get_preserves_exception_type,
 ]
 
 

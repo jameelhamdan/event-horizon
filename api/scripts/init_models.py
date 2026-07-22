@@ -10,12 +10,12 @@ not been copied into the image yet.
 try:
     from settings.model_names import (
         CLUSTER_MODEL_NAME, FINBERT_MODEL_NAME, TRANSLATION_MODEL_NAME,
-        NER_MODEL_NAME, ZEROSHOT_MODEL_NAME,
+        NER_MODEL_NAME, ZEROSHOT_MODEL_NAMES,
     )
 except ImportError:
     from model_names import (
         CLUSTER_MODEL_NAME, FINBERT_MODEL_NAME, TRANSLATION_MODEL_NAME,
-        NER_MODEL_NAME, ZEROSHOT_MODEL_NAME,
+        NER_MODEL_NAME, ZEROSHOT_MODEL_NAMES,
     )
 
 
@@ -40,8 +40,9 @@ def download_models() -> None:
     print(f"Downloading {NER_MODEL_NAME}...")
     pipeline("token-classification", model=NER_MODEL_NAME, aggregation_strategy="simple")
 
-    print(f"Downloading {ZEROSHOT_MODEL_NAME}...")
-    pipeline("zero-shot-classification", model=ZEROSHOT_MODEL_NAME)
+    for zs_name in ZEROSHOT_MODEL_NAMES:  # ensemble members (refine judge)
+        print(f"Downloading {zs_name}...")
+        pipeline("zero-shot-classification", model=zs_name)
 
     # VADER (services.processing.vader) is rule-based — ships with the
     # vaderSentiment package, no model weights to pre-fetch.

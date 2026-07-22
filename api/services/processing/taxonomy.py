@@ -12,7 +12,7 @@ CATEGORIES = {'conflict', 'disaster', 'economic', 'political', 'health', 'genera
 
 SUB_CATEGORIES: dict[str, set[str]] = {
     'conflict':  {'war', 'airstrike', 'insurgency', 'terrorism', 'border-clash', 'other'},
-    'disaster':  {'earthquake', 'flood', 'storm', 'wildfire', 'industrial-accident', 'other'},
+    'disaster':  {'earthquake', 'flood', 'storm', 'wildfire', 'industrial-accident', 'infrastructure', 'other'},
     'economic':  {'monetary-policy', 'energy', 'trade', 'tariffs', 'labor', 'markets', 'sanctions', 'other'},
     'political': {'election', 'legislation', 'diplomacy', 'leadership-change', 'protest-policy', 'other'},
     'health':    {'outbreak', 'pandemic', 'healthcare-system', 'other'},
@@ -39,23 +39,32 @@ PROTOTYPES: dict[tuple[str, str], list[str]] = {
     ('conflict', 'border-clash'): [
         'Border clash: skirmish between troops of neighbouring countries along a disputed border or frontier'],
     ('conflict', 'other'): [
-        'Armed violence, military conflict, gunmen kill people'],
+        'Armed violence, military conflict, gunmen kill people',
+        'Civilians killed by military forces: people shot dead while waiting for food or aid, troops open fire on a crowd, deadly assault on unarmed civilians, mass casualties in a conflict zone'],
     ('disaster', 'earthquake'): [
         'Earthquake: seismic tremor shakes region, magnitude reported, buildings collapse, aftershocks'],
     ('disaster', 'flood'): [
         'Flooding: heavy rains submerge towns, rivers overflow banks, flash floods, residents evacuated'],
     ('disaster', 'storm'): [
-        'Storm: hurricane, typhoon, cyclone or tornado makes landfall, destructive winds, heavy snowfall'],
+        'Storm: hurricane, typhoon, cyclone or tornado makes landfall, destructive winds, heavy snowfall',
+        'Typhoon or cyclone approaches or hits coastal region, storm surge, residents evacuated ahead of landfall'],
     ('disaster', 'wildfire'): [
         'Wildfire: forest and bush fires spread, firefighters battle blaze, hectares burned, evacuations ordered'],
     ('disaster', 'industrial-accident'): [
-        'Industrial or transport accident: factory explosion, mine collapse, chemical spill, building fire, plane or train crash'],
+        'Industrial or transport accident: factory explosion, mine collapse, chemical spill, building fire, plane or train crash',
+        'Refinery or plant explosion: oil facility blast, storage tank fire, workers killed or injured in industrial blaze',
+        'Building fire: apartment block or warehouse catches fire, blaze kills residents, firefighters respond to structure fire',
+        'Road or traffic accident: truck or bus crash, multi-vehicle collision, highway accident kills or injures passengers'],
+    ('disaster', 'infrastructure'): [
+        'Power outage and infrastructure failure: electricity blackout, power grid collapse, mass power cut leaves a region without electricity, water or telecommunications outage'],
     ('disaster', 'other'): [
-        'Natural disaster, deadly accident, landslide, drought, extreme weather'],
+        'Natural disaster, deadly accident, landslide, drought, extreme weather',
+        'Accident causes multiple deaths or injuries: collapse, crash, explosion, or fire with casualties, emergency responders at scene'],
     ('economic', 'monetary-policy'): [
         'Central bank monetary policy: interest rate decision, inflation figures, quantitative easing'],
     ('economic', 'energy'): [
-        'Energy: oil and gas prices, OPEC production cuts, pipelines, fuel supply, electricity grid'],
+        'Energy: oil and gas prices, OPEC production cuts, pipelines, fuel supply, electricity grid',
+        'Energy security commentary: opinion essay or analysis on energy strategy, energy alliances, resource dependence'],
     ('economic', 'trade'): [
         'International trade: exports, imports, trade deal negotiated, trade deficit, supply chains'],
     ('economic', 'tariffs'): [
@@ -67,7 +76,8 @@ PROTOTYPES: dict[tuple[str, str], list[str]] = {
     ('economic', 'sanctions'): [
         'Economic sanctions imposed on a country: asset freezes, export bans, blacklisted companies'],
     ('economic', 'other'): [
-        'Business and economy: companies, GDP growth, budget, investment, banking'],
+        'Business and economy: companies, GDP growth, budget, investment, banking',
+        'Fiscal policy and stimulus: government spending package, tax cuts, budget stimulus, economic relief measures debated to boost the economy'],
     ('political', 'election'): [
         'Election: voters go to the polls, presidential or parliamentary vote, campaign rallies, election results'],
     ('political', 'legislation'): [
@@ -77,9 +87,11 @@ PROTOTYPES: dict[tuple[str, str], list[str]] = {
     ('political', 'leadership-change'): [
         'Leadership change: president resigns, impeachment, coup, cabinet reshuffle, new prime minister sworn in'],
     ('political', 'protest-policy'): [
-        'Protests and civil unrest: demonstrators march against government policy, riots, police crackdown on protesters'],
+        'Protests and civil unrest: demonstrators march against government policy, riots, police crackdown on protesters',
+        'State crackdown on dissent: government imposes a national security law, suppresses opposition, curtails autonomy or civil liberties, jails activists or journalists'],
     ('political', 'other'): [
-        'Government and politics: minister statement, policy announcement, political party dispute'],
+        'Government and politics: minister statement, policy announcement, political party dispute',
+        'Political commentary and analysis: opinion essay critiquing a domestic political trend, law, or policy, punditry'],
     ('health', 'outbreak'): [
         'Disease outbreak: virus spreads, infections rise, new cases confirmed, quarantine measures'],
     ('health', 'pandemic'): [
@@ -114,6 +126,7 @@ PRIORS: dict[tuple[str, str], float] = {
     ('disaster', 'storm'): 0.5,
     ('disaster', 'wildfire'): 0.45,
     ('disaster', 'industrial-accident'): 0.45,
+    ('disaster', 'infrastructure'): 0.4,
     ('disaster', 'other'): 0.4,
     ('economic', 'monetary-policy'): 0.45,
     ('economic', 'energy'): 0.35,

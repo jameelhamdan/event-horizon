@@ -101,6 +101,33 @@
       </form>
     </div>
 
+    <h3 class="ops-group-title">Healing
+      <span class="ops-muted" style="font-weight:normal">— repair gaps anywhere in the corpus, not just a fresh backfill's range</span>
+    </h3>
+    <div class="ops-tiles">
+      <form method="post" class="ops-tile ops-tile-wide">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="heal_pipeline">
+        <div class="ops-tile-row">
+          <input type="date" name="start_date" title="Range start (UTC) — optional, blank = the earliest article on record">
+          <input type="date" name="end_date" title="Range end (UTC, exclusive) — optional, blank = now">
+          <button class="button" type="submit">Heal pipeline gaps</button>
+        </div>
+        <p class="ops-tile-desc">Walks the range week by week and re-dispatches every article still short of a terminal stage — stuck at <em>fetched</em> (including deferred) or <em>refine</em> — for annotation or the refine judge, then re-aggregates that week. Leave both dates blank to walk the entire history from the first article on record. No cron entry for this — trigger it manually after noticing a gap. Idempotent; re-run if a pass doesn't fully settle (an article promoted mid-run to a new stage is picked up on the next run).</p>
+      </form>
+      <form method="post" class="ops-tile ops-tile-wide">
+        {% csrf_token %}
+        <input type="hidden" name="dashboard_action" value="reannotate_corpus">
+        <div class="ops-tile-row">
+          <input type="date" name="start_date" title="Range start (UTC) — optional, blank = the earliest article on record">
+          <input type="date" name="end_date" title="Range end (UTC, exclusive) — optional, blank = now">
+          <label class="ops-muted" style="font-weight:normal"><input type="checkbox" name="rehydrate" value="1"> re-fetch bodies</label>
+          <button class="button" type="submit">Re-annotate corpus</button>
+        </div>
+        <p class="ops-tile-desc">Walks the range week by week and re-runs the annotate pass over <strong>every</strong> article — including already-classified <em>annotated</em>/<em>refined</em> rows — to roll a classifier/taxonomy upgrade across the whole corpus (unlike <em>Heal</em>, which only touches non-terminal rows). Leave dates blank to walk all history. Tick <em>re-fetch bodies</em> to also re-hydrate through the current extractor (adds live HTTP; for an extraction change, not just a model change). Idempotent; re-run freely.</p>
+      </form>
+    </div>
+
     <h3 class="ops-group-title">Topics</h3>
     <div class="ops-tiles">
       <form method="post" class="ops-tile">
@@ -430,17 +457,30 @@
 
   {# ── Activity over time ──────────────────────────────────────────── #}
   <section class="ops-card">
-    <h2>Activity over time <span class="ops-muted" style="font-weight:normal">— events per month by category vs. total articles ingested, last 10 years</span></h2>
+    <h2>Activity over time <span class="ops-muted" style="font-weight:normal">— last 10 years</span></h2>
     {% if activity_chart.labels %}
+    <h3 class="ops-group-title">Events per month, by category</h3>
     <div class="ops-chart-wrap">
-      {{ activity_chart.svg }}
+      {{ activity_chart.events_svg }}
       <div class="ops-chart-tooltip"></div>
     </div>
     <div class="ops-chart-legend">
       {% for c in activity_chart.categories %}
       <span class="ops-chart-legend-item"><i style="background:{{ c.color }}"></i>{{ c.label }} <span class="ops-muted">({{ c.total }})</span></span>
       {% endfor %}
-      <span class="ops-chart-legend-item ops-chart-legend-line"><i style="background:{{ activity_chart.articles_color }}"></i>Articles — right axis <span class="ops-muted">({{ activity_chart.articles_total }})</span></span>
+    </div>
+
+    <h3 class="ops-group-title">Articles processed per month, by pipeline stage
+      <span class="ops-muted" style="font-weight:normal">— how many articles reached each processing depth</span>
+    </h3>
+    <div class="ops-chart-wrap">
+      {{ activity_chart.processing_svg }}
+      <div class="ops-chart-tooltip"></div>
+    </div>
+    <div class="ops-chart-legend">
+      <span class="ops-chart-legend-item"><i style="background:{{ activity_chart.annotated_color }}"></i>Annotated <span class="ops-muted">({{ activity_chart.annotated_total }})</span></span>
+      <span class="ops-chart-legend-item"><i style="background:{{ activity_chart.refined_color }}"></i>Refined <span class="ops-muted">({{ activity_chart.refined_total }})</span></span>
+      <span class="ops-chart-legend-item ops-chart-legend-line"><i style="background:{{ activity_chart.articles_color }}"></i>Total ingested <span class="ops-muted">({{ activity_chart.articles_total }})</span></span>
     </div>
     {% else %}
     <p class="ops-muted">No event/article history yet.</p>
@@ -488,7 +528,6 @@
 .ops-chart-svg { width:100%; height:auto; display:block; }
 .ops-chart-gridline { stroke:#2c3038; stroke-width:1; }
 .ops-chart-axis-label { fill:#888; font-size:10px; }
-.ops-chart-axis-label-r { fill:#a9a9a9; }
 .ops-chart-hover { fill:transparent; }
 .ops-chart-hover:hover { fill:#79aec8; fill-opacity:0.06; }
 .ops-chart-tooltip {

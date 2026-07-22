@@ -223,6 +223,55 @@ def analyze_live_articles(ids: list) -> int:
     return len(to_save)
 
 
+def rehydrate_articles(ids: list, use_wayback: bool = False, max_workers: int = 8) -> int:
+    """Re-fetch each article's ``source_url`` through the current
+    services/data/bodies.py extractor (trafilatura) and overwrite ``content``
+    when a non-empty body comes back — for repairing articles whose stored
+    content was extracted by an older/worse extractor (nav/boilerplate bleed,
+    thin or empty bodies). Id-driven, like annotate/refine; selection lives
+    with the caller.
+
+    Direct HTTP only by default — a plain GET per article link, no crawling —
+    which re-hydrates ~84% of links at ~0.5s each and is the cheap bulk path.
+    ``use_wayback=True`` adds the archive fallback for the dead/JS-only/paywalled
+    remainder, but that path is globally throttled (see services/data/wayback.py)
+    and turns a hours-long job into a day-long one, so it's opt-in.
+
+    Only ``content`` is touched; a link that returns nothing is left as-is (its
+    existing content stands). Does not annotate or change stage — pair it with
+    annotate_articles to re-classify on the improved text. Returns the number of
+    articles whose content was replaced.
+    """
+    import uuid as _uuid
+    from core.models import Article
+    from services.data.bodies import fetch_article_page, fetch_wayback_page, is_junk_page_title
+    from services.utils import map_concurrent
+
+    uuids = [i if isinstance(i, _uuid.UUID) else _uuid.UUID(str(i)) for i in ids]
+    articles = [a for a in Article.objects.filter(id__in=uuids) if a.source_url]
+    if not articles:
+        return 0
+
+    def _refetch(article):
+        title, body = fetch_article_page(article.source_url, article.source_code)
+        if use_wayback and (not body or is_junk_page_title(title)):
+            _wb_title, wb_body = fetch_wayback_page(article.source_url, around=article.published_on)
+            if wb_body:
+                body = wb_body
+        return article, body
+
+    results = map_concurrent(articles, _refetch, max_workers=max_workers, default=(None, None))
+    to_save = []
+    for article, body in results:
+        if article is not None and body:
+            article.content = body
+            to_save.append(article)
+    if to_save:
+        Article.objects.bulk_update(to_save, ['content'], batch_size=500)
+    logger.info('[rehydrate] refetched %d/%d article(s) (use_wayback=%s)', len(to_save), len(articles), use_wayback)
+    return len(to_save)
+
+
 def annotate_articles(ids: list) -> int:
     """Run the full on-prem NLP annotation on exactly these article ids: the
     NLPAnnotator extracts category/sub-category, a place name (geocoded inline
@@ -245,6 +294,7 @@ def annotate_articles(ids: list) -> int:
     """
     import uuid as _uuid
     from core.models import Article, ArticleDocument
+    from services.data.bodies import is_junk_article
     from services.processing.annotator import ESCALATE_BELOW, NLPAnnotator
     from services.scoring import ImportanceScorer
     from services.utils import mark_stage
@@ -252,6 +302,21 @@ def annotate_articles(ids: list) -> int:
     uuids = [i if isinstance(i, _uuid.UUID) else _uuid.UUID(str(i)) for i in ids]
     articles = list(Article.objects.filter(id__in=uuids))
 
+    if not articles:
+        return 0
+
+    # Quarantine structural junk (non-article pages, raw-URL/paywall stubs)
+    # before spending NLP on it: soft-delete so the default manager hides it
+    # everywhere, and stamp processed_on so it drops out of the pending queue.
+    # The row is kept (training data), just excluded — nothing hard-deletes.
+    junk = [a for a in articles if is_junk_article(a.title, a.source_url)]
+    if junk:
+        for a in junk:
+            a.is_deleted = True
+            a.processed_on = timezone.now()
+        Article.all_objects.bulk_update(junk, ['is_deleted', 'processed_on'], batch_size=500)
+        logger.info('[annotate] soft-deleted %d junk (non-article) row(s)', len(junk))
+    articles = [a for a in articles if not a.is_deleted]
     if not articles:
         return 0
 

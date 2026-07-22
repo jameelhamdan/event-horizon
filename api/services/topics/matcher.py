@@ -18,6 +18,16 @@ _MIN_OVERLAP = 0.1
 _MIN_MATCHES = 1
 
 
+def _is_anachronistic(topic, event) -> bool:
+    """True if *topic* couldn't plausibly apply to *event* — the topic's own
+    tracked start postdates the event (e.g. a topic discovered for 2026 news
+    must never tag an October 2023 event; confirmed live: purely semantic
+    cosine similarity was pairing events with topics for crises that hadn't
+    happened yet). Topics without a started_at (legacy rows predating the
+    field) have nothing to check against and are never excluded here."""
+    return bool(topic.started_at and event.started_at and topic.started_at > event.started_at)
+
+
 class TopicMatcher:
 
     def match(self, event, topics: list) -> dict[str, float]:
@@ -37,6 +47,8 @@ class TopicMatcher:
 
         result: dict[str, float] = {}
         for topic in topics:
+            if _is_anachronistic(topic, event):
+                continue
             kw_tokens: set[str] = set()
             for kw in (topic.keywords or []):
                 kw_tokens |= _tokenize(kw)
@@ -144,6 +156,8 @@ class EmbeddingTopicMatcher:
             key = str(event.pk)
             matched: dict[str, float] = {}
             for j, topic in enumerate(topics):
+                if _is_anachronistic(topic, event):
+                    continue
                 score = float(sim[i][j])
                 if score >= self.SIM_THRESHOLD:
                     # Rescale into a [0.5, 1.0] confidence band.

@@ -187,7 +187,10 @@ def test_extract_title_and_text():
     assert title == 'Big Story — Example News'
     assert body.startswith('First para.') and 'Second' in body
     assert 'not text' not in body and 'Menu' not in body
-    assert _extract_title_and_text('<html><body>no paragraphs</body></html>') == (None, None)
+    # A page with no extractable prose yields no body (trafilatura, the primary
+    # extractor, does return bare text like "no paragraphs" for a structureless
+    # body — so the empty case is what "no article content" means here).
+    assert _extract_title_and_text('<html><body></body></html>') == (None, None)
 
 
 # ── Runner ────────────────────────────────────────────────────────────────────

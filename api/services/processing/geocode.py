@@ -115,10 +115,44 @@ _EXTRA_PLACES: dict[str, tuple[float, float]] = {
     'west bank': (31.9522, 35.2332),
     'gaza': (31.5, 34.47), 'gaza strip': (31.5, 34.47), 'gaza city': (31.5, 34.47),
     'kosovo': (42.6026, 20.9030),
+    'jammu and kashmir': (33.7782, 76.5762), 'kashmir': (33.7782, 76.5762),
 }
 
 # City spellings the gazetteer lists under a different form.
 _CITY_ALIASES: dict[str, str] = {'kiev': 'kyiv'}
+
+# Demonym → canonical country, for the find_place() fallback: a headline that
+# never names the country outright ("Russian journalist jailed", "Chinese
+# authorities") still locates. Only unambiguous, single-country demonyms —
+# "American"/"Indian"/"Korean" are excluded (region/ethnicity collisions).
+_DEMONYMS: dict[str, str] = {
+    'russian': 'Russia', 'ukrainian': 'Ukraine', 'chinese': 'China',
+    'israeli': 'Israel', 'palestinian': 'Palestine', 'iranian': 'Iran',
+    'syrian': 'Syria', 'iraqi': 'Iraq', 'afghan': 'Afghanistan',
+    'japanese': 'Japan', 'german': 'Germany', 'french': 'France',
+    'british': 'United Kingdom', 'spanish': 'Spain', 'italian': 'Italy',
+    'turkish': 'Turkey', 'egyptian': 'Egypt', 'saudi': 'Saudi Arabia',
+    'pakistani': 'Pakistan', 'mexican': 'Mexico', 'brazilian': 'Brazil',
+    'nigerian': 'Nigeria', 'venezuelan': 'Venezuela', 'lebanese': 'Lebanon',
+    'yemeni': 'Yemen', 'sudanese': 'Sudan', 'greek': 'Greece',
+    'polish': 'Poland', 'dutch': 'Netherlands', 'swedish': 'Sweden',
+    'portuguese': 'Portugal', 'taiwanese': 'Taiwan', 'vietnamese': 'Vietnam',
+    'thai': 'Thailand', 'indonesian': 'Indonesia', 'filipino': 'Philippines',
+    'australian': 'Australia', 'canadian': 'Canada', 'colombian': 'Colombia',
+    'cuban': 'Cuba', 'ethiopian': 'Ethiopia', 'kenyan': 'Kenya',
+    'somali': 'Somalia', 'libyan': 'Libya', 'algerian': 'Algeria',
+    'moroccan': 'Morocco', 'tunisian': 'Tunisia', 'qatari': 'Qatar',
+}
+
+# Names shared by a sovereign country and a US state — when the article is
+# clearly US-focused, the state reading wins (observed live: "Biden wins Georgia
+# recount" geocoded to the country Georgia rather than the US state).
+_US_STATE_COUNTRY_COLLISIONS = {'georgia'}
+# US context signal. "US" matched case-sensitively (uppercase) so the pronoun
+# "us" doesn't fire; the rest are case-insensitive.
+_US_CONTEXT_RE = re.compile(
+    r'\bUS\b|(?i:\bU\.S\.?A?\b|\bunited states\b|\bamerican\b|\bwashington\b)'
+)
 
 
 def _norm(name: str) -> str:
@@ -159,6 +193,20 @@ def country_of_city(city: str) -> str | None:
     n = _norm(city)
     record = _city_index().get(_CITY_ALIASES.get(n, n))
     return record[2] if record else None
+
+
+def city_country_conflict(city: str | None, country: str | None) -> bool:
+    """True if *city* and *country* both resolve but disagree — e.g. a NER
+    span found a real city ("Kyiv") paired with an unrelated country mention
+    picked up elsewhere in the text ("Russia"), producing a self-contradictory
+    location like "Kyiv, Russia". Callers should trust the city's own
+    (gazetteer-verified) country over a stray/mismatched country mention when
+    this returns True."""
+    if not city or not country:
+        return False
+    resolved = country_of_city(city)
+    paired = canonical_country(country)
+    return bool(resolved and paired and resolved != paired)
 
 
 def geocode(city: str | None, country: str | None = None) -> tuple[float | None, float | None]:
@@ -205,8 +253,17 @@ def _country_pattern() -> re.Pattern:
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _demonym_pattern() -> re.Pattern:
+    """Alternation over every demonym (longest first)."""
+    ordered = sorted(_DEMONYMS, key=len, reverse=True)
+    return re.compile(r'\b(' + '|'.join(re.escape(d) for d in ordered) + r')\b', re.IGNORECASE)
+
+
 def find_place(text: str) -> str | None:
-    """First country/territory mentioned in *text* (gazetteer + alias scan).
+    """First country/territory mentioned in *text* (gazetteer + alias scan),
+    falling back to a demonym scan ("Russian" → Russia) so a headline that never
+    names the country outright still locates.
 
     Cheap headline fallback for when NER is unavailable or finds no location —
     returns a name suitable for the ``country`` argument of ``geocode()``.
@@ -214,4 +271,26 @@ def find_place(text: str) -> str | None:
     if not text:
         return None
     m = _country_pattern().search(text)
-    return m.group(1) if m else None
+    return m.group(1) if m else find_demonym(text)
+
+
+def find_demonym(text: str) -> str | None:
+    """Country from the first unambiguous demonym in *text* ("Russian" → Russia),
+    or None. Unlike find_place this scans demonyms *only* — no country-name pass —
+    so it is safe to run even when NER already found (and we excluded) a
+    place-name/surname collision: a demonym is never a person-name span, so it
+    can't re-introduce that false positive."""
+    if not text:
+        return None
+    dm = _demonym_pattern().search(text)
+    return _DEMONYMS[dm.group(1).lower()] if dm else None
+
+
+def resolve_state_country_collision(country: str | None, text: str | None) -> str | None:
+    """Return 'United States' when *country* is a name shared by a US state and a
+    foreign country (Georgia) and *text* is clearly US-focused; otherwise return
+    *country* unchanged. Guards the NER/gazetteer against reading the US state
+    "Georgia" as the Caucasus country."""
+    if country and _norm(country) in _US_STATE_COUNTRY_COLLISIONS and _US_CONTEXT_RE.search(text or ''):
+        return 'United States'
+    return country

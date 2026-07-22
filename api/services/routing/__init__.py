@@ -22,6 +22,7 @@ def route_event(event) -> list[dict]:
             getattr(event, 'avg_finbert_sentiment', None),
             getattr(event, 'avg_sentiment', None),
         ),
+        intensity=getattr(event, 'avg_intensity', None),
     )
 
 

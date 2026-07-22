@@ -5,6 +5,24 @@ from django.db import models
 from django_mongodb_backend.managers import MongoManager
 
 
+class AliveMongoManager(MongoManager):
+    """Default Article manager — hides soft-deleted rows (is_deleted=True) from
+    every ordinary query, so junk (non-article pages, raw-URL/paywall stubs the
+    processing path flags via services.data.bodies.is_junk_article) is excluded
+    from the pipeline, the API, and the map without a per-query filter. Reach
+    the full set (the code that SETS is_deleted, admin, debugging) through
+    Article.all_objects."""
+
+    def get_queryset(self):
+        # exclude(is_deleted=True), NOT filter(is_deleted=False): in MongoDB the
+        # latter ({is_deleted: false}) does not match documents where the field
+        # is ABSENT, which would hide every pre-migration article until each was
+        # rewritten. `$ne: true` matches absent-or-false, so the field
+        # materializes lazily as (deferred) annotate writes it — no backfill,
+        # no slow deploy.
+        return super().get_queryset().exclude(is_deleted=True)
+
+
 class SourceType(models.TextChoices):
     WEBSITE = 'website'
     API = 'api'
@@ -195,10 +213,24 @@ class Article(models.Model):
     title_embedding = models.JSONField(default=list, blank=True)
     title_embedding_model = models.CharField(max_length=128, null=True, blank=True)
 
-    objects = MongoManager()
+    # Soft-delete: junk rows (non-article pages, raw-URL/paywall stubs — see
+    # services.data.bodies.is_junk_article) are kept as training data but hidden
+    # from every ordinary query by the default manager (AliveMongoManager). The
+    # processing path sets this lazily (only junk gets is_deleted=True written);
+    # existing rows leave the field absent, matched as not-deleted. Nothing
+    # hard-deletes (see the no-deletion policy). No db_index: the field is
+    # low-selectivity (almost everything is not-deleted) so an index barely
+    # helps, and skipping it keeps the AddField migration a no-op on Mongo.
+    is_deleted = models.BooleanField(default=False)
+
+    objects = AliveMongoManager()   # default — excludes is_deleted=True
+    all_objects = MongoManager()    # full set, including soft-deleted
 
     class Meta:
         ordering = ['-created_on']
+        # Internals (related-object fetches, refresh_from_db) use the unfiltered
+        # manager so a soft-deleted row still resolves via FK and never breaks.
+        base_manager_name = 'all_objects'
         indexes = [
             models.Index(fields=['created_on']),
             models.Index(fields=['source_code']),

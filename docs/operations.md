@@ -18,6 +18,14 @@ which dispatches jobs via `manage.py run_task`. `bootstrap_initial_data_task` is
 To re-run it manually: the admin dashboard **Re-run bootstrap** button (forces past the
 guard), or `enqueue(bootstrap_initial_data_task, True)`.
 
+**Egress proxies (optional).** At scale the backfill bottleneck is per-IP rate
+limiting / IP blocks from news sites and the Wayback Machine, not CPU. Setting
+`EGRESS_PROXY_POOL` (article-page fetches) and/or `WAYBACK_PROXY_POOL` (Wayback
+requests) to a comma-separated list of proxy URLs rotates requests across egress
+IPs — direct-first, then a blocked request (403/429/503) retries from a fresh IP
+(`services/data/proxy.py`). All unset = every request goes direct (the default);
+the legacy single `WAYBACK_PROXY_URL` still works and folds into the pool.
+
 ## The stage-registry pipeline (tick → fan-out worker)
 
 The pipeline is **not** a set of per-step dispatcher/worker task pairs — it's a
@@ -30,6 +38,8 @@ single registry (`services/stages.py`) executed by exactly two Celery tasks (see
 | `run_stage_chunk_task(stage_name, ids)` | The only fan-out worker — executes one stage's handler over one chunk of ids — runs on the stage's own queue (`default`/`heavy`) |
 | `dispatch_stage_task(stage_name)` | Force-dispatches one stage, skipping the cadence gate (admin buttons, manual repair) |
 | `backfill_history_task` → `backfill_day_chunk_task(day, source_codes)` | Historical backfill dispatcher (separate from the live-pipeline `fetch` stage) — one day × `BACKFILL_CHUNK_SIZE` sources, fetches+saves+annotates inline; see `services/data/historical.py` |
+| `healing_task` (manual, `bulk`) | Corpus repair — walks the whole history week by week, re-dispatching every article still short of a terminal stage (`fetched`/`refine`) to `heavy` for annotate/refine and re-aggregating each week. No cron entry; run from the dashboard Actions tab or `run_task healing_task --sync`. |
+| `reprocess_articles_task` (manual, `bulk`) | Classifier/taxonomy rollout — same week-by-week walk but re-annotates **every** article, terminal rows included, to apply a model change without a fresh backfill. `source_code=` narrows; `rehydrate=True` re-fetches bodies first. Dashboard Actions → "Re-annotate corpus", or `run_task reprocess_articles_task --sync`. |
 
 Each stage in the registry declares its own `chunk_size`/`limit`/`queue`/
 `every_minutes` — to change a stage's throughput, edit its entry in
@@ -91,8 +101,9 @@ coverage panel.
 - **LLM providers** — per-provider ok/err/avg-ms + active debounce cooldowns.
 - **Forecast model** — artifact mtimes, last forecast, live directional accuracy.
 - **Actions** — run full sync, backfill prices/articles (incl. "until date"),
-  retrain forecast, re-run bootstrap, and **cancel a job** by Celery task id
-  (`app.control.revoke`).
+  **Re-annotate corpus** (`reprocess_articles_task`) and corpus **healing**
+  (`healing_task`), retrain forecast, re-run bootstrap, and **cancel a job** by
+  Celery task id (`app.control.revoke`).
 
 Per-record reprocessing is also available from the `Article`/`Event` changelists: the
 **"pipeline gap"** filter narrows to records stuck at a stage, and bulk actions

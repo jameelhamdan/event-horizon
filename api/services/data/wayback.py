@@ -105,10 +105,12 @@ _throttle_lock = threading.Lock()
 _last_request_at = 0.0
 
 
-def _proxies() -> dict | None:
-    from django.conf import settings
-    proxy = getattr(settings, 'WAYBACK_PROXY_URL', '')
-    return {'http': proxy, 'https': proxy} if proxy else None
+def _proxy_attempt_order() -> list:
+    """Egress hops to cycle through across a request's retries: direct first,
+    then the WAYBACK_PROXY_POOL (legacy WAYBACK_PROXY_URL folded in). Empty pool
+    → [None], i.e. always-direct (unchanged behaviour)."""
+    from services.data.proxy import WAYBACK_PROXIES
+    return WAYBACK_PROXIES.attempt_order()
 
 
 def _throttle() -> None:
@@ -131,14 +133,18 @@ def _wayback_get(
     (empty CDX results come back 200 + '[]'); non-200s and connection errors
     are treated as throttling and retried. Returns None on exhaustion or when
     the deadline would be crossed."""
+    from services.data.proxy import as_proxies
+    order = _proxy_attempt_order()
     for attempt in range(retries + 1):
         if deadline is not None and datetime.datetime.now(datetime.timezone.utc) >= deadline:
             return None
         _throttle()
         try:
+            # Rotate egress IP per retry (direct first) — a per-IP throttle/block
+            # on one hop retries from the next.
             resp = requests.get(
                 url, params=params, headers=_HTTP_HEADERS,
-                timeout=timeout, proxies=_proxies(),
+                timeout=timeout, proxies=as_proxies(order[attempt % len(order)]),
             )
             if resp.status_code == 200:
                 return resp

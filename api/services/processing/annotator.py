@@ -28,7 +28,10 @@ import logging
 import re
 
 from services.processing._lazy import lazy_loader
-from services.processing.geocode import canonical_country, country_of_city, find_place, geocode, is_city
+from services.processing.geocode import (
+    canonical_country, city_country_conflict, country_of_city, find_demonym, find_place, geocode,
+    is_city, resolve_state_country_collision,
+)
 from services.processing.taxonomy import PRIORS, PROTOTYPES
 from settings.model_names import NER_MODEL_NAME
 
@@ -40,6 +43,18 @@ logger = logging.getLogger(__name__)
 # classification itself still stands either way, this only decides who gets a
 # second opinion.
 ESCALATE_BELOW = 0.45
+# general/other carries many broad prototypes (sports/tech/culture/crime/…) that
+# vacuum up borderline events and narrowly outscore a specific category — a real
+# conflict/political/economic headline lost to general by a hair strands the
+# event (no routing, floor intensity). When general wins the argmax but a
+# specific category's best prototype is within this cosine margin, prefer the
+# specific one: a false 'general' is more costly than a false specific.
+GENERAL_TIEBREAK_MARGIN = 0.04
+# …but only when the specific candidate is a meaningful match, not noise: below
+# this cosine, no prototype really fits (the whole row escalates to refine
+# anyway) and flipping general→specific just swaps one bad guess for another
+# (observed: a 0.09-cosine "car attack" row flipping general→disaster/storm).
+GENERAL_TIEBREAK_MIN_SPECIFIC = 0.30
 # When picking a sub-category *within* a fixed category (refiner verdicts), a
 # prototype match weaker than this doesn't justify a specific sub.
 _SUB_FLOOR = 0.25
@@ -255,18 +270,54 @@ class NLPAnnotator:
     # ── classification ────────────────────────────────────────────────────────
 
     def classify_batch(self, texts: list[str]) -> list[tuple[str, str | None, float]]:
-        """Nearest-prototype (category, sub_category, cosine confidence) per
-        text. No escalation here — the caller compares confidence against
-        ESCALATE_BELOW to route low-confidence articles to the refine stage."""
+        """(category, sub_category, confidence) per text.
+
+        Primary decision is zero-shot NLI *entailment* — what the story is about
+        — decided at the category level, with sub-category picked hierarchically
+        within it (services.processing.refiner.classify_zeroshot, single fast
+        model). Entailment replaced the old nearest-prototype cosine argmax,
+        which scored topical word-overlap and pulled company names ("Steward
+        Health Care") or incidental mentions ("covid") into the wrong category.
+        Nearest-prototype cosine remains the fallback for any row the zero-shot
+        model can't score (ZEROSHOT_ENABLED off, or a chunk failure). No
+        escalation here — the caller compares confidence against ESCALATE_BELOW
+        to route low-confidence rows to the refine ensemble."""
+        from services.processing.refiner import classify_zeroshot
+
+        results = classify_zeroshot(texts, single=True, downgrade_to_general=False)
+        missing = [i for i, (cat, _sub, _conf) in enumerate(results) if cat is None]
+        if missing:
+            fallback = self._classify_cosine([texts[i] for i in missing])
+            for i, res in zip(missing, fallback):
+                results[i] = res
+        return results
+
+    def _classify_cosine(self, texts: list[str]) -> list[tuple[str, str | None, float]]:
+        """Nearest-prototype (category, sub_category, cosine) — the fallback when
+        the zero-shot classifier is unavailable. Retains the general tie-break
+        (a specific category narrowly beaten by general's broad prototypes wins,
+        when the specific match is meaningful)."""
+        if not texts:
+            return []
         from sentence_transformers import util
         from services.processing.clustering import get_clusterer
 
         pairs, proto_emb = _prototypes()
+        specific_rows = [j for j, p in enumerate(pairs) if p[0] != 'general']
         sim = util.cos_sim(get_clusterer().encode(texts), proto_emb)
         results = []
         for i in range(len(texts)):
-            best = int(sim[i].argmax())
-            results.append((*pairs[best], float(sim[i][best])))
+            row = sim[i]
+            best = int(row.argmax())
+            cat, sub = pairs[best]
+            score = float(row[best])
+            if cat == 'general' and specific_rows:
+                spec_best = specific_rows[int(row[specific_rows].argmax())]
+                spec_score = float(row[spec_best])
+                if spec_score >= GENERAL_TIEBREAK_MIN_SPECIFIC and score - spec_score <= GENERAL_TIEBREAK_MARGIN:
+                    cat, sub = pairs[spec_best]
+                    score = spec_score
+            results.append((cat, sub, score))
         return results
 
     # ── geography ─────────────────────────────────────────────────────────────
@@ -277,20 +328,39 @@ class NLPAnnotator:
         country scan when NER is unavailable or finds nothing."""
         ner = _ner_pipeline()
         entities: list[list[str]] = [[] for _ in texts]
+        # Whether NER found at least one raw LOC span before the person-name
+        # filter below, per text — distinguishes "NER found nothing" (the
+        # regex fallback below is meant for this) from "NER found a place
+        # name but we deliberately excluded it as a person-name collision"
+        # (falling back to a raw regex scan of the same text would just
+        # rediscover the same false positive, since the surname and the
+        # place name are spelled identically).
+        had_raw_loc = [False] * len(texts)
         if ner is not None:
             try:
                 raw = ner(texts, batch_size=8)
                 if texts and isinstance(raw[0], dict):
                     raw = [raw]
-                entities = [
-                    [e['word'] for e in ents if e.get('entity_group') == 'LOC' and float(e.get('score', 0)) >= 0.5]
-                    for ents in raw
-                ]
+                for i, ents in enumerate(raw):
+                    # A place name that's also a common surname ("Jordan" in
+                    # "Jim Jordan") occasionally gets mistagged LOC by the NER
+                    # model — confirmed live (House Speaker race geocoded to
+                    # the country Jordan). Any PER span in the same text is a
+                    # same-document signal the model saw it as part of a
+                    # person's name; drop a LOC span whose word is also a
+                    # token of a PER span rather than trusting it as a place.
+                    person_tokens = {
+                        tok for e in ents if e.get('entity_group') == 'PER'
+                        for tok in e['word'].strip().lower().split()
+                    }
+                    raw_locs = [e for e in ents if e.get('entity_group') == 'LOC' and float(e.get('score', 0)) >= 0.5]
+                    had_raw_loc[i] = bool(raw_locs)
+                    entities[i] = [e['word'] for e in raw_locs if e['word'].strip().lower() not in person_tokens]
             except Exception:
                 logger.exception('[ner] entity extraction failed (%d text(s))', len(texts))
 
         results = []
-        for text, ents in zip(texts, entities):
+        for text, ents, had_loc in zip(texts, entities, had_raw_loc):
             city = country = None
             for name in ents:
                 canonical = canonical_country(name)
@@ -304,8 +374,19 @@ class NLPAnnotator:
                 if city and country:
                     break
             if city is None and country is None:
-                country = find_place(text)
+                # NER resolved no place. If it found no LOC span at all, a full
+                # country-name + demonym scan is safe. If it *did* find a LOC we
+                # excluded (a place-name/surname collision), only the demonym
+                # scan is safe — a country-name scan would rediscover the same
+                # false positive, but a demonym never collides with a person span.
+                country = find_place(text) if not had_loc else find_demonym(text)
+            country = resolve_state_country_collision(country, text)
             if city and country and city.strip().lower() == country.strip().lower():
                 city = None  # avoid 'Mexico, Mexico'
+            elif city_country_conflict(city, country):
+                # Self-contradictory pair (e.g. "Kyiv, Russia") — a real city
+                # found via the gazetteer beats an unrelated country mention
+                # picked up elsewhere in the text; trust the city's own country.
+                country = country_of_city(city)
             results.append((city, country))
         return results

@@ -169,12 +169,16 @@ def route_event_to_weighted_symbols(
     topic_slugs: list[str],
     sub_categories: list[str] | None = None,
     sentiment: float | None = None,
+    intensity: float | None = None,
 ) -> list[dict]:
     """Return ``[{'symbol': str, 'weight': float}]`` for the affected indicators.
 
     ``weight`` is the deterministic product described in the module docstring,
     signed by ``asymmetric_sentiment``. Magnitude is clamped to [0, 1] after the
-    sentiment sign is applied; the sign is retained.
+    sentiment sign is applied; the sign is retained. ``intensity`` (the event's
+    0–1 severity, e.g. Event.avg_intensity) scales magnitude so a major event
+    outweighs a routine one on the same symbol — a neutral event (intensity None)
+    is unchanged.
     """
     symbols = route_event_to_symbols(category, location, topic_slugs)
     if not symbols:
@@ -190,11 +194,14 @@ def route_event_to_weighted_symbols(
     sent = asymmetric_sentiment(sentiment)
     sign = 1.0 if sent >= 0 else -1.0
     sent_mag = min(abs(sent), 1.0)
+    # Severity scaler in [0.6, 1.0]: full weight for a severe event, damped for a
+    # routine one; None (unknown) leaves weight unchanged so behavior is stable.
+    intensity_factor = 1.0 if intensity is None else 0.6 + 0.4 * max(0.0, min(intensity, 1.0))
 
     weighted: list[dict] = []
     for sym in symbols:
         sym_affinity = SYMBOL_AFFINITY.get((category, sym), _DEFAULT_SYMBOL_AFFINITY)
-        magnitude = sub_affinity * sym_affinity * crisk * max(sent_mag, 0.1)
+        magnitude = sub_affinity * sym_affinity * crisk * max(sent_mag, 0.1) * intensity_factor
         magnitude = min(magnitude, 1.0)
         weighted.append({'symbol': sym, 'weight': round(sign * magnitude, 4)})
     return weighted

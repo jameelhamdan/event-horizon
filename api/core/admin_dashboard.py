@@ -74,6 +74,10 @@ def _handle_action(request):
             _handle_backfill_until(request)
         elif action == 'annotate_deferred':
             _handle_annotate_deferred(request)
+        elif action == 'heal_pipeline':
+            _handle_heal_pipeline(request)
+        elif action == 'reannotate_corpus':
+            _handle_reannotate_corpus(request)
         elif action == 'retrain_forecast':
             enqueue(T.train_forecast_model_task, queue='bulk', job_timeout=-1)
             enqueue(T.run_forecast_task, queue='bulk', job_timeout=-1)
@@ -165,6 +169,15 @@ def _parse_date_range(request, required: bool):
     return parsed['start_date'], parsed['end_date']
 
 
+def _period_phrase(start_date, end_date, if_blank: str) -> str:
+    """' for <start> → <end>' if a range was given, else ``if_blank`` — the
+    shared phrasing for action messages whose range is optional (annotate
+    deferred, healing)."""
+    if start_date is None:
+        return if_blank
+    return f' for {start_date.date()} → {end_date.date()}'
+
+
 def _handle_backfill_until(request):
     """Backfill articles over an explicit [start_date, end_date) range.
 
@@ -208,9 +221,49 @@ def _handle_annotate_deferred(request):
         start_date=start_date, end_date=end_date,
         queue='bulk', job_timeout=-1,
     )
-    period = f' for {start_date.date()} → {end_date.date()}' if start_date else ''
+    period = _period_phrase(start_date, end_date, '')
     _ok(request, f'Deferred-article annotation dispatched (up to {limit}{period}, onto the heavy queue) — '
                   'check the "Deferred" row in Article states below, re-run once it hits 0.')
+
+
+def _handle_heal_pipeline(request):
+    """Dispatch a healing_task pass, optionally narrowed to one date range
+    (blank = the whole historical corpus, from the earliest article on
+    record)."""
+    from services.queue import enqueue
+    from services import tasks as T
+
+    date_range = _parse_date_range(request, required=False)
+    if date_range is None:
+        return
+    start_date, end_date = date_range
+    enqueue(T.healing_task, start_date=start_date, end_date=end_date, queue='bulk', job_timeout=-1)
+    period = _period_phrase(start_date, end_date, ' across the entire historical corpus')
+    _ok(request, f'Healing pass dispatched{period} — walks week by week onto the heavy queue. '
+                  'Safe to re-run if a pass doesn\'t fully settle in one go.')
+
+
+def _handle_reannotate_corpus(request):
+    """Dispatch reprocess_articles_task — re-run the annotate pass over EVERY
+    article (already-classified rows included) to roll a classifier/taxonomy
+    upgrade across the corpus. Optional date range (blank = whole corpus) and
+    rehydrate toggle (also re-fetch bodies through the current extractor)."""
+    from services.queue import enqueue
+    from services import tasks as T
+
+    date_range = _parse_date_range(request, required=False)
+    if date_range is None:
+        return
+    start_date, end_date = date_range
+    rehydrate = request.POST.get('rehydrate') in ('1', 'true', 'on')
+    enqueue(
+        T.reprocess_articles_task, start_date=start_date, end_date=end_date,
+        rehydrate=rehydrate, queue='bulk', job_timeout=-1,
+    )
+    period = _period_phrase(start_date, end_date, ' across the entire historical corpus')
+    extra = ' + body rehydrate' if rehydrate else ''
+    _ok(request, f'Re-annotation dispatched{period}{extra} — walks week by week onto the heavy queue, '
+                  're-classifying already-processed rows. Safe to re-run.')
 
 
 def _handle_run_stream(request):
@@ -598,6 +651,11 @@ _CATEGORY_COLORS = {
     'crime': '#c9648c',
 }
 _ARTICLES_LINE_COLOR = '#e8e8e8'
+# Annotated/refined slots — validated as a categorical pair against this
+# dashboard's dark chart surface (scripts/validate_palette.js in the dataviz
+# skill: lightness band, chroma floor, CVD separation, contrast all pass).
+_ANNOTATED_COLOR = '#3987e5'
+_REFINED_COLOR = '#d95926'
 
 _CHART_W, _CHART_H = 900, 260
 _CHART_PAD_L, _CHART_PAD_R, _CHART_PAD_T, _CHART_PAD_B = 40, 40, 10, 26
@@ -624,11 +682,13 @@ def _month_buckets(months_back):
 
 
 def _activity_chart():
-    """Events per month (stacked by category) plus articles per month, for
-    the last 10 years — exact counts of what's actually in the database. No
-    deletion/capping task exists anywhere in the pipeline (every article is
-    kept as training data — see CLAUDE.md), so these are true totals, not a
-    sample or a slice.
+    """Two per-month series for the last 10 years, feeding the two charts
+    rendered below (_render_events_chart_svg / _render_processing_chart_svg):
+    Events (stacked by category) and Articles-by-processing-depth (Annotated
+    + Refined, stacked, against a total-ingested reference line) — exact
+    counts of what's actually in the database. No deletion/capping task
+    exists anywhere in the pipeline (every article is kept as training data —
+    see CLAUDE.md), so these are true totals, not a sample or a slice.
 
     Events are fetched as one ranged query (``category``, ``started_at``
     only) and bucketed in Python — the codebase bans the ``__date`` ORM
@@ -661,10 +721,15 @@ def _activity_chart():
                 counts[row['category']] = counts.get(row['category'], 0) + 1
                 break
 
-    article_counts = [
-        Article.objects.filter(published_on__gte=start, published_on__lt=end).count()
-        for start, end, _label in buckets
-    ]
+    # Three counts per bucket (ingested / annotated / refined) instead of one —
+    # same per-bucket .count() approach as before, just filtered further, so
+    # this stays index-served rather than pulling rows into Python.
+    article_counts, annotated_counts, refined_counts = [], [], []
+    for start, end, _label in buckets:
+        qs = Article.objects.filter(published_on__gte=start, published_on__lt=end)
+        article_counts.append(qs.count())
+        annotated_counts.append(qs.filter(stage=Article.STAGE_ANNOTATED).count())
+        refined_counts.append(qs.filter(stage=Article.STAGE_REFINED).count())
 
     category_labels = dict(EventCategory.choices)
     categories = [c for c in category_labels if any(b.get(c) for b in event_counts)]
@@ -682,110 +747,174 @@ def _activity_chart():
             }
             for c in categories
         ],
+        'events_svg': _render_events_chart_svg(labels, categories, series, category_labels),
+        'processing_svg': _render_processing_chart_svg(labels, annotated_counts, refined_counts, article_counts),
         'articles_total': sum(article_counts),
+        'annotated_total': sum(annotated_counts),
+        'refined_total': sum(refined_counts),
+        'annotated_color': _ANNOTATED_COLOR,
+        'refined_color': _REFINED_COLOR,
         'articles_color': _ARTICLES_LINE_COLOR,
-        'series': series,
-        'svg': _render_activity_chart_svg(labels, categories, series, article_counts, category_labels),
     }
 
 
-def _render_activity_chart_svg(labels, categories, series, article_counts, category_labels):
-    """Server-rendered stacked-area SVG with an overlaid articles line on a
-    secondary (right) axis — no JS charting library exists anywhere in this
-    repo (the React frontend's Recharts dep doesn't reach the Django admin),
-    so this draws the chart directly in Python rather than pulling in a new
-    client-side dependency for one graph. Events and articles differ by
-    orders of magnitude in volume, hence the separate axes.
+# Shared SVG geometry/chrome for both activity charts below. No JS charting
+# library exists anywhere in this repo (the React frontend's Recharts dep
+# doesn't reach the Django admin), so these draw directly in Python rather
+# than pulling in a new client-side dependency. Each chart gets its own single
+# y-axis — events and article-processing volume differ by orders of
+# magnitude, so per the dataviz method they're two charts, not one chart with
+# two y-scales (a dual axis conflates two different scales into one
+# misleading line).
+_PLOT_W = _CHART_W - _CHART_PAD_L - _CHART_PAD_R
+_PLOT_H = _CHART_H - _CHART_PAD_T - _CHART_PAD_B
 
-    Per-month hover: a transparent full-height rect per bucket carries the
-    month's breakdown in a data-tooltip attribute; the tiny JS snippet in
-    dashboard.html just positions a div from that attribute on mousemove —
-    still no charting library, just enough JS to place a tooltip.
-    """
+
+def _px(i, n):
+    return _CHART_PAD_L + (_PLOT_W * i / (n - 1) if n > 1 else _PLOT_W / 2)
+
+
+def _py(v, scale):
+    return _CHART_PAD_T + _PLOT_H - (_PLOT_H * v / scale)
+
+
+def _nice_max(v):
     import math
+    v = max(v, 1)
+    magnitude = 10 ** max(len(str(int(v))) - 1, 0)
+    return int(math.ceil(v / magnitude) * magnitude) or 1
+
+
+def _chart_svg_open(aria_label):
+    return f'<svg viewBox="0 0 {_CHART_W} {_CHART_H}" class="ops-chart-svg" role="img" aria-label="{aria_label}">'
+
+
+def _chart_gridlines(y_max):
+    """Single left-axis gridlines + labels (0/25/50/75/100%)."""
+    parts = []
+    for frac in (0, 0.25, 0.5, 0.75, 1.0):
+        gy = _py(y_max * frac, y_max)
+        parts.append(
+            f'<line x1="{_CHART_PAD_L}" y1="{gy:.1f}" x2="{_CHART_W - _CHART_PAD_R}" y2="{gy:.1f}" '
+            f'class="ops-chart-gridline"/>'
+        )
+        parts.append(
+            f'<text x="{_CHART_PAD_L - 6}" y="{gy:.1f}" class="ops-chart-axis-label" '
+            f'text-anchor="end" dominant-baseline="middle">{int(y_max * frac)}</text>'
+        )
+    return parts
+
+
+def _chart_x_labels(labels):
+    """X-axis labels, thinned to roughly one per year over a 10y window."""
     from django.utils.html import escape
+    n = len(labels)
+    step = max(1, n // 10)
+    return [
+        f'<text x="{_px(i, n):.1f}" y="{_CHART_H - 6}" class="ops-chart-axis-label" '
+        f'text-anchor="middle">{escape(labels[i])}</text>'
+        for i in range(0, n, step)
+    ]
+
+
+def _chart_hover_rects(n, tooltip_lines):
+    """One transparent full-height rect per bucket (drawn last, on top),
+    spanning the midpoints to its neighbors, each carrying that month's
+    breakdown in a data-tooltip attribute — the tiny JS snippet in
+    dashboard.html positions a div from it on mousemove. tooltip_lines is a
+    list (one per bucket) of list[str]."""
+    from django.utils.html import escape
+    plot_left, plot_right = _CHART_PAD_L, _CHART_W - _CHART_PAD_R
+    parts = []
+    for i in range(n):
+        x_left = plot_left if i == 0 else (_px(i - 1, n) + _px(i, n)) / 2
+        x_right = plot_right if i == n - 1 else (_px(i, n) + _px(i + 1, n)) / 2
+        tooltip = escape('\n'.join(tooltip_lines[i]))
+        parts.append(
+            f'<rect x="{x_left:.1f}" y="{_CHART_PAD_T}" width="{(x_right - x_left):.1f}" '
+            f'height="{_PLOT_H:.1f}" class="ops-chart-hover" data-tooltip="{tooltip}"/>'
+        )
+    return parts
+
+
+def _stacked_area_path(counts, base, n, y_max):
+    """One <path> for a stacked-area layer sitting on top of ``base`` (the
+    running cumulative from lower layers). Returns (path_d, new_base)."""
+    top = [base[i] + counts[i] for i in range(n)]
+    pts_top = [(_px(i, n), _py(top[i], y_max)) for i in range(n)]
+    pts_bottom = [(_px(i, n), _py(base[i], y_max)) for i in range(n)][::-1]
+    d = 'M ' + ' L '.join(f'{x:.1f},{y:.1f}' for x, y in pts_top + pts_bottom) + ' Z'
+    return d, top
+
+
+def _render_events_chart_svg(labels, categories, series, category_labels):
+    """Stacked-area SVG, one axis (events per month, by category)."""
     from django.utils.safestring import mark_safe
 
     n = len(labels)
     if not n:
         return mark_safe('')
 
-    def nice_max(v):
-        v = max(v, 1)
-        magnitude = 10 ** max(len(str(int(v))) - 1, 0)
-        return int(math.ceil(v / magnitude) * magnitude) or 1
-
     event_totals = [sum(series[c][i] for c in categories) for i in range(n)] if categories else [0] * n
-    y_max = nice_max(max(event_totals))
-    y2_max = nice_max(max(article_counts) if article_counts else 0)
+    y_max = _nice_max(max(event_totals))
 
-    plot_w = _CHART_W - _CHART_PAD_L - _CHART_PAD_R
-    plot_h = _CHART_H - _CHART_PAD_T - _CHART_PAD_B
+    parts = [_chart_svg_open('Events per month by category')]
+    parts += _chart_gridlines(y_max)
 
-    def px(i):
-        return _CHART_PAD_L + (plot_w * i / (n - 1) if n > 1 else plot_w / 2)
-
-    def py(v, scale):
-        return _CHART_PAD_T + plot_h - (plot_h * v / scale)
-
-    parts = [
-        f'<svg viewBox="0 0 {_CHART_W} {_CHART_H}" class="ops-chart-svg" '
-        f'role="img" aria-label="Events per month by category, with total articles per month">'
-    ]
-
-    # Gridlines + dual y-axis labels (0, 25%, 50%, 75%, 100%) — left = events, right = articles
-    for frac in (0, 0.25, 0.5, 0.75, 1.0):
-        gy = py(y_max * frac, y_max)
-        parts.append(
-            f'<line x1="{_CHART_PAD_L}" y1="{gy:.1f}" x2="{_CHART_W - _CHART_PAD_R}" y2="{gy:.1f}" '
-            f'class="ops-chart-gridline"/>'
-        )
-        parts.append(f'<text x="{_CHART_PAD_L - 6}" y="{gy:.1f}" class="ops-chart-axis-label" text-anchor="end" dominant-baseline="middle">{int(y_max * frac)}</text>')
-        parts.append(f'<text x="{_CHART_W - _CHART_PAD_R + 6}" y="{gy:.1f}" class="ops-chart-axis-label ops-chart-axis-label-r" text-anchor="start" dominant-baseline="middle">{int(y2_max * frac)}</text>')
-
-    # Stacked area layers, one path per category (left axis)
     cum = [0] * n
     for c in categories:
-        top = [cum[i] + series[c][i] for i in range(n)]
-        pts_top = [(px(i), py(top[i], y_max)) for i in range(n)]
-        pts_bottom = [(px(i), py(cum[i], y_max)) for i in range(n)][::-1]
-        path_pts = pts_top + pts_bottom
-        d = 'M ' + ' L '.join(f'{x:.1f},{y:.1f}' for x, y in path_pts) + ' Z'
+        d, cum = _stacked_area_path(series[c], cum, n, y_max)
         color = _CATEGORY_COLORS.get(c, '#666')
         parts.append(f'<path d="{d}" fill="{color}" fill-opacity="0.75" stroke="{color}" stroke-width="1"/>')
-        cum = top
 
-    # Total-articles overlay line (right axis)
-    line_pts = [(px(i), py(v, y2_max)) for i, v in enumerate(article_counts)]
-    line_d = 'M ' + ' L '.join(f'{x:.1f},{y:.1f}' for x, y in line_pts)
-    parts.append(f'<path d="{line_d}" fill="none" stroke="{_ARTICLES_LINE_COLOR}" stroke-width="2" stroke-dasharray="4 3"/>')
+    parts += _chart_x_labels(labels)
 
-    # X-axis labels — thin out to roughly one per year over a 10y window
-    step = max(1, n // 10)
-    for i in range(0, n, step):
-        parts.append(
-            f'<text x="{px(i):.1f}" y="{_CHART_H - 6}" class="ops-chart-axis-label" '
-            f'text-anchor="middle">{escape(labels[i])}</text>'
-        )
-
-    # Per-month hover targets (drawn last so they sit on top) — one
-    # transparent rect per bucket, spanning the midpoints to its neighbors,
-    # each carrying the month's breakdown as plain text for the tooltip JS.
-    plot_left, plot_right = _CHART_PAD_L, _CHART_W - _CHART_PAD_R
+    tooltip_lines = []
     for i in range(n):
-        x_left = plot_left if i == 0 else (px(i - 1) + px(i)) / 2
-        x_right = plot_right if i == n - 1 else (px(i) + px(i + 1)) / 2
         lines = [labels[i]]
         for c in categories:
             v = series[c][i]
             if v:
                 lines.append(f'{category_labels[c]}: {v}')
-        lines.append(f'Articles: {article_counts[i]}')
-        tooltip = escape('\n'.join(lines))
-        parts.append(
-            f'<rect x="{x_left:.1f}" y="{_CHART_PAD_T}" width="{(x_right - x_left):.1f}" '
-            f'height="{plot_h:.1f}" class="ops-chart-hover" data-tooltip="{tooltip}"/>'
-        )
+        tooltip_lines.append(lines)
+    parts += _chart_hover_rects(n, tooltip_lines)
+
+    parts.append('</svg>')
+    return mark_safe(''.join(parts))
+
+
+def _render_processing_chart_svg(labels, annotated_counts, refined_counts, article_counts):
+    """Stacked-area (Annotated + Refined — both terminal "fully analysed"
+    states, see Article states below) with a total-ingested reference line,
+    one axis (article count — same unit across all three series)."""
+    from django.utils.safestring import mark_safe
+
+    n = len(labels)
+    if not n:
+        return mark_safe('')
+
+    y_max = _nice_max(max(article_counts) if article_counts else 0)
+
+    parts = [_chart_svg_open('Articles processed per month by pipeline stage, vs. total ingested')]
+    parts += _chart_gridlines(y_max)
+
+    cum = [0] * n
+    for counts, color in ((annotated_counts, _ANNOTATED_COLOR), (refined_counts, _REFINED_COLOR)):
+        d, cum = _stacked_area_path(counts, cum, n, y_max)
+        parts.append(f'<path d="{d}" fill="{color}" fill-opacity="0.75" stroke="{color}" stroke-width="1"/>')
+
+    line_pts = [(_px(i, n), _py(v, y_max)) for i, v in enumerate(article_counts)]
+    line_d = 'M ' + ' L '.join(f'{x:.1f},{y:.1f}' for x, y in line_pts)
+    parts.append(f'<path d="{line_d}" fill="none" stroke="{_ARTICLES_LINE_COLOR}" stroke-width="2" stroke-dasharray="4 3"/>')
+
+    parts += _chart_x_labels(labels)
+
+    tooltip_lines = [
+        [labels[i], f'Annotated: {annotated_counts[i]}', f'Refined: {refined_counts[i]}',
+         f'Ingested: {article_counts[i]}']
+        for i in range(n)
+    ]
+    parts += _chart_hover_rects(n, tooltip_lines)
 
     parts.append('</svg>')
     return mark_safe(''.join(parts))

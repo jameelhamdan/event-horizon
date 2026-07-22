@@ -88,8 +88,14 @@ broken stream shows up as a FAILED `TaskRun`, not as "no new records".
   cron downtime longer than the fetch interval never silently drops articles
   published during the gap.
 - RSS via feedparser today; website/API adapters are the growth path.
+- **Body extraction** (`services/data/bodies.py`) runs trafilatura first — a
+  maintained main-content extractor that strips nav/share-bars/subscription
+  chrome — with the old regex pass as a fallback; a subscription-wall body is
+  dropped so callers fall back to Wayback or the paywall-free RSS summary.
 - Historical backfill is a **separate** one-shot dispatcher
   (`backfill_history_task`), not this stage — see [operations.md](operations.md).
+  Sitemap discovery skips non-article URLs up front (`is_non_article_url`:
+  tag/category/author/staff/advisor indexes, image-asset slugs, homepages).
 
 ```bash
 python manage.py fetch_data <source>              # cursor-based, same as the stage
@@ -157,11 +163,18 @@ article the `analyze` stage above didn't reach in time.
 `services/scoring/`. Chunks of 8; per-article handling, so one bad article can
 never fail its chunk.
 
+Before spending NLP, the pass **quarantines structural junk** (non-article
+pages, raw-URL/paywall stubs — `is_junk_article`): the row is soft-deleted
+(`is_deleted=True`, hidden by the default manager, see
+[data-model.md](data-model.md)) and stamped `processed_on`, kept as training
+data but excluded everywhere. Nothing hard-deletes.
+
 Per article, enrich in place:
 
 | Field | How |
 |-------|-----|
-| Category + **sub-category** | nearest taxonomy prototype by embedding cosine (shared MiniLM); the cosine confidence also decides the article's next stage |
+| **Category** | zero-shot NLI entailment — "what the story is *about*" — via the single fast `deberta-v3-base-zeroshot-v2.0` (`refiner.classify_zeroshot(single=True)`), with post-hoc evidence gates; the entailment confidence also decides the article's next stage |
+| **Sub-category** | nearest taxonomy prototype by embedding cosine (shared MiniLM) *within* the chosen category (`best_sub`), so a sub prototype can never drag in the wrong parent category |
 | Locations (country/city → lat/lng) | pretrained NER (`wikineural`) → gazetteer + aliases + country-of-city backfill; regex country-scan fallback |
 | Intensity | taxonomy prior + lexical severity cues (casualties, quake magnitude, escalation vocabulary) |
 | Importance (1.0–10.0) | intensity mapped to a 1–10 base, then source-weight multiplier + cross-source corroboration bonus + category floor |
@@ -170,15 +183,17 @@ Per article, enrich in place:
 | i18n (en/ar) | extractive English summary (leading sentences); Arabic generated locally (MarianMT) — skipped for lite/backfill articles |
 
 **Stage transition:** confident classification → `stage='annotated'` (terminal);
-cosine confidence below `ESCALATE_BELOW` → `stage='refine'`, queueing the
+entailment confidence below `ESCALATE_BELOW` → `stage='refine'`, queueing the
 article for the judge below. A *failed* annotation leaves `stage='fetched'` and
 is retried — no repair loop.
 
 **Two-level category taxonomy** (`EventCategory`): top-level stays small
 (`conflict, disaster, economic, political, health, general`); `sub_category`
-does the work (e.g. `monetary-policy`, `airstrike`, `earthquake`). Prototype
-sentences and intensity priors live in `taxonomy.py` — tuning classification is
-a data edit, not a code change.
+does the work (e.g. `monetary-policy`, `airstrike`, `earthquake`). Category
+decision lives in `refiner.py` (`classify_zeroshot`: the NLI hypothesis labels
+in `_ZEROSHOT_LABELS` + the evidence gates in `_apply_category_gates`); the
+sub-category prototype sentences and intensity priors live in `taxonomy.py`.
+Tuning is a data edit — new hypothesis labels or prototypes, not a code change.
 
 ```bash
 python manage.py process_articles --limit 5              # same predicate the stage uses

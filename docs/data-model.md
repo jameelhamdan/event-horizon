@@ -89,12 +89,13 @@ whichever judge most recently decided it.
 | `finbert_sentiment` | float \| null | **FinBERT** signed sentiment [-1, 1] — news-domain (new) |
 | `location` | str(255) \| null | `City, Country` — NER + gazetteer (`annotate`) or LLM-named + geocoded (`analyze`) |
 | `event_intensity` | float \| null | Rule-rated (`annotate`) or LLM-rated (`analyze`) newsworthiness/severity [0, 1] |
-| `category` | str → `EventCategory` | Top-level category (prototype classifier / LLM / judge) |
+| `category` | str → `EventCategory` | Top-level category (zero-shot NLI entailment on `annotate` / LLM on `analyze` / refine judge) |
 | `sub_category` | str(64) \| null | Sub-category within the top-level |
 | `processed_on` | datetime \| null | Set when analysis/annotation completes |
 | `stage` | str(16) | Pipeline position: `fetched → annotated \| refine → refined` (see [pipeline-state.md](pipeline-state.md)) — `analyze` and `annotate` both terminate at `annotated` |
 | `refined_on` | datetime \| null | Set when the refine stage re-judged the article |
 | `refined_by` | str \| null | Judge that produced the current verdict: `zeroshot` \| `ollama` \| `cloud` (see `REFINE_PROVIDER`) |
+| `is_deleted` | bool | Soft-delete flag for structural junk (non-article pages, raw-URL/paywall stubs — `services.data.bodies.is_junk_article`). The default manager (`AliveMongoManager`) hides `is_deleted=True` from every ordinary query via `exclude(is_deleted=True)` (matches absent-or-false, so the field materializes lazily — no backfill); reach the full set through `Article.all_objects`. Nothing hard-deletes (no-deletion policy — kept as training data). |
 | `importance_score` / `importance_source` | float \| str | 1–10 significance (rules post-processing over either analyzer's intensity) |
 | `banner_image_url` | URL(512) \| null | RSS media or OG-image fallback |
 | `latitude` / `longitude` | float \| null | Geocoded coordinates |

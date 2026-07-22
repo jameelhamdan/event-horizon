@@ -38,6 +38,9 @@ dependencies = [
 
     # HTML parsing
     "scrapling>=0.2.9",
+    # Main-article extraction (strips nav/boilerplate) — primary body extractor
+    # in services/data/bodies.py, with a regex fallback when it returns nothing.
+    "trafilatura>=2.0",
 
     # Geocoding
     "geonamescache>=3.0.0",

@@ -30,7 +30,7 @@ import re
 
 from services.processing._lazy import lazy_loader
 from services.processing.taxonomy import CATEGORIES, SUB_CATEGORIES
-from settings.model_names import ZEROSHOT_MODEL_NAME
+from settings.model_names import ZEROSHOT_MODEL_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -40,19 +40,29 @@ Verdict = dict | None
 
 # ── zero-shot provider ────────────────────────────────────────────────────────
 
-# Candidate labels (NLI hypothesis phrasing) → category slug. Several labels may
-# map to the same slug — 'general' gets two so that both product/culture stories
-# AND feature/opinion framing have a landing spot. Phrase labels as *what the
-# story is about* and keep 'economic' scoped to macro/markets so company-
-# adjacent tech news doesn't gravitate in (both tuned on live evals).
+# Candidate labels (NLI hypothesis phrasing) → category slug — the primary
+# category classifier for annotate and the refine second opinion (classify_zeroshot).
+# Several labels map to one slug on purpose: NLI is a set of independent binary
+# premise/hypothesis checks with poor cross-class calibration, so a single broad
+# label per category collides badly (measured live: sports & IPO stories pulled to
+# 'economic', tech-company news pulled to 'political'). The fix is vocabulary
+# augmentation — more, narrower hypotheses that each name concrete story shapes,
+# not fewer. Each category gets discriminative wording; 'general' carries dedicated
+# sports / tech-company / culture / human-interest labels so those beat the economic
+# & political hypotheses they used to lose to; 'economic' carries both a markets
+# label and a fiscal/budget label so government-finance stories don't read as
+# 'political'. Phrase every label as *what the story is about*. Tuned on live evals.
 _ZEROSHOT_LABELS: dict[str, str] = {
-    'a war, military strike or armed conflict that is happening': 'conflict',
-    'a natural disaster or serious accident': 'disaster',
-    'the economy: financial markets, trade, inflation, jobs or central banks': 'economic',
-    'politics, government, elections or diplomacy': 'political',
-    'health, disease or medicine': 'health',
-    'consumer technology, gadgets, sports, culture, entertainment or lifestyle': 'general',
-    'a feature story, product roundup, interview, podcast or opinion piece': 'general',
+    'a war, armed conflict, military strike, airstrike, or attack by armed forces or militants': 'conflict',
+    'a natural disaster, earthquake, flood, storm, wildfire, or a deadly accident': 'disaster',
+    'financial markets, stocks, an IPO, inflation, trade, tariffs, or central bank monetary policy': 'economic',
+    'the economy, a government budget, taxes, public spending, borrowing, debt, or fiscal policy': 'economic',
+    'a government, an election, legislation, a protest, a diplomatic summit, or relations between countries': 'political',
+    'a disease, medicine, public health, pregnancy, a hospital, or the healthcare system': 'health',
+    'a sports match, tournament, championship, race, or an athlete': 'general',
+    'consumer technology, a gadget, an app, a tech company, or an AI product': 'general',
+    'culture, entertainment, film, music, a celebrity, the arts, or lifestyle': 'general',
+    'an ordinary crime, a court trial, a human-interest story, or a personal profile': 'general',
 }
 _ZEROSHOT_TEMPLATE = 'This news article is about {}.'
 _ZEROSHOT_BATCH = 16
@@ -69,12 +79,175 @@ _CONFLICT_EVIDENCE = re.compile(
     re.I,
 )
 
-_zeroshot_pipeline = lazy_loader('zeroshot', 'ZEROSHOT_ENABLED', lambda: _build_zeroshot())
+# Same idea for best_sub's 'protest-policy' pick: its prototype text ("police
+# crackdown on protesters") embeds close to ordinary-crime phrasing like
+# "police shoot suspect" — observed live: a Reno casino shooting picked
+# protest-policy purely from "police shoot suspect" wording, with the site's
+# own nav chrome ("Election Voter Guide... National Politics...") bleeding
+# into content and dragging the category to 'political' too. Require actual
+# protest/demonstration vocabulary before trusting the sub-pick; otherwise
+# the story is ordinary crime, not policy unrest — drop to general/other.
+_PROTEST_EVIDENCE = re.compile(
+    r'\b(?:protest\w*|demonstrat\w*|riot\w*|rally|rallies|march(?:es)?|strike\w*|'
+    r'unrest|crackdown|activist\w*)\b',
+    re.I,
+)
 
+# Disaster⇄conflict disambiguation. A natural-disaster story often mentions the
+# political fallout (aid, junta, government response) and gets pulled to
+# 'conflict'; conversely a military strike ON infrastructure reads as an
+# industrial accident. These two gates use the concrete physical cause to
+# correct the verdict (measured misses: Myanmar earthquake -> conflict; Ukraine
+# drone strike on a refinery -> disaster/industrial-accident).
+_NATURAL_DISASTER_EVIDENCE = re.compile(
+    r'\b(?:earthquake|quake|aftershock\w*|magnitude|richter|tremor\w*|'
+    r'flood\w*|flash flood|wildfire\w*|bushfire\w*|hurricane|typhoon|cyclone|'
+    r'tornado|tsunami|landslide|mudslide|volcan\w*|eruption|drought|heatwave)\b',
+    re.I,
+)
+# Deliberate armed action — distinguishes a military strike from an accident.
+_MILITARY_ACTION = re.compile(
+    r'\b(?:airstrike|air strike|missile\w*|drone\w*|shell(?:ing|ed)?|bombard\w*|'
+    r'troops|soldier\w*|militant\w*|warplane\w*|struck|strikes?\b)\b',
+    re.I,
+)
+# A 'disaster' verdict must have a physical cause — a natural event OR an
+# accident. Without one, a "N killed/bodies found" story is a crime, not a
+# disaster (measured: cartel killings and a cult-leader killing were pulled to
+# disaster by casualty wording; a coral-bleaching feature too). Fails this gate
+# -> drop to general.
+_ACCIDENT_EVIDENCE = re.compile(
+    # Accident EVENT words only — not bare vehicle nouns (a "dump truck" in a
+    # cartel-killing story is not an accident; a real crash carries crash/
+    # derail/capsize/sank regardless of the vehicle).
+    r'\b(?:crash\w*|collision|collaps\w*|fire|blaze|explos\w*|blast|capsiz\w*|'
+    r'sank|sunk|shipwreck|derail\w*|accident\w*|spill|leak|turbulence|'
+    r'stampede|wreck\w*)\b',
+    re.I,
+)
 
-def _build_zeroshot():
+def _build_zeroshot(names):
+    """A zero-shot pipeline per model name."""
     from transformers import pipeline
-    return pipeline('zero-shot-classification', model=ZEROSHOT_MODEL_NAME)
+    return [pipeline('zero-shot-classification', model=name) for name in names]
+
+
+# Two loaders so the high-volume annotate pass (single=True) loads ONLY the one
+# fast 92% model — never the heavier ensemble member — keeping its memory
+# footprint within the heavy-queue cap. The full ensemble loads lazily only when
+# the refine second opinion actually runs (classify_zeroshot averages members).
+# A 'health' verdict needs real disease / care-delivery context. Zero-shot
+# entailment fires 'health' on incidental health words — a company *named*
+# "…Health Care", "public health threat" as an aside in an energy story — so a
+# health verdict without this evidence takes the best non-health category
+# instead (measured over-triggers: a solar-farm backlash and a hospital-chain
+# bankruptcy both pulled to health).
+_HEALTH_EVIDENCE = re.compile(
+    r'\b(?:disease\w*|virus\w*|viral|outbreak\w*|infect\w*|pandemic\w*|epidemic\w*|'
+    r'patient\w*|hospital\w*|clinic\w*|vaccin\w*|physician\w*|doctor\w*|nurse\w*|'
+    r'medicine|symptom\w*|illness\w*|cancer|diabet\w*|mental health|pregnan\w*|'
+    r'maternal|surger\w*|therap\w*|coronavirus|covid|\bWHO\b|health ministry|'
+    r'health\s+system|healthcare system|public health (?:emergency|crisis|official|agency))\b',
+    re.I,
+)
+
+_zeroshot_pipeline = lazy_loader('zeroshot', 'ZEROSHOT_ENABLED', lambda: _build_zeroshot(ZEROSHOT_MODEL_NAMES))
+_zeroshot_primary_pipeline = lazy_loader(
+    'zeroshot_primary', 'ZEROSHOT_ENABLED', lambda: _build_zeroshot(ZEROSHOT_MODEL_NAMES[:1]))
+
+
+def _apply_category_gates(category: str, text: str, downgrade_to_general: bool = True) -> str:
+    """Post-hoc evidence gates over a zero-shot category verdict.
+
+    Two kinds of correction:
+      * *lateral* disaster⇄conflict swaps by physical cause (a natural disaster
+        with political fallout misread as conflict; a military strike misread as
+        an accident) — always applied, they only ever correct one specific
+        category to another.
+      * *downgrade-to-general* (conflict/disaster with no concrete evidence) —
+        a precision patch for the low-recall refine second opinion. It is
+        DESTRUCTIVE: it flips real conflict/disaster stories that simply lack the
+        exact evidence vocabulary ("killed by forces", "blackout") to general.
+        Measured: it wrongly downgraded Gaza-casualty→general and blackout→
+        general. So the high-recall primary pass (annotate) sets
+        ``downgrade_to_general=False`` and trusts the 92% model's category;
+        only refine keeps the downgrades.
+    """
+    if category == 'conflict' and _NATURAL_DISASTER_EVIDENCE.search(text) and not _MILITARY_ACTION.search(text):
+        category = 'disaster'
+    elif category == 'disaster' and _MILITARY_ACTION.search(text) and _CONFLICT_EVIDENCE.search(text):
+        category = 'conflict'
+    if downgrade_to_general:
+        if category == 'conflict' and not _CONFLICT_EVIDENCE.search(text):
+            category = 'general'
+        if category == 'disaster' and not (_NATURAL_DISASTER_EVIDENCE.search(text) or _ACCIDENT_EVIDENCE.search(text)):
+            category = 'general'
+    return category
+
+
+def classify_zeroshot(
+    texts: list[str], single: bool = False, downgrade_to_general: bool = True,
+) -> list[tuple[str | None, str | None, float]]:
+    """Zero-shot category + hierarchical sub-category + confidence for each text.
+
+    The primary classifier for the annotate stage (``single=True`` → the one
+    fast 92% model) and the category verdict for the refine judge
+    (``single=False`` → the full ensemble, per-label scores summed). Category is
+    decided by NLI *entailment* (what the story is *about*), not embedding
+    cosine (topical word-overlap) — this is what stops company names like
+    "Steward Health Care" or an incidental "covid" mention from pulling a story
+    into ``health``. Sub-category is then a cosine pick *within* the chosen
+    category (``best_sub``), so a sub prototype can never drag in the wrong
+    parent. Confidence is the winning label's (summed) score; a low value routes
+    the row to the refine ensemble for a second opinion.
+
+    Returns (category, sub_category, confidence) per text, or (None, None, 0.0)
+    where the model is unavailable or a chunk failed (caller falls back)."""
+    from services.processing.annotator import best_sub
+
+    pipes = _zeroshot_primary_pipeline() if single else _zeroshot_pipeline()
+    if not pipes:
+        return [(None, None, 0.0)] * len(texts)
+    labels = list(_ZEROSHOT_LABELS)
+    clipped = [t[:350] for t in texts]
+    results: list[tuple[str | None, str | None, float]] = [(None, None, 0.0)] * len(texts)
+    for i in range(0, len(clipped), _ZEROSHOT_BATCH):
+        chunk = clipped[i : i + _ZEROSHOT_BATCH]
+        try:
+            per_model = []
+            for pipe in pipes:
+                raw = pipe(chunk, candidate_labels=labels, hypothesis_template=_ZEROSHOT_TEMPLATE, batch_size=8)
+                per_model.append([raw] if isinstance(raw, dict) else raw)
+        except Exception:
+            logger.exception('[zeroshot] classify failed (%d text(s))', len(chunk))
+            continue
+        for j, text in enumerate(chunk):
+            agg: dict[str, float] = {}
+            for raw in per_model:
+                for label, score in zip(raw[j]['labels'], raw[j]['scores']):
+                    agg[label] = agg.get(label, 0.0) + score
+            if not agg:
+                continue
+            top_label = max(agg, key=agg.get)
+            confidence = agg[top_label] / max(len(per_model), 1)  # back to a 0-1 scale
+            category = _ZEROSHOT_LABELS[top_label]
+            # Incidental-health guard: a health verdict with no real disease/
+            # care-delivery evidence takes the best non-health category instead.
+            if category == 'health' and not _HEALTH_EVIDENCE.search(text):
+                best = max((lab for lab in agg if _ZEROSHOT_LABELS[lab] != 'health'),
+                           key=agg.get, default=None)
+                if best:
+                    category = _ZEROSHOT_LABELS[best]
+            category = _apply_category_gates(category, text, downgrade_to_general)
+            sub = best_sub(category, [text])[0]
+            # 'protest-policy' embeds close to ordinary-crime phrasing; without
+            # real protest vocabulary it's the wrong sub. On the primary pass
+            # just correct the sub (keep the model's category); on refine keep
+            # the stricter drop-to-general.
+            if category == 'political' and sub == 'protest-policy' and not _PROTEST_EVIDENCE.search(text):
+                category, sub = ('general', 'other') if downgrade_to_general else ('political', 'other')
+            results[i + j] = (category, sub, float(confidence))
+    return results
 
 
 # ── ollama provider ───────────────────────────────────────────────────────────
@@ -132,33 +305,14 @@ class LLMRefiner:
     # ── providers ─────────────────────────────────────────────────────────────
 
     def _judge_zeroshot(self, items: list[tuple[str, str]]) -> list[Verdict]:
-        from services.processing.annotator import best_sub
-
-        pipe = _zeroshot_pipeline()
-        if pipe is None:
-            return [None] * len(items)
-        texts = [f'{title}. {content}'[:350] for title, content in items]
-        verdicts: list[Verdict] = []
-        for i in range(0, len(texts), _ZEROSHOT_BATCH):
-            chunk = texts[i : i + _ZEROSHOT_BATCH]
-            try:
-                raw = pipe(chunk, candidate_labels=list(_ZEROSHOT_LABELS), hypothesis_template=_ZEROSHOT_TEMPLATE, batch_size=8)
-                if isinstance(raw, dict):
-                    raw = [raw]
-            except Exception:
-                logger.exception('[refine/zeroshot] failed (%d text(s))', len(chunk))
-                verdicts.extend([None] * len(chunk))
-                continue
-            for text, r in zip(chunk, raw):
-                category = _ZEROSHOT_LABELS.get(r['labels'][0])
-                if category is None:
-                    verdicts.append(None)
-                    continue
-                if category == 'conflict' and not _CONFLICT_EVIDENCE.search(text):
-                    category = 'general'
-                sub = best_sub(category, [text])[0]
-                verdicts.append({'category': category, 'sub_category': sub, 'provider': 'zeroshot'})
-        return verdicts
+        # Full ensemble (single=False) — the refine second opinion; shares the
+        # exact category/gate/sub logic the annotate primary pass uses.
+        texts = [f'{title}. {content}' for title, content in items]
+        cls = classify_zeroshot(texts, single=False)
+        return [
+            {'category': c, 'sub_category': s, 'provider': 'zeroshot'} if c else None
+            for c, s, _conf in cls
+        ]
 
     def _judge_ollama(self, items: list[tuple[str, str]]) -> list[Verdict]:
         from services.llm import LLMError, get_provider, strip_code_fences

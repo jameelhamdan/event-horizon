@@ -227,7 +227,7 @@ def aggregate_events(
         route_sentiment = select_route_sentiment(avg_finbert_sentiment, avg_sentiment)
         route_started = time.monotonic()
         affected_indicators = route_event_to_weighted_symbols(
-            category, location, [], sub_categories, route_sentiment,
+            category, location, [], sub_categories, route_sentiment, intensity=avg_intensity,
         )
         route_elapsed = time.monotonic() - route_started
         if route_elapsed > 0.5:
