@@ -349,10 +349,7 @@ class NLPAnnotator:
                     # same-document signal the model saw it as part of a
                     # person's name; drop a LOC span whose word is also a
                     # token of a PER span rather than trusting it as a place.
-                    person_tokens = {
-                        tok for e in ents if e.get('entity_group') == 'PER'
-                        for tok in e['word'].strip().lower().split()
-                    }
+                    person_tokens = {tok for e in ents if e.get('entity_group') == 'PER' for tok in e['word'].strip().lower().split()}
                     raw_locs = [e for e in ents if e.get('entity_group') == 'LOC' and float(e.get('score', 0)) >= 0.5]
                     had_raw_loc[i] = bool(raw_locs)
                     entities[i] = [e['word'] for e in raw_locs if e['word'].strip().lower() not in person_tokens]
@@ -380,6 +377,13 @@ class NLPAnnotator:
                 # scan is safe — a country-name scan would rediscover the same
                 # false positive, but a demonym never collides with a person span.
                 country = find_place(text) if not had_loc else find_demonym(text)
+            elif city and not country:
+                # A real gazetteer city was found but no separate country
+                # mention exists anywhere in the text (common for domestic
+                # stories that never say the country by name, e.g. a US
+                # article naming "Baltimore" but never "United States") — the
+                # city's own gazetteer country is exact, not a guess.
+                country = country_of_city(city)
             country = resolve_state_country_collision(country, text)
             if city and country and city.strip().lower() == country.strip().lower():
                 city = None  # avoid 'Mexico, Mexico'

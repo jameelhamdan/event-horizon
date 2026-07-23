@@ -134,8 +134,7 @@ def evaluate_return_mae(start, end, step_days=30, train_window_days=None):
             continue
         assert train['date'].max() <= test['date'].min(), 'LEAKAGE: train/test overlap'
 
-        reg = LGBMRegressor(n_estimators=200, learning_rate=0.05, num_leaves=31,
-                            min_child_samples=20, verbose=-1)
+        reg = LGBMRegressor(n_estimators=200, learning_rate=0.05, num_leaves=31, min_child_samples=20, verbose=-1)
         reg.fit(train[cols].astype(float).values, train['y_ret_1'].astype(float).values)
         pred = reg.predict(test[cols].astype(float).values)
         y = test['y_ret_1'].astype(float).values
@@ -171,13 +170,11 @@ def run_evaluation(days=365, top_k=3, step_days=30, output_path=None) -> dict:
 
     logger.info('[evaluate] routing precision@%d over %s … %s', top_k, start.date(), end.date())
     routing = evaluate_routing(start, end, top_k=top_k)
-    logger.info('[evaluate] routing -> %s (base rate %s)',
-                routing.get('precision_at_k'), routing.get('random_baseline'))
+    logger.info('[evaluate] routing -> %s (base rate %s)', routing.get('precision_at_k'), routing.get('random_baseline'))
 
     logger.info('[evaluate] return MAE walk-forward, step=%dd', step_days)
     mae = evaluate_return_mae(start, end, step_days=step_days)
-    logger.info('[evaluate] MAE -> model %s vs zero %s',
-                mae.get('mae_model'), mae.get('mae_zero_baseline'))
+    logger.info('[evaluate] MAE -> model %s vs zero %s', mae.get('mae_model'), mae.get('mae_zero_baseline'))
 
     report = {
         'generated_at': datetime.now(timezone.utc).isoformat(),

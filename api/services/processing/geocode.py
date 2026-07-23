@@ -25,10 +25,7 @@ def _city_index() -> dict[str, tuple[float, float, str | None]]:
         name = c['name'].lower()
         pop = int(c.get('population') or 0)
         if name not in best or pop > best[name][0]:
-            best[name] = (
-                pop, float(c['latitude']), float(c['longitude']),
-                countries.get(c.get('countrycode', '')),
-            )
+            best[name] = (pop, float(c['latitude']), float(c['longitude']), countries.get(c.get('countrycode', '')))
     return {name: (lat, lon, country) for name, (_, lat, lon, country) in best.items()}
 
 
@@ -150,9 +147,7 @@ _DEMONYMS: dict[str, str] = {
 _US_STATE_COUNTRY_COLLISIONS = {'georgia'}
 # US context signal. "US" matched case-sensitively (uppercase) so the pronoun
 # "us" doesn't fire; the rest are case-insensitive.
-_US_CONTEXT_RE = re.compile(
-    r'\bUS\b|(?i:\bU\.S\.?A?\b|\bunited states\b|\bamerican\b|\bwashington\b)'
-)
+_US_CONTEXT_RE = re.compile(r'\bUS\b|(?i:\bU\.S\.?A?\b|\bunited states\b|\bamerican\b|\bwashington\b)')
 
 
 def _norm(name: str) -> str:
@@ -182,9 +177,19 @@ def canonical_country(name: str) -> str | None:
     return None
 
 
+# Continent names that also happen to be small towns in the gazetteer
+# (observed live: geonamescache lists a real but obscure town called "Asia" in
+# the Philippines) — in news text a bare continent name is virtually always
+# the continent, never that town, so it's excluded from city matching entirely
+# rather than resolved to a real-but-wrong place.
+_CONTINENT_NAMES = frozenset({'asia', 'africa', 'europe', 'oceania', 'antarctica'})
+
+
 def is_city(name: str) -> bool:
     """True if *name* resolves via the city index (aliases included)."""
     n = _norm(name)
+    if n in _CONTINENT_NAMES:
+        return False
     return n in _city_index() or _CITY_ALIASES.get(n, n) in _city_index()
 
 
@@ -247,10 +252,7 @@ def _country_pattern() -> re.Pattern:
     longest names first so 'United Arab Emirates' beats 'UAE' beats 'U.S.'."""
     names = (set(_country_index()) | set(_COUNTRY_ALIASES) | set(_EXTRA_PLACES)) - _SCAN_EXCLUDED
     ordered = sorted(names, key=len, reverse=True)
-    return re.compile(
-        r'\b(' + '|'.join(re.escape(n) for n in ordered) + r')\b',
-        re.IGNORECASE,
-    )
+    return re.compile(r'\b(' + '|'.join(re.escape(n) for n in ordered) + r')\b', re.IGNORECASE)
 
 
 @functools.lru_cache(maxsize=1)

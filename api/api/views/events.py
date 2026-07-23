@@ -130,15 +130,9 @@ class EventListView(APIView):
         if bbox := request.query_params.get('bbox'):
             try:
                 lat_min, lng_min, lat_max, lng_max = (float(v) for v in bbox.split(','))
-                qs = qs.filter(
-                    latitude__gte=lat_min, latitude__lte=lat_max,
-                    longitude__gte=lng_min, longitude__lte=lng_max,
-                )
+                qs = qs.filter(latitude__gte=lat_min, latitude__lte=lat_max, longitude__gte=lng_min, longitude__lte=lng_max)
             except (ValueError, TypeError):
-                return Response(
-                    {'error': 'Invalid bbox. Use: lat_min,lng_min,lat_max,lng_max'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                return Response({'error': 'Invalid bbox. Use: lat_min,lng_min,lat_max,lng_max'}, status=status.HTTP_400_BAD_REQUEST)
 
         limit = _parse_int(request.query_params.get('limit'), 100, 500)
         source_map = _build_source_map()
@@ -304,10 +298,7 @@ class EarthquakeListView(APIView):
         limit = _parse_int(request.query_params.get('limit'), 200, 2000)
         cutoff = datetime.now(tz=dt_timezone.utc) - timedelta(hours=hours)
 
-        qs = core_models.EarthquakeRecord.objects.filter(
-            magnitude__gte=min_mag,
-            occurred_at__gte=cutoff,
-        )
+        qs = core_models.EarthquakeRecord.objects.filter(magnitude__gte=min_mag, occurred_at__gte=cutoff)
         serializer = EarthquakeRecordSerializer(qs[:limit], many=True)
         return Response(_envelope(serializer.data))
 
@@ -393,10 +384,7 @@ class TopicListView(APIView):
                     Q(ended_at__gte=dt) | Q(ended_at__isnull=True)
                 )
             except ValueError:
-                return Response(
-                    {'error': 'Invalid date format. Use YYYY-MM-DD.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                return Response({'error': 'Invalid date format. Use YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Historical calendar filters
         if month_str := request.query_params.get('month'):
@@ -451,10 +439,7 @@ class TopicEventsView(APIView):
 
         limit = _parse_int(request.query_params.get('limit'), 50, 200)
         source_map = _build_source_map()
-        data = _envelope(
-            EventSerializer(qs[:limit], many=True, context={'source_map': source_map}).data,
-            topic=slug,
-        )
+        data = _envelope(EventSerializer(qs[:limit], many=True, context={'source_map': source_map}).data, topic=slug)
         return Response(data)
 
 

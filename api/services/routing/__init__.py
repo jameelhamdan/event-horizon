@@ -40,8 +40,7 @@ def route_events(events: list) -> int:
         event.router_source = 'rules'
         event.is_routed = bool(indicators)
         event.updated_on = now  # bulk_update bypasses auto_now
-        mark_stage(event, 'route', ok=bool(indicators),
-                   error=None if indicators else 'no indicators emitted')
+        mark_stage(event, 'route', ok=bool(indicators), error=None if indicators else 'no indicators emitted')
 
     type(events[0]).objects.bulk_update(
         events, ['affected_indicators', 'router_source', 'is_routed', 'stage_status', 'updated_on'],

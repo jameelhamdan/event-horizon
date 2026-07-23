@@ -17,7 +17,7 @@ from typing import Iterator, TYPE_CHECKING
 import feedparser
 import requests
 
-from services.data.base import BaseClientService, ArticleDatum, ClientServiceException
+from services.data.base import BaseClientService, ArticleDatum, ClientServiceException, article_datum
 
 if TYPE_CHECKING:
     import core.models
@@ -129,21 +129,16 @@ def _entry_to_datum(
         or source.name
     ).strip()
 
-    datum = ArticleDatum(
+    return article_datum(
+        source,
         source_url=link,
         author=author,
-        author_slug=source.author_slug or source.code,
-        title=title[:200],
+        title=title,
         content=content,
         published_on=published_on,
         extra_data={'feed_id': entry.get('id') or link},
+        banner_image_url=_extract_image_url(entry),
     )
-
-    image_url = _extract_image_url(entry)
-    if image_url:
-        datum['banner_image_url'] = image_url
-
-    return datum
 
 
 def _parse_entry_date(entry) -> datetime.datetime | None:

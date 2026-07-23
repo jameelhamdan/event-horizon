@@ -21,6 +21,14 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
+def _article_uuids(ids: list) -> list:
+    """Normalize a mixed list of article ids (str UUIDs or UUID objects) to
+    UUIDs for an ``id__in`` filter — the shared preamble of every id-driven
+    workflow function (analyze/annotate/refine/rehydrate)."""
+    import uuid
+    return [i if isinstance(i, uuid.UUID) else uuid.UUID(str(i)) for i in ids]
+
+
 # Cursor floor: never fetch further back than this on the live path — feeds
 # rarely retain more than a day, and anything older is historical-backfill
 # territory (services/data/historical.py).
@@ -130,7 +138,6 @@ def analyze_live_articles(ids: list) -> int:
     LIVE_LLM_ENABLED switch — coverage only ever gets worse in analysis
     *quality*, never in whether an article gets analyzed at all.
     """
-    import uuid as _uuid
     from core.models import Article
     from services.processing.analyzer import ArticleAnalyzer
     from services.processing.annotator import add_arabic_translations
@@ -138,8 +145,7 @@ def analyze_live_articles(ids: list) -> int:
     from services.scoring import ImportanceScorer
     from services.utils import mark_stage
 
-    uuids = [i if isinstance(i, _uuid.UUID) else _uuid.UUID(str(i)) for i in ids]
-    articles = list(Article.objects.filter(id__in=uuids))
+    articles = list(Article.objects.filter(id__in=_article_uuids(ids)))
     if not articles:
         return 0
 
@@ -224,7 +230,7 @@ def analyze_live_articles(ids: list) -> int:
 
 
 def rehydrate_articles(ids: list, use_wayback: bool = False, max_workers: int = 8) -> int:
-    """Re-fetch each article's ``source_url`` through the current
+    """Rehydrate each article: re-fetch its ``source_url`` through the current
     services/data/bodies.py extractor (trafilatura) and overwrite ``content``
     when a non-empty body comes back — for repairing articles whose stored
     content was extracted by an older/worse extractor (nav/boilerplate bleed,
@@ -232,24 +238,57 @@ def rehydrate_articles(ids: list, use_wayback: bool = False, max_workers: int = 
     with the caller.
 
     Direct HTTP only by default — a plain GET per article link, no crawling —
-    which re-hydrates ~84% of links at ~0.5s each and is the cheap bulk path.
+    which rehydrates ~84% of links at ~0.5s each and is the cheap bulk path.
     ``use_wayback=True`` adds the archive fallback for the dead/JS-only/paywalled
     remainder, but that path is globally throttled (see services/data/wayback.py)
     and turns a hours-long job into a day-long one, so it's opt-in.
 
-    Only ``content`` is touched; a link that returns nothing is left as-is (its
-    existing content stands). Does not annotate or change stage — pair it with
-    annotate_articles to re-classify on the improved text. Returns the number of
-    articles whose content was replaced.
+    Two rows are settled before any HTTP happens (cheap, no wasted fetch):
+      * an article whose stored body is **already good quality**
+        (``is_good_quality_body``) is left untouched — no re-fetch;
+      * an article from a source **known to always fail** hydration
+        (``ALWAYS_FAIL_HYDRATION_SOURCES`` — hard server-side paywalls) whose
+        body is still not good is **soft-deleted** (``is_deleted=True`` via the
+        same mechanism annotate uses for junk — hidden everywhere, kept as
+        training data, no migration), since its body is unreachable and the
+        thin stub isn't worth carrying.
+
+    Only ``content`` is touched on the rows that ARE fetched; a link that
+    returns nothing is left as-is. Does not annotate or change stage — pair it
+    with annotate_articles to re-classify on the improved text. Returns the
+    number of articles whose content was replaced.
     """
-    import uuid as _uuid
     from core.models import Article
-    from services.data.bodies import fetch_article_page, fetch_wayback_page, is_junk_page_title
+    from services.data.bodies import (
+        ALWAYS_FAIL_HYDRATION_SOURCES, fetch_article_page, fetch_wayback_page,
+        is_good_quality_body, is_junk_page_title,
+    )
     from services.utils import map_concurrent
 
-    uuids = [i if isinstance(i, _uuid.UUID) else _uuid.UUID(str(i)) for i in ids]
-    articles = [a for a in Article.objects.filter(id__in=uuids) if a.source_url]
+    articles = [a for a in Article.objects.filter(id__in=_article_uuids(ids)) if a.source_url]
     if not articles:
+        return 0
+
+    # Settle before any HTTP: keep already-good rows as-is; soft-delete rows
+    # from always-fail sources whose body can never be improved.
+    to_fetch, to_delete = [], []
+    for a in articles:
+        if is_good_quality_body(a.content):
+            continue  # already good — no re-fetch
+        if a.source_code in ALWAYS_FAIL_HYDRATION_SOURCES:
+            to_delete.append(a)
+        else:
+            to_fetch.append(a)
+
+    if to_delete:
+        now = timezone.now()
+        for a in to_delete:
+            a.is_deleted = True
+            a.processed_on = now
+        Article.all_objects.bulk_update(to_delete, ['is_deleted', 'processed_on'], batch_size=500)
+        logger.info('[rehydrate] soft-deleted %d always-fail-source row(s) before any fetch', len(to_delete))
+
+    if not to_fetch:
         return 0
 
     def _refetch(article):
@@ -260,7 +299,7 @@ def rehydrate_articles(ids: list, use_wayback: bool = False, max_workers: int = 
                 body = wb_body
         return article, body
 
-    results = map_concurrent(articles, _refetch, max_workers=max_workers, default=(None, None))
+    results = map_concurrent(to_fetch, _refetch, max_workers=max_workers, default=(None, None))
     to_save = []
     for article, body in results:
         if article is not None and body:
@@ -268,7 +307,7 @@ def rehydrate_articles(ids: list, use_wayback: bool = False, max_workers: int = 
             to_save.append(article)
     if to_save:
         Article.objects.bulk_update(to_save, ['content'], batch_size=500)
-    logger.info('[rehydrate] refetched %d/%d article(s) (use_wayback=%s)', len(to_save), len(articles), use_wayback)
+    logger.info('[rehydrate] refetched %d/%d fetched article(s) (use_wayback=%s)', len(to_save), len(to_fetch), use_wayback)
     return len(to_save)
 
 
@@ -292,15 +331,13 @@ def annotate_articles(ids: list) -> int:
     services/processing/refiner.py); either is processed, and an article that
     resolves no location is simply terminal (never aggregates into an event).
     """
-    import uuid as _uuid
     from core.models import Article, ArticleDocument
     from services.data.bodies import is_junk_article
     from services.processing.annotator import ESCALATE_BELOW, NLPAnnotator
     from services.scoring import ImportanceScorer
     from services.utils import mark_stage
 
-    uuids = [i if isinstance(i, _uuid.UUID) else _uuid.UUID(str(i)) for i in ids]
-    articles = list(Article.objects.filter(id__in=uuids))
+    articles = list(Article.objects.filter(id__in=_article_uuids(ids)))
 
     if not articles:
         return 0
@@ -383,10 +420,7 @@ def annotate_articles(ids: list) -> int:
         # result as done (see the function docstring).
         if features.llm_error is None:
             article.processed_on = timezone.now()
-            article.stage = (
-                Article.STAGE_ANNOTATED if features.confidence >= ESCALATE_BELOW
-                else Article.STAGE_REFINE
-            )
+            article.stage = Article.STAGE_ANNOTATED if features.confidence >= ESCALATE_BELOW else Article.STAGE_REFINE
             score = importance.get(str(article.id))
             if score is not None:
                 article.importance_score = score
@@ -435,13 +469,11 @@ def refine_articles(ids: list) -> int:
     current stage unchanged so a later retry can pick it up again. Returns the
     number of articles refined.
     """
-    import uuid as _uuid
     from core.models import Article
     from services.processing.refiner import LLMRefiner
     from services.utils import mark_stage
 
-    uuids = [i if isinstance(i, _uuid.UUID) else _uuid.UUID(str(i)) for i in ids]
-    articles = list(Article.objects.filter(id__in=uuids))
+    articles = list(Article.objects.filter(id__in=_article_uuids(ids)))
     if not articles:
         return 0
 

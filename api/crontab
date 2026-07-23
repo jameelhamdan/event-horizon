@@ -33,6 +33,12 @@
 0 5 * * *      python /app/manage.py run_task discover_topics_task
 0 6 * * *      python /app/manage.py run_task generate_newsletter_task --require-flag NEWSLETTER_ENABLED
 
+# ── Backfill watchdog (off by default — see AUTO_RESUME_DEFERRED_BACKFILL) ──
+# Auto-resumes a scope='deferred' backfill left mid-run by a worker/broker
+# crash or power cut. No-ops (and no-op is cheap) once the deferred backlog
+# hits 0, or while a reprocess_corpus_task run is already queued/running.
+*/15 * * * *   python /app/manage.py run_task resume_deferred_backfill_task --require-flag AUTO_RESUME_DEFERRED_BACKFILL
+
 # ── Maintenance (light) ──────────────────────────────────────────────────
 0  2 * * 0     python /app/manage.py run_task adjust_source_weights_task           --require-flag ARTICLE_IMPORTANCE_SCORING_ENABLED
 30 2 * * 0     python /app/manage.py run_task prune_task_runs_task

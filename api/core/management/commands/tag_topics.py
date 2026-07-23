@@ -5,10 +5,7 @@ class Command(BaseTaskCommand):
     help = 'Tag recent Events with matching active Topics using the LLM'
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            '--hours', type=int, default=24,
-            help='Lookback window in hours (default: 24)',
-        )
+        parser.add_argument('--hours', type=int, default=24, help='Lookback window in hours (default: 24)')
         parser.add_argument(
             '--force', action='store_true',
             help='Re-evaluate all events in the window, not just untagged ones',

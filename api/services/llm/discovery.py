@@ -61,10 +61,7 @@ def list_free_models(min_context: int = 16000, insecure: bool = False) -> list[s
     if not keys:
         logger.warning('[openrouter] no API key configured — cannot list models')
         return []
-    resp = requests.get(
-        MODELS_URL, headers={'Authorization': f'Bearer {keys[0]}'},
-        timeout=30, verify=not insecure,
-    )
+    resp = requests.get(MODELS_URL, headers={'Authorization': f'Bearer {keys[0]}'}, timeout=30, verify=not insecure)
     resp.raise_for_status()
     ranked: list[tuple[str, int]] = []
     for m in resp.json().get('data', []):
@@ -87,9 +84,7 @@ def _probe(model: str, key: str, insecure: bool = False) -> str:
         import httpx
         http_client = httpx.Client(verify=False)
     client = OpenAI(base_url=CHAT_URL, api_key=key, http_client=http_client, max_retries=0)
-    completion = client.chat.completions.create(
-        model=model, messages=_PROBE, temperature=0, max_tokens=16, timeout=30,
-    )
+    completion = client.chat.completions.create(model=model, messages=_PROBE, temperature=0, max_tokens=16, timeout=30)
     return (completion.choices[0].message.content or '').strip()
 
 

@@ -12,8 +12,8 @@ class Command(BaseTaskCommand):
         from services.tasks import train_forecast_model_task
 
         if kwargs['background']:
-            from services.queue import enqueue
-            enqueue(train_forecast_model_task, queue='bulk', job_timeout=-1)
+            from services.queue import enqueue_bulk
+            enqueue_bulk(train_forecast_model_task)
             self.stdout.write(self.style.SUCCESS('Enqueued train_forecast_model_task'))
             return
 
@@ -21,5 +21,4 @@ class Command(BaseTaskCommand):
         if trained:
             self.stdout.write(self.style.SUCCESS(f'Trained models for {trained} horizon(s)'))
         else:
-            self.stdout.write(self.style.WARNING(
-                'No models trained — run backfill_prices first, or check FORECAST_ENABLED'))
+            self.stdout.write(self.style.WARNING('No models trained — run backfill_prices first, or check FORECAST_ENABLED'))

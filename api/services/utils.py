@@ -15,10 +15,7 @@ _SPLIT_RE = re.compile(r'[^a-zA-Z0-9]+')
 
 def tokenize(text: str) -> frozenset[str]:
     """Lowercase word tokens, dropping stop words and tokens ≤ 2 characters."""
-    return frozenset(
-        t.lower() for t in _SPLIT_RE.split(text or '')
-        if len(t) > 2 and t.lower() not in STOP_WORDS
-    )
+    return frozenset(t.lower() for t in _SPLIT_RE.split(text or '') if len(t) > 2 and t.lower() not in STOP_WORDS)
 
 
 def jaccard(a: frozenset, b: frozenset) -> float:

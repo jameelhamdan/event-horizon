@@ -96,7 +96,7 @@ def _claim_free_articles(stage: str):
     qs = m.Article.objects.filter(stage=stage)
     qs = qs.filter(Q(process_queued_at__isnull=True) | Q(process_queued_at__lt=claim_cutoff))
     # Fetch-only backfill articles (BACKFILL_LLM_ENABLED=False) are annotated by
-    # annotate_deferred_articles_task, not the live pipeline. exclude() matches
+    # reprocess_corpus_task (scope=deferred), not the live pipeline. exclude() matches
     # False-or-unset, so pre-migration rows are still included.
     return qs.exclude(annotation_deferred=True)
 
@@ -141,10 +141,7 @@ def _annotate_ids(limit: int) -> list:
     as it always would have before the 'analyze' stage existed."""
     cutoff = _now() - timedelta(hours=LIVE_ANALYZE_FRESHNESS_HOURS)
     qs = _annotate_pending().order_by('-created_on').only('id', 'created_on', 'extra_data')
-    ids = [
-        a.id for a in qs.iterator()
-        if _is_backfill(a) or a.created_on < cutoff
-    ]
+    ids = [a.id for a in qs.iterator() if _is_backfill(a) or a.created_on < cutoff]
     return ids[:limit]
 
 

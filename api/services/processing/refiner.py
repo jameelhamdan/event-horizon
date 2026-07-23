@@ -75,7 +75,13 @@ _CONFLICT_EVIDENCE = re.compile(
     r'\b(?:airstrike|air strike|attack\w*|missile|drone|troops|soldier\w*|army|military|militant\w*|'
     r'rebel\w*|insurgent\w*|gunmen|gunman|shelling|invasion|ceasefire|warplane\w*|'
     r'bomb\w*|explosion\w*|terror\w*|hostage\w*|casualt\w*|wounded|war\b|combat\b|'
-    r'shot dead|killed in|kills?\b\s+\d)',
+    # Unambiguous mass-violence markers — never present in a non-conflict story,
+    # so they only ever PREVENT the downgrade gate from destroying a real conflict
+    # verdict (measured: "Israel kills more than 80 in Gaza" and "committing
+    # genocide in Gaza" were flipped to general because the old count pattern only
+    # matched "kills 80", not "kills more than 80").
+    r'genocide|massacre\w*|ethnic cleansing|war crime\w*|atrocit\w*|death toll|'
+    r'shot dead|killed in|kill(?:s|ed|ing)?\b[\s\w]{0,12}\d)',
     re.I,
 )
 
@@ -125,6 +131,31 @@ _ACCIDENT_EVIDENCE = re.compile(
     r'stampede|wreck\w*)\b',
     re.I,
 )
+# A deliberate human actor/attack framing — guards the conflict->disaster
+# lateral swap below from misreading a real (if lightly-worded) attack as an
+# accident just because it lacks hardware-specific _MILITARY_ACTION terms
+# (e.g. a market bombing blamed on "militants"/"terrorists" with no mention of
+# "attack"-adjacent hardware words).
+_DELIBERATE_ACTOR = re.compile(
+    r'\b(?:attack\w*|terror\w*|militant\w*|rebel\w*|insurgent\w*|gunmen|gunman|'
+    r'hostage\w*|genocide|massacre\w*|war crime\w*|atrocit\w*)\b',
+    re.I,
+)
+
+# Political<->conflict disambiguation. A diplomatic meeting ABOUT an ongoing
+# war ("Pope meets Russian Orthodox cleric to discuss Ukraine war") reads as
+# 'conflict' to the NLI model purely off the war mention, with no actual
+# hostility in the story — a real conflict verdict needs either military
+# action or a named perpetrator, not just proximity to a war topic (measured:
+# the ensemble scored 'conflict' at 0.65 confidence — not a low-confidence
+# fluke a threshold would catch — for a story that is entirely about a
+# diplomatic meeting).
+_DIPLOMATIC_MEETING_EVIDENCE = re.compile(
+    r'\b(?:meets?|met with|holds? talks|held talks|summit|discuss(?:es|ed|ion)?|'
+    r'envoy|ambassador|diplomat\w*|foreign minister|peace (?:talks|deal|plan|process)|'
+    r'\bpope\b|vatican|patriarch|archbishop|\bcleric\b)\b',
+    re.I,
+)
 
 def _build_zeroshot(names):
     """A zero-shot pipeline per model name."""
@@ -160,10 +191,12 @@ def _apply_category_gates(category: str, text: str, downgrade_to_general: bool =
     """Post-hoc evidence gates over a zero-shot category verdict.
 
     Two kinds of correction:
-      * *lateral* disaster⇄conflict swaps by physical cause (a natural disaster
-        with political fallout misread as conflict; a military strike misread as
-        an accident) — always applied, they only ever correct one specific
-        category to another.
+      * *lateral* swaps by concrete cause — disaster⇄conflict (a natural
+        disaster with political fallout misread as conflict; a military
+        strike misread as an accident) and conflict→political (a diplomatic
+        meeting that references an ongoing war, misread as the war itself) —
+        always applied, they only ever correct one specific category to
+        another.
       * *downgrade-to-general* (conflict/disaster with no concrete evidence) —
         a precision patch for the low-recall refine second opinion. It is
         DESTRUCTIVE: it flips real conflict/disaster stories that simply lack the
@@ -173,10 +206,24 @@ def _apply_category_gates(category: str, text: str, downgrade_to_general: bool =
         ``downgrade_to_general=False`` and trusts the 92% model's category;
         only refine keeps the downgrades.
     """
-    if category == 'conflict' and _NATURAL_DISASTER_EVIDENCE.search(text) and not _MILITARY_ACTION.search(text):
+    if (category == 'conflict' and not _MILITARY_ACTION.search(text) and not _DELIBERATE_ACTOR.search(text) and (_NATURAL_DISASTER_EVIDENCE.search(text) or _ACCIDENT_EVIDENCE.search(text))):
+        # No deliberate-actor language and no military hardware — a
+        # "conflict" verdict driven by explosion/blast/crash wording alone is
+        # almost always an accidental industrial/transport disaster, not an
+        # armed strike (measured: Beirut port ammonium-nitrate explosion ->
+        # conflict/airstrike; a sailor's account of "mishandled cargo" has no
+        # attacker, just an accident).
         category = 'disaster'
     elif category == 'disaster' and _MILITARY_ACTION.search(text) and _CONFLICT_EVIDENCE.search(text):
         category = 'conflict'
+    elif (category == 'conflict' and not _MILITARY_ACTION.search(text) and not _DELIBERATE_ACTOR.search(text)
+            and _DIPLOMATIC_MEETING_EVIDENCE.search(text)):
+        # Same idea, third pairing: no hostility evidence at all, just a
+        # diplomatic/religious meeting that happens to reference an ongoing
+        # war — the story is about the meeting, not a hostile act (measured:
+        # "Pope Leo meets Russian Orthodox cleric to discuss Ukraine war" ->
+        # conflict/other at 0.65 confidence, purely off the war mention).
+        category = 'political'
     if downgrade_to_general:
         if category == 'conflict' and not _CONFLICT_EVIDENCE.search(text):
             category = 'general'
@@ -234,18 +281,23 @@ def classify_zeroshot(
             # Incidental-health guard: a health verdict with no real disease/
             # care-delivery evidence takes the best non-health category instead.
             if category == 'health' and not _HEALTH_EVIDENCE.search(text):
-                best = max((lab for lab in agg if _ZEROSHOT_LABELS[lab] != 'health'),
-                           key=agg.get, default=None)
+                best = max((lab for lab in agg if _ZEROSHOT_LABELS[lab] != 'health'), key=agg.get, default=None)
                 if best:
                     category = _ZEROSHOT_LABELS[best]
             category = _apply_category_gates(category, text, downgrade_to_general)
             sub = best_sub(category, [text])[0]
             # 'protest-policy' embeds close to ordinary-crime phrasing; without
-            # real protest vocabulary it's the wrong sub. On the primary pass
-            # just correct the sub (keep the model's category); on refine keep
-            # the stricter drop-to-general.
+            # real protest vocabulary it's the wrong sub. Same destructive-downgrade
+            # trap as the conflict/disaster gates above (see _apply_category_gates
+            # docstring): dropping to 'general' here nukes real legislation/
+            # diplomacy/policy stories that simply don't use protest vocabulary
+            # (measured live: an Australia youth social-media-ban law, Israel
+            # opening Gaza aid routes, France recognizing Palestine, a South
+            # Africa poverty "national dialogue" were all wrongly flipped to
+            # general by this branch). Always just correct the sub — never the
+            # category — regardless of refine vs. primary pass.
             if category == 'political' and sub == 'protest-policy' and not _PROTEST_EVIDENCE.search(text):
-                category, sub = ('general', 'other') if downgrade_to_general else ('political', 'other')
+                sub = 'other'
             results[i + j] = (category, sub, float(confidence))
     return results
 
@@ -309,10 +361,7 @@ class LLMRefiner:
         # exact category/gate/sub logic the annotate primary pass uses.
         texts = [f'{title}. {content}' for title, content in items]
         cls = classify_zeroshot(texts, single=False)
-        return [
-            {'category': c, 'sub_category': s, 'provider': 'zeroshot'} if c else None
-            for c, s, _conf in cls
-        ]
+        return [{'category': c, 'sub_category': s, 'provider': 'zeroshot'} if c else None for c, s, _conf in cls]
 
     def _judge_ollama(self, items: list[tuple[str, str]]) -> list[Verdict]:
         from services.llm import LLMError, get_provider, strip_code_fences

@@ -73,7 +73,7 @@ from urllib.parse import urlparse
 import requests
 
 from services.cache import Blocklist, Counter, key_backfill_empty_streak, key_backfill_source_block
-from services.data.base import ArticleDatum, ClientServiceException
+from services.data.base import ArticleDatum, ClientServiceException, article_datum
 # Body/title hydration lives in services.data.bodies; re-exported here so existing
 # importers (services.data.wayback, tests) keep their historical.* import paths.
 from services.data.bodies import (  # noqa: F401
@@ -102,10 +102,7 @@ def _is_source_blocked(source_code: str) -> bool:
 
 
 def _block_source(source_code: str, reason: str, ttl: int = _SOURCE_BLOCK_TTL_SECONDS) -> None:
-    logger.warning(
-        'Backfill source %r blocked (%s) — blocking for %ds',
-        source_code, reason, ttl,
-    )
+    logger.warning('Backfill source %r blocked (%s) — blocking for %ds', source_code, reason, ttl)
     _source_blocklist.block(key_backfill_source_block(source_code), ttl)
 
 
@@ -221,7 +218,72 @@ def _strip_feed_subdomain(netloc: str) -> str:
     return netloc
 
 
-class RSSHistoricalService:
+class BaseHistoricalService:
+    """Template for a day-at-a-time backfill discovery strategy — the shared
+    scaffolding behind RSSHistoricalService (sitemap), WaybackHistoricalService
+    (front-page mining) and WikipediaHistoricalService (curated events), so
+    HistoricalBackfillService can drive any of them through the same fetch_day()
+    (see _build_strategy).
+
+    Subclasses supply only the two strategy-specific steps:
+      * ``_discover(day_start, day_end, deadline)`` — return the day's raw
+        candidate items *in priority order* (already sorted if it matters), or
+        ``[]`` after logging its own strategy-specific empty reason.
+      * ``_to_datum(item, day_start)`` — map one raw item to an ArticleDatum.
+
+    The base owns everything the three strategies duplicated: the source-blocked
+    short-circuit, the ``first_match_only`` / ``max_candidates`` caps, and the
+    discovered-count log line (labelled via ``LOG_LABEL`` / ``LOG_NOUN``).
+    """
+
+    LOG_LABEL = 'Historical'   # log-line prefix, e.g. 'RSSHistorical'
+    LOG_NOUN = 'item'          # what one discovered item is called in the log
+
+    def __init__(
+        self, source: 'core.models.Source', max_candidates: int | None = None,
+        first_match_only: bool = False,
+    ) -> None:
+        self._source = source
+        # Cap on items kept per day (applied after the strategy's own priority
+        # ordering, since there's no LLM score to rank by).
+        self._max_candidates = max_candidates
+        # Existence-probe mode: keep only the first item so discovery can stop
+        # as soon as anything is found (see probe_source_has_sitemap_entries).
+        self._first_match_only = first_match_only
+
+    def fetch_day(
+        self,
+        day_start: datetime.datetime,
+        day_end: datetime.datetime,
+        deadline: datetime.datetime | None = None,
+    ) -> list[ArticleDatum]:
+        """deadline: wall-clock cutoff (see HistoricalBackfillService.fetch_and_save_day)
+        — passed to _discover so a slow source can't alone consume the caller's budget."""
+        if _is_source_blocked(self._source.code):
+            logger.info('%s source=%r day=%s: skipped (temporarily blocked)', self.LOG_LABEL, self._source.code, day_start.date())
+            return []
+        items = self._cap(self._discover(day_start, day_end, deadline))
+        if not items:
+            return []
+        datums = [self._to_datum(item, day_start) for item in items]
+        logger.info('%s source=%r day=%s: %d %s(s) discovered', self.LOG_LABEL, self._source.code, day_start.date(), len(datums), self.LOG_NOUN)
+        return datums
+
+    def _cap(self, items: list) -> list:
+        if self._first_match_only:
+            return items[:1]
+        if self._max_candidates and len(items) > self._max_candidates:
+            return items[: self._max_candidates]
+        return items
+
+    def _discover(self, day_start, day_end, deadline) -> list:
+        raise NotImplementedError
+
+    def _to_datum(self, item, day_start: datetime.datetime) -> ArticleDatum:
+        raise NotImplementedError
+
+
+class RSSHistoricalService(BaseHistoricalService):
     """
     Discovers historical article URLs via the source domain's XML sitemap.
 
@@ -261,61 +323,33 @@ class RSSHistoricalService:
     # <sitemap> per calendar day, 700+ visible going back to at least 2024).
     _MAX_SUBSITEMAPS_PER_INDEX = 40
 
+    LOG_LABEL = 'RSSHistorical'
+    LOG_NOUN = 'entry'
+
     def __init__(
         self, source: 'core.models.Source', max_candidates: int | None = None,
         first_match_only: bool = False,
     ) -> None:
-        self._source = source
-        # Cap on entries kept per day. Sorted by recency (a weak relevance proxy)
-        # before this cap is applied, since there's no LLM score to rank by.
-        self._max_candidates = max_candidates
-        # Existence probe mode (see probe_source_has_sitemap_entries): stop all
-        # discovery the moment ANY entry is found, instead of exhaustively
-        # crawling every candidate sitemap + sub-sitemap and capping afterward.
-        self._first_match_only = first_match_only
+        super().__init__(source, max_candidates, first_match_only)
         parsed = urlparse(source.url)
         netloc = _strip_feed_subdomain(parsed.netloc)
         self._base_url = f'{parsed.scheme}://{netloc}'
         self._deadline: datetime.datetime | None = None  # set per fetch_day() call
 
-    def fetch_day(
-        self,
-        day_start: datetime.datetime,
-        day_end: datetime.datetime,
-        deadline: datetime.datetime | None = None,
-    ) -> list[ArticleDatum]:
-        """deadline: wall-clock cutoff (see HistoricalBackfillService.fetch_and_save_day)
-        — checked between sitemap candidates and sub-sitemap fetches so a slow-but-not-
-        technically-timing-out source can't alone consume the caller's whole time budget."""
-        if _is_source_blocked(self._source.code):
-            logger.info(
-                'RSSHistorical source=%r day=%s: skipped (temporarily blocked)',
-                self._source.code, day_start.date(),
-            )
-            return []
-
+    def _discover(self, day_start, day_end, deadline) -> list[dict]:
         self._deadline = deadline
         entries = self._discover_entries(day_start, day_end)
         if not entries:
-            logger.info(
-                'RSSHistorical source=%r day=%s: no sitemap entries found',
-                self._source.code, day_start.date(),
-            )
+            logger.info('RSSHistorical source=%r day=%s: no sitemap entries found', self._source.code, day_start.date())
             return []
-
+        # Sort by recency (a weak relevance proxy) so the base's max_candidates
+        # cap keeps the most recent entries — there's no LLM score to rank by.
         if self._max_candidates and len(entries) > self._max_candidates:
-            entries.sort(
-                key=lambda e: e['date'] or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
-                reverse=True,
-            )
-            entries = entries[: self._max_candidates]
+            entries.sort(key=lambda e: e['date'] or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc), reverse=True)
+        return entries
 
-        datums = [self._entry_to_datum(e) for e in entries]
-        logger.info(
-            'RSSHistorical source=%r day=%s: %d entries discovered',
-            self._source.code, day_start.date(), len(datums),
-        )
-        return datums
+    def _to_datum(self, item: dict, day_start: datetime.datetime) -> ArticleDatum:
+        return self._entry_to_datum(item)
 
     # ------------------------------------------------------------------
     # Sitemap discovery
@@ -455,10 +489,7 @@ class RSSHistoricalService:
         entries: list[dict] = []
         for _, sub_url in candidates[: self._MAX_SUBSITEMAPS_PER_INDEX]:
             if self._deadline_passed():
-                logger.info(
-                    'RSSHistorical source=%r: deadline reached mid sub-sitemap recursion — stopping',
-                    self._source.code,
-                )
+                logger.info('RSSHistorical source=%r: deadline reached mid sub-sitemap recursion — stopping', self._source.code)
                 break
             entries.extend(self._parse_sitemap(sub_url, day_start, day_end))
             if self._first_match_only and entries:
@@ -492,11 +523,10 @@ class RSSHistoricalService:
 
     def _entry_to_datum(self, entry: dict) -> ArticleDatum:
         title = entry['title'] or _slug_from_url(entry['url'])
-        return ArticleDatum(
+        return article_datum(
+            self._source,
             source_url=entry['url'],
-            author=self._source.name,
-            author_slug=self._source.author_slug or self._source.code,
-            title=title[:200],
+            title=title,
             content=title,
             published_on=entry['date'],
             extra_data={
@@ -686,10 +716,7 @@ class HistoricalBackfillService:
                     outcomes[source.code] = 'empty'
                     streak = _note_empty_day(source.code)
                     if streak >= _EMPTY_STREAK_THRESHOLD:
-                        _block_source(
-                            source.code, f'{streak} consecutive empty backfill days',
-                            ttl=_EMPTY_STREAK_TTL_SECONDS,
-                        )
+                        _block_source(source.code, f'{streak} consecutive empty backfill days', ttl=_EMPTY_STREAK_TTL_SECONDS)
 
             fetched_total += len(candidates)
             candidates.sort(
@@ -770,9 +797,7 @@ class HistoricalBackfillService:
                 if datum['source_url'] in existing:
                     continue
                 fields = dict(datum)
-                fields['extra_data'] = {
-                    **datum.get('extra_data', {}), 'backfill_day': day_start.date().isoformat(),
-                }
+                fields['extra_data'] = {**datum.get('extra_data', {}), 'backfill_day': day_start.date().isoformat()}
                 to_save.append(_PendingSave(source_code, source_type, fields))
 
         if self.fetch_body:

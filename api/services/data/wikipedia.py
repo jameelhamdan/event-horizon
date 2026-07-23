@@ -38,8 +38,8 @@ from urllib.parse import urlparse
 import requests
 from django.utils.text import slugify
 
-from services.data.base import ArticleDatum
-from services.data.historical import _block_source, _is_source_blocked
+from services.data.base import ArticleDatum, article_datum
+from services.data.historical import BaseHistoricalService, _block_source
 
 if TYPE_CHECKING:
     import core.models
@@ -98,45 +98,22 @@ def day_section_id(day: datetime.datetime) -> str:
     return f'{day.year}_{day.strftime("%B")}_{day.day}'
 
 
-class WikipediaHistoricalService:
-    """Same fetch_day() interface as RSSHistoricalService so
-    HistoricalBackfillService can drive either strategy interchangeably."""
+class WikipediaHistoricalService(BaseHistoricalService):
+    """Curated-events strategy: same fetch_day() interface as the other
+    BaseHistoricalService subclasses so HistoricalBackfillService can drive any
+    of them interchangeably."""
 
-    def __init__(
-        self, source: 'core.models.Source', max_candidates: int | None = None,
-        first_match_only: bool = False,
-    ) -> None:
-        self._source = source
-        self._max_candidates = max_candidates
-        self._first_match_only = first_match_only
+    LOG_LABEL = 'WikipediaHistorical'
+    LOG_NOUN = 'curated event'
 
-    def fetch_day(
-        self,
-        day_start: datetime.datetime,
-        day_end: datetime.datetime,
-        deadline: datetime.datetime | None = None,
-    ) -> list[ArticleDatum]:
-        if _is_source_blocked(self._source.code):
-            logger.info(
-                'WikipediaHistorical day=%s: skipped (temporarily blocked)', day_start.date(),
-            )
-            return []
-
+    def _discover(self, day_start, day_end, deadline) -> list[dict]:
         html = self._get_month_html(day_start)
         if not html:
             return []
+        return parse_day_events(html, day_start)
 
-        events = parse_day_events(html, day_start)
-        if self._first_match_only and events:
-            events = events[:1]
-        datums = [self._event_to_datum(e, day_start) for e in events]
-        if self._max_candidates and len(datums) > self._max_candidates:
-            datums = datums[: self._max_candidates]
-        logger.info(
-            'WikipediaHistorical day=%s: %d curated event(s) discovered',
-            day_start.date(), len(datums),
-        )
-        return datums
+    def _to_datum(self, item: dict, day_start: datetime.datetime) -> ArticleDatum:
+        return self._event_to_datum(item, day_start)
 
     def _get_month_html(self, day: datetime.datetime) -> str:
         from services.cache import cache_get, cache_set, key_backfill_wiki_month
@@ -186,11 +163,12 @@ class WikipediaHistoricalService:
     def _event_to_datum(self, event: dict, day_start: datetime.datetime) -> ArticleDatum:
         cite = event['cites'][0]
         domain = urlparse(cite).netloc.removeprefix('www.')
-        return ArticleDatum(
+        return article_datum(
+            self._source,
             source_url=cite,
             author=domain or self._source.name,
-            author_slug=slugify(domain)[:100] or self._source.author_slug or self._source.code,
-            title=event['text'][:200],
+            author_slug=slugify(domain)[:100] or None,
+            title=event['text'],
             content=event['text'],
             published_on=day_start + datetime.timedelta(hours=12),
             extra_data={
@@ -210,8 +188,7 @@ def probe_wikipedia_source(source: 'core.models.Source') -> bool:
     """Preflight (see services.tasks.backfill_history_task): does last month's
     page parse to at least one cited event? One request, cached like any
     month fetch."""
-    day = (datetime.datetime.now(datetime.timezone.utc).replace(day=1)
-           - datetime.timedelta(days=14))
+    day = datetime.datetime.now(datetime.timezone.utc).replace(day=1) - datetime.timedelta(days=14)
     svc = WikipediaHistoricalService(source, max_candidates=1, first_match_only=True)
     return bool(svc.fetch_day(day, day + datetime.timedelta(days=1)))
 

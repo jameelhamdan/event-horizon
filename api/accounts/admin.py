@@ -21,9 +21,7 @@ class GroupAdmin(admin.ModelAdmin):
     search_fields = ('name',)
     ordering = ('name',)
     filter_horizontal = ('permissions',)
-    fieldsets = (
-        (None, {'fields': ['name', 'permissions']}),
-    )
+    fieldsets = ((None, {'fields': ['name', 'permissions']}),)
 
     def formfield_for_manytomany(self, db_field, request=None, **kwargs):
         if db_field.name == 'permissions':

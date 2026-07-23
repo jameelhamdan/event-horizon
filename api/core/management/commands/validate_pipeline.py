@@ -103,8 +103,7 @@ class Command(BaseCommand):
         # of symbols the events actually routed to, else the fixed core basket so
         # the measurement is never empty (random dates have no events to derive
         # symbols from — they still get a market-move reading for comparison).
-        symbols = (landmark['symbols'] if landmark else
-                   sorted({i['symbol'] for e in routed for i in e.affected_indicators}))
+        symbols = landmark['symbols'] if landmark else sorted({i['symbol'] for e in routed for i in e.affected_indicators})
         if not symbols:
             symbols = _CORE_BASKET
         moves = {s: self._realized_move(s, day) for s in symbols}
@@ -138,8 +137,7 @@ class Command(BaseCommand):
         first bar ≥ its horizon, plus whether it cleared ±1σ of recent history."""
         from core.models import PriceBar
 
-        before = (PriceBar.objects.filter(symbol=symbol, date__lte=day)
-                  .order_by('-date').first())
+        before = PriceBar.objects.filter(symbol=symbol, date__lte=day).order_by('-date').first()
         if before is None or not before.close:
             return None
         best = None

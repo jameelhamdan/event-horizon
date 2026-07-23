@@ -4,10 +4,18 @@ The router is a *first-class, auditable artifact* — its mapping quality bounds
 downstream forecasting metric (plan §2). No LLM is involved: the weight for each
 (event, symbol) pair is a deterministic product
 
-    weight = sub_category_affinity × symbol_affinity × country_risk × asymmetric_sentiment
+    weight = sign(sentiment) × sign(symbol_affinity)
+             × |symbol_affinity| × sub_category_affinity × country_risk
+             × |asymmetric_sentiment| × intensity
 
-where ``asymmetric_sentiment`` keeps the *sign* of the news and **amplifies negative**
-sentiment (negative news has larger, harder-to-predict market impact).
+``asymmetric_sentiment`` carries the *direction* of the news (and **amplifies
+negative** sentiment — negative news has larger, harder-to-predict impact), but the
+final per-symbol direction also depends on the **sign of symbol_affinity**: a symbol
+that moves WITH the news (risk asset, e.g. SPY: bad news → down) has positive
+affinity, while one that moves AGAINST it (the VIX fear gauge, gold and other safe
+havens, supply-shock commodities on conflict) has negative affinity, so the same
+negative event pushes equities down but gold/oil/VIX up. |symbol_affinity| is the
+strength of the move.
 
 Two entry points:
   * ``route_event_to_symbols(...)``      → list[str]  (symbols only; used internally
@@ -103,17 +111,33 @@ SUB_CATEGORY_AFFINITY: dict[str, float] = {
 }
 
 # ── Symbol affinity per top-level category ────────────────────────────────────
-# How strongly a category, when it touches a symbol, actually moves it.
+# SIGNED. The sign encodes DIRECTION relative to the news sentiment; the magnitude
+# encodes STRENGTH.
+#   positive → "risk asset", moves WITH sentiment (bad news → the symbol falls):
+#              equities (SPY), yields/dollar on economic news, crypto.
+#   negative → moves AGAINST sentiment (bad news → the symbol rises): the ^VIX fear
+#              gauge (inverse in every category), gold and other safe havens, and
+#              supply-shock commodities (oil/gas/wheat) on conflict/disaster where
+#              the *threat itself* lifts the price.
+# So a single negative conflict event correctly pushes SPY down but GC=F/CL=F/^VIX
+# up — see route_event_to_weighted_symbols. Tuned to the well-documented crisis
+# co-movements (geopolitical risk-off: equities↓, gold↑, oil↑, VIX↑).
 SYMBOL_AFFINITY: dict[tuple[str, str], float] = {
-    ('conflict', 'GC=F'): 0.8, ('conflict', 'CL=F'): 0.9, ('conflict', 'NG=F'): 0.8,
-    ('conflict', 'ZW=F'): 0.7, ('conflict', '^VIX'): 0.9, ('conflict', 'SPY'): 0.6,
-    ('economic', 'SPY'): 0.9, ('economic', 'GC=F'): 0.7, ('economic', '^TNX'): 0.9,
-    ('economic', 'DX-Y.NYB'): 0.8, ('economic', '^VIX'): 0.6,
-    ('political', 'GC=F'): 0.6, ('political', 'SPY'): 0.7, ('political', '^VIX'): 0.7,
+    # conflict — havens & supply-shock commodities RISE on (negative) conflict news
+    ('conflict', 'GC=F'): -0.8, ('conflict', 'CL=F'): -0.9, ('conflict', 'NG=F'): -0.8,
+    ('conflict', 'ZW=F'): -0.7, ('conflict', '^VIX'): -0.9, ('conflict', 'SPY'): 0.6,
+    # economic — risk assets move WITH sentiment; VIX inverse; gold a mild haven
+    ('economic', 'SPY'): 0.9, ('economic', 'GC=F'): -0.4, ('economic', '^TNX'): 0.9,
+    ('economic', 'DX-Y.NYB'): 0.8, ('economic', '^VIX'): -0.6,
+    # political — gold & VIX inverse (haven / fear); equities & dollar with sentiment
+    ('political', 'GC=F'): -0.6, ('political', 'SPY'): 0.7, ('political', '^VIX'): -0.7,
     ('political', 'DX-Y.NYB'): 0.6,
-    ('disaster', 'GC=F'): 0.5, ('disaster', 'CL=F'): 0.5,
-    ('health', '^VIX'): 0.6, ('health', 'SPY'): 0.5,
+    # disaster — commodity supply disruption & haven bid lift these
+    ('disaster', 'GC=F'): -0.5, ('disaster', 'CL=F'): -0.5,
+    # health — VIX inverse (fear), equities with sentiment
+    ('health', '^VIX'): -0.6, ('health', 'SPY'): 0.5,
 }
+# Unknown (category, symbol) pairs default to a risk-asset that moves WITH sentiment.
 _DEFAULT_SYMBOL_AFFINITY = 0.6
 
 # ── Country risk weight ───────────────────────────────────────────────────────
@@ -135,6 +159,27 @@ def _country_risk(location: str) -> float:
         if country in loc and risk > best:
             best = risk
     return best
+
+
+# Categories that are risk-off by nature. A *positive* sentiment reading on a
+# conflict/disaster story is usually the sentiment model misreading escalation
+# or aid/deal/production vocabulary as good news (measured live: "discusses
+# weapons production" +0.62, "conflict beyond borders if Trump delivers threats"
+# +0.22), not a genuine de-escalation. Damping the positive tail makes that
+# likely-wrong risk-ON read a *smaller* bet without flipping direction — a real
+# ceasefire still points the right way (havens down), just with less magnitude —
+# while negative readings pass through unchanged (a war/disaster IS risk-off).
+# Mirrors asymmetric_sentiment's own "amplify negative, floor positive" stance.
+_RISK_OFF_CATEGORIES = frozenset({'conflict', 'disaster'})
+_RISK_OFF_POSITIVE_DAMP = 0.5
+
+
+def _category_adjusted_sentiment(category: str, sentiment: float | None) -> float | None:
+    """Damp a positive sentiment on an inherently risk-off category; leave
+    negatives and other categories untouched. See _RISK_OFF_CATEGORIES."""
+    if sentiment is not None and sentiment > 0 and category in _RISK_OFF_CATEGORIES:
+        return sentiment * _RISK_OFF_POSITIVE_DAMP
+    return sentiment
 
 
 def select_route_sentiment(avg_finbert: float | None, avg_sentiment: float | None) -> float | None:
@@ -186,13 +231,10 @@ def route_event_to_weighted_symbols(
 
     sub_categories = sub_categories or []
     # Best sub-category affinity among those present on the event (else neutral 0.6).
-    sub_affinity = max(
-        (SUB_CATEGORY_AFFINITY.get(sc, 0.6) for sc in sub_categories),
-        default=0.6,
-    )
+    sub_affinity = max((SUB_CATEGORY_AFFINITY.get(sc, 0.6) for sc in sub_categories), default=0.6)
     crisk = _country_risk(location)
-    sent = asymmetric_sentiment(sentiment)
-    sign = 1.0 if sent >= 0 else -1.0
+    sent = asymmetric_sentiment(_category_adjusted_sentiment(category, sentiment))
+    sentiment_sign = 1.0 if sent >= 0 else -1.0
     sent_mag = min(abs(sent), 1.0)
     # Severity scaler in [0.6, 1.0]: full weight for a severe event, damped for a
     # routine one; None (unknown) leaves weight unchanged so behavior is stable.
@@ -200,10 +242,14 @@ def route_event_to_weighted_symbols(
 
     weighted: list[dict] = []
     for sym in symbols:
-        sym_affinity = SYMBOL_AFFINITY.get((category, sym), _DEFAULT_SYMBOL_AFFINITY)
-        magnitude = sub_affinity * sym_affinity * crisk * max(sent_mag, 0.1) * intensity_factor
+        affinity = SYMBOL_AFFINITY.get((category, sym), _DEFAULT_SYMBOL_AFFINITY)
+        # Direction is the sentiment sign times the symbol's polarity: a safe
+        # haven / fear gauge (negative affinity) inverts, so a negative event
+        # lifts it while equities fall. Magnitude uses |affinity|.
+        polarity = 1.0 if affinity >= 0 else -1.0
+        magnitude = sub_affinity * abs(affinity) * crisk * max(sent_mag, 0.1) * intensity_factor
         magnitude = min(magnitude, 1.0)
-        weighted.append({'symbol': sym, 'weight': round(sign * magnitude, 4)})
+        weighted.append({'symbol': sym, 'weight': round(sentiment_sign * polarity * magnitude, 4)})
     return weighted
 
 

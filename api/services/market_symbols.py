@@ -55,10 +55,8 @@ def get_panel_symbols() -> list[str]:
     """Forecasting target symbols (``is_forecast=True``). Falls back to the 5 base symbols."""
     try:
         from core.models import MarketSymbol
-        syms = list(
-            MarketSymbol.objects.filter(is_forecast=True, is_active=True)
-            .values_list('symbol', flat=True)
-        )
+
+        syms = list(MarketSymbol.objects.filter(is_forecast=True, is_active=True).values_list('symbol', flat=True))
         if syms:
             return syms
     except Exception as exc:  # noqa: BLE001

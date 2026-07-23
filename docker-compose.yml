@@ -69,20 +69,24 @@ services:
           memory: 1g
     memswap_limit: 1g
 
-  # Steady NLP/LLM work — 1 worker. Each prefork child lazily loads its own
-  # copy of the local ML stack (MiniLM + FinBERT + MarianMT + NER +
-  # zero-shot mDeBERTa — measured ~1.1GB RSS warm with all 5 loaded and
-  # exercised), so RAM scales with --concurrency; max-tasks-per-child
-  # recycles children periodically as a leak backstop. Keep --concurrency in
-  # sync with CELERY_QUEUE_WORKERS in api/settings/base.py (dashboard display).
+  # Steady NLP work — 2 workers. Each prefork child lazily loads its own copy
+  # of the local ML stack (MiniLM + FinBERT + MarianMT + NER + zero-shot
+  # deberta-v3/bge-m3 — measured ~1.1GB RSS warm with all loaded and exercised;
+  # the refine ensemble's second model pushes a busy child toward ~2GB), so RAM
+  # scales with --concurrency. --concurrency=2 doubles annotate/refine throughput
+  # (the 100k+ corpus reprocess is CPU-bound on this stage) now that the external
+  # llm-api/ollama no longer shares this box and its ~16GB is free. Keep
+  # --concurrency in sync with CELERY_QUEUE_WORKERS in api/settings/base.py.
   worker-heavy:
     <<: *api-build
     restart: always
     # max-memory-per-child (KB) recycles a child once its own RSS crosses
     # 2.4GB — over 2x the measured warm baseline, so normal operation never
     # trips it — a tighter, per-process complement to max-tasks-per-child
-    # that catches a leak by memory instead of task count.
-    command: sh -c "celery -A app worker -Q heavy --concurrency=1 --pool=prefork -O fair --max-tasks-per-child=200 --max-memory-per-child=2400000 -n heavy@%h"
+    # that catches a leak by memory instead of task count. With --concurrency=2
+    # worst-case active RSS is ~2 × 2.4GB = 4.8GB; the container cap below is
+    # sized well above that for fork/spike/recycle-overlap headroom.
+    command: sh -c "celery -A app worker -Q heavy --concurrency=2 --pool=prefork -O fair --max-tasks-per-child=200 --max-memory-per-child=2400000 -n heavy@%h"
     environment:
       # Celery's prefork pool forks per-task worker processes — safety default
       # in case anything ever loads an HF tokenizer in the parent (its background
@@ -96,18 +100,18 @@ services:
     env_file: .env.app
     volumes:
       - ./media_data:/app/media
-    # 6g is well above the ~1.1GB measured baseline — pure leak/spike
-    # headroom, not baseline need. This is the only queue that runs
-    # continuously (annotate + refine, every 30-60min), so it gets the
-    # largest slice of the shared host budget — see the accounting note
-    # above worker-bulk. memswap_limit == memory: no extra swap beyond the
-    # hard cap, so an overrun is killed immediately instead of
+    # 14g for 2 model children (~4.8GB worst-case active) — the rest is
+    # leak/spike/recycle-overlap headroom. This is the only queue that runs
+    # continuously (annotate + refine) and the throughput bottleneck for the
+    # corpus reprocess, so it gets the largest slice of the freed budget — see
+    # the accounting note above worker-bulk. memswap_limit == memory: no extra
+    # swap beyond the hard cap, so an overrun is killed immediately instead of
     # swapping/thrashing the host into an unresponsive state.
     deploy:
       resources:
         limits:
-          memory: 6g
-    memswap_limit: 6g
+          memory: 14g
+    memswap_limit: 14g
 
   # Fast I/O (fetchers, stream collectors, dispatchers) — 4 workers.
   worker-light:
@@ -147,15 +151,16 @@ services:
     # so it gets a smaller slice than worker-heavy. An overrun is OOM-killed
     # and retried: a contained, recoverable failure.
     #
-    # Host memory budget (32GB total, shared with llm-api/ollama, capped
-    # separately at 16g/10g reservation): api 1g + worker-heavy 6g +
-    # worker-light 1g + worker-bulk 2g + mongo 4g + redis 0.5g + flower
-    # 0.25g = 14.75g, + ollama 16g = 30.75g, leaving ~1.25g for the host OS
-    # and Docker daemon — tight, hence vm.swappiness/earlyoom on the host
-    # matter too. Every cap has memswap_limit == memory (no swap beyond the
-    # hard cap, clean OOM-kill instead of host-wide thrashing). If a service
-    # needs more, trim another service's cap first — the sum is the
-    # constraint, not any one line.
+    # Host memory budget (32GB total). The external llm-api/ollama no longer
+    # shares this box, so its old ~16g reservation is free and goes to the two
+    # services that gate corpus-reprocess throughput — worker-heavy (now
+    # --concurrency=2) and mongo's WiredTiger cache. Current sum:
+    #   api 1g + worker-heavy 14g + worker-light 1g + worker-bulk 2g +
+    #   mongo 9g + redis 0.5g + flower 0.25g = 27.75g,
+    # leaving ~4.25g for the host OS + Docker daemon (deliberate headroom).
+    # Every cap has memswap_limit == memory (no swap beyond the hard cap, clean
+    # OOM-kill instead of host-wide thrashing). If a service needs more, trim
+    # another's cap first — the ~28g sum is the constraint, not any one line.
     deploy:
       resources:
         limits:
@@ -181,21 +186,6 @@ services:
           memory: 256m
     memswap_limit: 256m
 
-  # Daily forced restart of api + the Celery workers — a backstop against slow
-  # memory growth the per-service `deploy.resources.limits.memory` caps alone
-  # don't prevent from recurring (a container that hits its limit gets
-  # OOM-killed and restarted, but a slow leak just climbs back up between
-  # kills). Restarts by compose-service label via the mounted Docker socket,
-  # so no host cron/systemd access is needed. See deploy/restarter/restart.sh.
-  restarter:
-    build: ./deploy/restarter
-    restart: always
-    environment:
-      - RESTART_HOUR_UTC=4
-      - RESTART_SERVICES=api worker-heavy worker-light worker-bulk
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-
   # redis usage is normally tiny (SSE pub/sub + broker), but a stuck
   # consumer letting a channel's backlog grow could still pressure the host.
   # maxmemory + noeviction makes redis itself refuse new writes (visible,
@@ -204,7 +194,18 @@ services:
   redis:
     image: redis:7-alpine
     restart: always
-    command: redis-server --maxmemory 384mb --maxmemory-policy noeviction
+    # AOF persistence (fsync every second) so the task broker survives a
+    # container restart or power cut. Without this, redis started with no
+    # volume/persistence at all — a crash lost every message still queued but
+    # not yet picked up by a worker outright, since CELERY_TASK_ACKS_LATE only
+    # protects messages already delivered to a worker, not ones that never
+    # survived the restart in the first place. That's the gap that mattered
+    # for the reprocess_corpus_task backfill actually resuming unattended
+    # after a power cut instead of needing someone to notice and re-dispatch
+    # it by hand.
+    command: redis-server --maxmemory 384mb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
     deploy:
       resources:
         limits:
@@ -219,15 +220,15 @@ services:
     # limit, that meant a ~15GB cache target — mongod grew toward it until the
     # kernel OOM-killed it, and `restart: always` looped that every ~30s (1600+
     # unclean restarts in 13h). Two guards, both required:
-    #   1. Cap the container so a runaway mongod can't starve the host. 4g is
-    #      conservative but comfortably covers the working set for this dataset
-    #      alongside worker-heavy, llm-api/ollama, and the rest of the stack.
+    #   1. Cap the container so a runaway mongod can't starve the host. 9g now
+    #      that the external llm-api/ollama has freed its slice — more cache
+    #      keeps the 100k+ corpus's working set hot during reprocess/backfill.
     #   2. Size the WiredTiger cache to fit *inside* that cap rather than the
-    #      host — Mongo's own guidance is ~50% of (RAM − 1GB) → 1.5GB here,
-    #      leaving ~2.5GB headroom for connections, journal, and other mongod
+    #      host — Mongo's own guidance is ~50% of (RAM − 1GB) → 4GB here,
+    #      leaving ~5g headroom for connections, journal, and other mongod
     #      overhead. Host auto-detection ignores the cgroup limit, so this must
     #      be set explicitly.
-    command: mongod --wiredTigerCacheSizeGB 1.5
+    command: mongod --wiredTigerCacheSizeGB 4
     ports:
       - "27017:27017"
     env_file: .env.db
@@ -237,8 +238,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4g
-    memswap_limit: 4g
+          memory: 9g
+    memswap_limit: 9g
 
 volumes:
   static_data:
+  redis_data:

@@ -43,7 +43,7 @@ _STREAM_NAMES = ('prices', 'notam', 'earthquakes', 'forex')
 
 
 def _handle_action(request):
-    from services.queue import enqueue
+    from services.queue import enqueue, enqueue_bulk
     from services import tasks as T
     from services.task_registry import queue_for_task, resolve_task
 
@@ -68,19 +68,15 @@ def _handle_action(request):
             enqueue(T.pipeline_tick_task, True, queue='default')
             _ok(request, 'Pipeline tick enqueued (all due stages, cadence gates skipped).')
         elif action == 'backfill_prices':
-            enqueue(T.backfill_prices_task, years=10, queue='bulk', job_timeout=-1)
+            enqueue_bulk(T.backfill_prices_task, years=10)
             _ok(request, 'Price backfill enqueued (10y, all active symbols).')
         elif action == 'backfill_articles_until':
             _handle_backfill_until(request)
-        elif action == 'annotate_deferred':
-            _handle_annotate_deferred(request)
-        elif action == 'heal_pipeline':
-            _handle_heal_pipeline(request)
-        elif action == 'reannotate_corpus':
-            _handle_reannotate_corpus(request)
+        elif action == 'reprocess_corpus':
+            _handle_reprocess_corpus(request)
         elif action == 'retrain_forecast':
-            enqueue(T.train_forecast_model_task, queue='bulk', job_timeout=-1)
-            enqueue(T.run_forecast_task, queue='bulk', job_timeout=-1)
+            enqueue_bulk(T.train_forecast_model_task)
+            enqueue_bulk(T.run_forecast_task)
             _ok(request, 'Forecast retrain + run enqueued (bulk queue).')
         elif action == 'rerun_bootstrap':
             enqueue(T.bootstrap_initial_data_task, True, queue='default', job_timeout=-1)
@@ -182,7 +178,13 @@ def _handle_backfill_until(request):
     """Backfill articles over an explicit [start_date, end_date) range.
 
     Mirrors ``manage.py backfill_history``. ``source_code`` is optional —
-    blank means all enabled RSS sources.
+    blank means all enabled RSS sources. ``annotate_inline`` folds the
+    separate "Enable historical-backfill LLM" toggle into this same submit —
+    each fetched chunk annotates itself immediately (on fresh, just-fetched
+    content — no rehydrate needed) instead of landing in the deferred
+    backlog for a later ``Re-process articles`` click. Only ever turns the
+    flag ON here; leaving it unticked doesn't turn an already-on flag off,
+    since this form isn't the intended off-switch for that shared setting.
     """
     from services.queue import enqueue
     from services import tasks as T
@@ -192,6 +194,10 @@ def _handle_backfill_until(request):
         return
     start_date, end_date = date_range
     source_code = request.POST.get('source_code', '').strip()
+
+    if request.POST.get('annotate_inline') in ('1', 'true', 'on'):
+        from services.runtime_config import set_llm_flag
+        set_llm_flag('backfill', True)
 
     if source_code:
         import core.models as m
@@ -205,65 +211,50 @@ def _handle_backfill_until(request):
         _ok(request, f'Article backfill enqueued (all sources): {start_date.date()} → {end_date.date()}.')
 
 
-def _handle_annotate_deferred(request):
-    """Dispatch on-prem annotation for deferred articles, optionally narrowed
-    to one date range (blank = every deferred article)."""
-    from services.queue import enqueue
+# Human label per reprocess_corpus_task scope, for the confirmation message.
+# The scope set itself lives on the task (tasks.REPROCESS_SCOPES) — single
+# source of truth, validated against below.
+_REPROCESS_SCOPE_LABELS = {
+    'deferred': 'deferred articles',
+    'unfinished': 'unfinished articles (+ re-aggregate)',
+    'everything': 'every article, already-annotated included',
+}
+
+
+def _handle_reprocess_corpus(request):
+    """Dispatch ``reprocess_corpus_task`` over the corpus (or a date range),
+    with the ``scope`` field selecting which rows — the single dashboard control
+    behind all re-processing (deferred / unfinished / everything). Every scope
+    takes the same optional date range (blank = whole corpus) and ``rehydrate``
+    toggle (re-fetch each article body through the current extractor first);
+    'deferred' also honours an optional ``limit`` — blank means uncapped (the
+    whole deferred backlog in one dispatch), matching how 'unfinished'/
+    'everything' already behave with no limit field at all; a number is only
+    for deliberately capping a test run smaller."""
+    from services.queue import enqueue_bulk
     from services import tasks as T
 
-    date_range = _parse_date_range(request, required=False)
-    if date_range is None:
+    scope = request.POST.get('scope', 'deferred')
+    if scope not in T.REPROCESS_SCOPES:
+        messages.error(request, f'Unknown re-process scope: {scope}')
         return
-    start_date, end_date = date_range
-    limit = _int_or(request.POST.get('limit'), 2000)
-    enqueue(
-        T.annotate_deferred_articles_task, limit=limit,
-        start_date=start_date, end_date=end_date,
-        queue='bulk', job_timeout=-1,
-    )
-    period = _period_phrase(start_date, end_date, '')
-    _ok(request, f'Deferred-article annotation dispatched (up to {limit}{period}, onto the heavy queue) — '
-                  'check the "Deferred" row in Article states below, re-run once it hits 0.')
-
-
-def _handle_heal_pipeline(request):
-    """Dispatch a healing_task pass, optionally narrowed to one date range
-    (blank = the whole historical corpus, from the earliest article on
-    record)."""
-    from services.queue import enqueue
-    from services import tasks as T
-
-    date_range = _parse_date_range(request, required=False)
-    if date_range is None:
-        return
-    start_date, end_date = date_range
-    enqueue(T.healing_task, start_date=start_date, end_date=end_date, queue='bulk', job_timeout=-1)
-    period = _period_phrase(start_date, end_date, ' across the entire historical corpus')
-    _ok(request, f'Healing pass dispatched{period} — walks week by week onto the heavy queue. '
-                  'Safe to re-run if a pass doesn\'t fully settle in one go.')
-
-
-def _handle_reannotate_corpus(request):
-    """Dispatch reprocess_articles_task — re-run the annotate pass over EVERY
-    article (already-classified rows included) to roll a classifier/taxonomy
-    upgrade across the corpus. Optional date range (blank = whole corpus) and
-    rehydrate toggle (also re-fetch bodies through the current extractor)."""
-    from services.queue import enqueue
-    from services import tasks as T
-
     date_range = _parse_date_range(request, required=False)
     if date_range is None:
         return
     start_date, end_date = date_range
     rehydrate = request.POST.get('rehydrate') in ('1', 'true', 'on')
-    enqueue(
-        T.reprocess_articles_task, start_date=start_date, end_date=end_date,
-        rehydrate=rehydrate, queue='bulk', job_timeout=-1,
-    )
-    period = _period_phrase(start_date, end_date, ' across the entire historical corpus')
-    extra = ' + body rehydrate' if rehydrate else ''
-    _ok(request, f'Re-annotation dispatched{period}{extra} — walks week by week onto the heavy queue, '
-                  're-classifying already-processed rows. Safe to re-run.')
+
+    kwargs = {'scope': scope, 'start_date': start_date, 'end_date': end_date, 'rehydrate': rehydrate}
+    if scope == 'deferred':
+        limit = _int_or(request.POST.get('limit'), None)
+        if limit is not None:
+            kwargs['limit'] = limit
+    enqueue_bulk(T.reprocess_corpus_task, **kwargs)
+
+    period = _period_phrase(start_date, end_date, ' across the whole corpus')
+    extra = ' + rehydrate' if rehydrate else ''
+    _ok(request, f'Re-processing dispatched: annotate {_REPROCESS_SCOPE_LABELS[scope]}{period}{extra} — '
+                  'walks onto the heavy queue and returns immediately. Watch Article states below; safe to re-run.')
 
 
 def _handle_run_stream(request):
@@ -289,14 +280,14 @@ def _handle_aggregate_history(request):
     location/category/day). Mirrors bootstrap_initial_data_task's usage —
     bulk queue, no time cap.
     """
-    from services.queue import enqueue
+    from services.queue import enqueue_bulk
     from services import tasks as T
 
     date_range = _parse_date_range(request, required=True)
     if date_range is None:
         return
     start_date, end_date = date_range
-    enqueue(T.aggregate_history_task, start_date, end_date, queue='bulk', job_timeout=-1)
+    enqueue_bulk(T.aggregate_history_task, start_date, end_date)
     _ok(request, f'Historical aggregation enqueued for {start_date.date()} → {end_date.date()} (bulk queue).')
 
 
@@ -347,7 +338,7 @@ def _ok(request, msg):
     messages.success(request, msg)
 
 
-def _int_or(value, default: int) -> int:
+def _int_or(value, default: int | None) -> int | None:
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -379,10 +370,8 @@ def _flower_status():
 
     try:
         import requests
-        resp = requests.get(
-            f'{settings.FLOWER_INTERNAL_URL}/flower/workers',
-            params={'json': 1}, timeout=4,
-        )
+
+        resp = requests.get(f'{settings.FLOWER_INTERNAL_URL}/flower/workers', params={'json': 1}, timeout=4)
         resp.raise_for_status()
         data = resp.json().get('data', [])
     except Exception as exc:  # noqa: BLE001
@@ -432,10 +421,7 @@ def _health_status():
         at = datetime.fromisoformat(payload.get('at', ''))
     except (TypeError, ValueError):
         pass
-    report_stale = (
-        at is None
-        or at < datetime.now(timezone.utc) - timedelta(minutes=_HEALTH_MAX_AGE_MINUTES)
-    )
+    report_stale = at is None or at < datetime.now(timezone.utc) - timedelta(minutes=_HEALTH_MAX_AGE_MINUTES)
 
     freshness = [
         {'name': name, 'latest': info.get('latest'), 'ok': info.get('ok', False)}
@@ -482,10 +468,7 @@ def _forecast_status():
         for fn in sorted(os.listdir(model_dir)):
             if fn.endswith('.joblib'):
                 p = os.path.join(model_dir, fn)
-                status['artifacts'].append({
-                    'name': fn,
-                    'mtime': datetime.fromtimestamp(os.path.getmtime(p), tz=timezone.utc),
-                })
+                status['artifacts'].append({'name': fn, 'mtime': datetime.fromtimestamp(os.path.getmtime(p), tz=timezone.utc)})
     latest = Forecast.objects.order_by('-generated_at').values_list('generated_at', flat=True).first()
     status['last_forecast'] = latest
     scored = Forecast.objects.filter(is_correct__isnull=False)

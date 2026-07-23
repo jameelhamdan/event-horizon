@@ -32,8 +32,7 @@ def iter_aggregate_windows(start: datetime, end: datetime, window_days: int = 30
         d = date.fromordinal(ordinal)
         return datetime(d.year, d.month, d.day, tzinfo=dt.tzinfo)
 
-    step = timedelta(days=max(window_days - window_days % CLUSTER_DATE_WINDOW_DAYS,
-                              CLUSTER_DATE_WINDOW_DAYS))
+    step = timedelta(days=max(window_days - window_days % CLUSTER_DATE_WINDOW_DAYS, CLUSTER_DATE_WINDOW_DAYS))
     current = _align_down(start)
     while current < end:
         yield current, min(current + step, end)
@@ -111,9 +110,7 @@ def aggregate_events(
     )
     logger.info('[aggregate] fetched %d located article(s) in window', len(articles))
 
-    skipped_no_location = Article.objects.filter(
-        processed_on__isnull=False, location__isnull=True, **window,
-    ).count()
+    skipped_no_location = Article.objects.filter(processed_on__isnull=False, location__isnull=True, **window).count()
     if skipped_no_location:
         logger.info(
             '[aggregate] %d processed article(s) in window have no location — excluded from '
@@ -203,9 +200,7 @@ def aggregate_events(
         finbert_sentiments = [a.finbert_sentiment for a in group if a.finbert_sentiment is not None]
         intensities = [a.event_intensity for a in group if a.event_intensity is not None]
         avg_sentiment = round(sum(sentiments) / len(sentiments), 4) if sentiments else None
-        avg_finbert_sentiment = (
-            round(sum(finbert_sentiments) / len(finbert_sentiments), 4) if finbert_sentiments else None
-        )
+        avg_finbert_sentiment = round(sum(finbert_sentiments) / len(finbert_sentiments), 4) if finbert_sentiments else None
         base_intensity = round(sum(intensities) / len(intensities), 4) if intensities else None
         # Corroboration boost: more articles covering the same event → higher importance.
         corroboration_boost = min(len(group) / 10.0, 1.0) * 0.3
@@ -250,10 +245,7 @@ def aggregate_events(
             lang_city = fields.get('city') or ''
             lang_country = fields.get('country') or ''
             lang_location = ', '.join(p for p in [lang_city, lang_country] if p) or location
-            event_translations[lang] = {
-                'title': fields.get('title') or representative.title,
-                'location_name': lang_location,
-            }
+            event_translations[lang] = {'title': fields.get('title') or representative.title, 'location_name': lang_location}
 
         # Fields written on BOTH create and update, defined once so the two paths
         # (and the bulk_update field list below) can't silently drift apart.
@@ -309,10 +301,7 @@ def aggregate_events(
                 # and update below. Log it: if the re-fetch also comes up empty,
                 # the create failed for a real reason (validation, connection)
                 # and this sub-cluster is otherwise silently dropped.
-                logger.exception(
-                    '[aggregate] Event create failed for %s [%s] — retrying as update',
-                    location, category,
-                )
+                logger.exception('[aggregate] Event create failed for %s [%s] — retrying as update', location, category)
                 event = Event.objects.filter(
                     location_name=location,
                     category=category,
@@ -340,9 +329,7 @@ def aggregate_events(
             )
 
     if events_to_update:
-        Event.objects.bulk_update(
-            list(events_to_update.values()), update_field_names, batch_size=500,
-        )
+        Event.objects.bulk_update(list(events_to_update.values()), update_field_names, batch_size=500)
 
     logger.info(
         '[aggregate] run complete: created=%d updated=%d in %.2fs total',

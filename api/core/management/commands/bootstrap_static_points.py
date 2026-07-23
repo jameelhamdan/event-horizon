@@ -100,10 +100,7 @@ class Command(BaseCommand):
 
         created = updated = 0
         for data in points:
-            _, was_created = core_models.StaticPoint.objects.update_or_create(
-                code=data['code'],
-                defaults=data,
-            )
+            _, was_created = core_models.StaticPoint.objects.update_or_create(code=data['code'], defaults=data)
             if was_created:
                 created += 1
             else:

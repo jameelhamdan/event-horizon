@@ -30,9 +30,7 @@ DEBUG = config('DEBUG', default=False)
 
 APP_NAME = config('APP_NAME', default='eventhorizonai.dev')
 
-ADMINS = (
-    ('admin', f'contact@{APP_NAME}'),
-)
+ADMINS = (('admin', f'contact@{APP_NAME}'),)
 
 ALLOWED_HOSTS = ['*']
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
@@ -240,6 +238,11 @@ STREAM_PRICES_ENABLED = config('STREAM_PRICES_ENABLED', default=True, cast=bool)
 STREAM_NOTAM_ENABLED = config('STREAM_NOTAM_ENABLED', default=False, cast=bool)
 STREAM_EARTHQUAKE_ENABLED = config('STREAM_EARTHQUAKE_ENABLED', default=True, cast=bool)
 STREAM_FOREX_ENABLED = config('STREAM_FOREX_ENABLED', default=True, cast=bool)
+# Default False: resume_deferred_backfill_task (api/crontab) is a watchdog for a
+# large one-off scope='deferred' backfill, not steady-state behavior — turn on
+# only while such a backfill is in flight, off again once the deferred count
+# reaches 0, so it isn't silently re-dispatching reprocess_corpus_task forever.
+AUTO_RESUME_DEFERRED_BACKFILL = config('AUTO_RESUME_DEFERRED_BACKFILL', default=False, cast=bool)
 
 # ── DRF throttling — rate-limit anonymous traffic on the public read API.
 REST_FRAMEWORK = {
@@ -300,7 +303,7 @@ EGRESS_PROXY_POOL = config('EGRESS_PROXY_POOL', default='')
 # of being stranded — see analyze_live_articles' docstring.
 # BACKFILL_LLM_ENABLED gates historical backfill annotation. When off,
 # backfill_day_chunk_task fetches + saves and defers annotation
-# (annotation_deferred=True) for a later annotate_deferred_articles_task pass.
+# (annotation_deferred=True) for a later reprocess_corpus_task (scope=deferred) pass.
 # Backfill articles never reach 'analyze' regardless of this flag — see
 # ANALYZER_BACKEND note below, 'analyze' is live-only by design (cost/rate
 # limits don't scale to the historical corpus).
@@ -470,7 +473,7 @@ CELERY_QUEUE_TIME_LIMITS = {
 # should render instantly even when a queue's workers are down.
 CELERY_QUEUE_WORKERS = {
     'default': 4,
-    'heavy': 1,
+    'heavy': 2,  # keep in sync with worker-heavy --concurrency in docker-compose.yml
     'bulk': 1,
 }
 

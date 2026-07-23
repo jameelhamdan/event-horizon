@@ -6,12 +6,9 @@ class Command(BaseCommand):
             'and walk-forward 1d-return MAE vs the zero-return baseline')
 
     def add_arguments(self, parser):
-        parser.add_argument('--days', type=int, default=365,
-                            help='Evaluation window in days (default 365)')
-        parser.add_argument('--top-k', type=int, default=3,
-                            help='Top-k routed symbols to score (default 3)')
-        parser.add_argument('--step-days', type=int, default=30,
-                            help='Walk-forward fold size in days (default 30)')
+        parser.add_argument('--days', type=int, default=365, help='Evaluation window in days (default 365)')
+        parser.add_argument('--top-k', type=int, default=3, help='Top-k routed symbols to score (default 3)')
+        parser.add_argument('--step-days', type=int, default=30, help='Walk-forward fold size in days (default 30)')
         parser.add_argument('--output', type=str, default=None,
                             help='Report path (default <repo>/results/evaluate_forecasting/forecasting_report.json)')
 

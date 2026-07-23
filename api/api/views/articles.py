@@ -41,9 +41,7 @@ class HistoricalArticleListView(APIView):
             year = int(request.query_params['year'])
             month = int(request.query_params['month'])
         except (KeyError, ValueError):
-            return Response(
-                {'error': 'year and month are required integers'}, status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response({'error': 'year and month are required integers'}, status=status.HTTP_400_BAD_REQUEST)
         if not (1 <= month <= 12):
             return Response({'error': 'month must be 1-12'}, status=status.HTTP_400_BAD_REQUEST)
 

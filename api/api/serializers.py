@@ -214,10 +214,7 @@ class PriceBarSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PriceBar
-        fields = [
-            'id', 'symbol', 'stream_key', 'name', 'interval',
-            'open', 'high', 'low', 'close', 'volume', 'date',
-        ]
+        fields = ['id', 'symbol', 'stream_key', 'name', 'interval', 'open', 'high', 'low', 'close', 'volume', 'date']
 
 
 class ForecastSerializer(serializers.ModelSerializer):
