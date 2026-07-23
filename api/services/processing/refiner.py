@@ -246,11 +246,17 @@ def classify_zeroshot(
             category = _apply_category_gates(category, text, downgrade_to_general)
             sub = best_sub(category, [text])[0]
             # 'protest-policy' embeds close to ordinary-crime phrasing; without
-            # real protest vocabulary it's the wrong sub. On the primary pass
-            # just correct the sub (keep the model's category); on refine keep
-            # the stricter drop-to-general.
+            # real protest vocabulary it's the wrong sub. Same destructive-downgrade
+            # trap as the conflict/disaster gates above (see _apply_category_gates
+            # docstring): dropping to 'general' here nukes real legislation/
+            # diplomacy/policy stories that simply don't use protest vocabulary
+            # (measured live: an Australia youth social-media-ban law, Israel
+            # opening Gaza aid routes, France recognizing Palestine, a South
+            # Africa poverty "national dialogue" were all wrongly flipped to
+            # general by this branch). Always just correct the sub — never the
+            # category — regardless of refine vs. primary pass.
             if category == 'political' and sub == 'protest-policy' and not _PROTEST_EVIDENCE.search(text):
-                category, sub = ('general', 'other') if downgrade_to_general else ('political', 'other')
+                sub = 'other'
             results[i + j] = (category, sub, float(confidence))
     return results
 

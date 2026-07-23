@@ -84,7 +84,15 @@ def _is_boilerplate_paragraph(p_html: str, plain_text: str) -> bool:
 _JUNK_TITLE_RE = re.compile(
     r'^\s*(subscribe|sign.?in|log.?in|register)\b'
     r'|\b(access denied|forbidden|page not found|are you a robot'
-    r'|attention required|just a moment|enable (javascript|cookies)|captcha)\b'
+    r'|attention required|just a moment|enable (javascript|cookies)|captcha'
+    # Akamai's bot-verification interstitial title (observed live: "Client
+    # Challenge" ingested as the article title with no body, twice in one
+    # random 120-article sample).
+    r'|client challenge'
+    # Puzzle pages (crossword/sudoku) share a news sitemap/RSS feed with real
+    # articles on some publishers (observed: "FT Crossword: Number 18,131")
+    # but are never news content worth classifying.
+    r'|crossword|sudoku)\b'
     r'|^\s*(404|403|401)\b',
     re.IGNORECASE,
 )
