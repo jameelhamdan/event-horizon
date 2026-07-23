@@ -37,10 +37,7 @@ class SubscribeView(APIView):
 
         if existing:
             if existing.is_active:
-                return Response(
-                    {'detail': 'Please check your email to confirm your subscription.'},
-                    status=status.HTTP_201_CREATED,
-                )
+                return Response({'detail': 'Please check your email to confirm your subscription.'}, status=status.HTTP_201_CREATED)
             existing.token = uuid.uuid4()
             existing.is_active = False
             existing.confirmed_at = None
@@ -51,10 +48,7 @@ class SubscribeView(APIView):
             sub = Subscriber.objects.create(email=email)
 
         send_confirmation_email(sub)
-        return Response(
-            {'detail': 'Please check your email to confirm your subscription.'},
-            status=status.HTTP_201_CREATED,
-        )
+        return Response({'detail': 'Please check your email to confirm your subscription.'}, status=status.HTTP_201_CREATED)
 
 
 class ConfirmView(APIView):
@@ -64,10 +58,7 @@ class ConfirmView(APIView):
         try:
             sub = Subscriber.objects.get(token=token, is_active=False)
         except Subscriber.DoesNotExist:
-            return Response(
-                {'detail': 'Invalid or already confirmed link.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            return Response({'detail': 'Invalid or already confirmed link.'}, status=status.HTTP_404_NOT_FOUND)
         sub.is_active = True
         sub.confirmed_at = timezone.now()
         sub.save()
@@ -81,10 +72,7 @@ class UnsubscribeView(APIView):
         try:
             sub = Subscriber.objects.get(token=token)
         except Subscriber.DoesNotExist:
-            return Response(
-                {'detail': 'Invalid unsubscribe link.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            return Response({'detail': 'Invalid unsubscribe link.'}, status=status.HTTP_404_NOT_FOUND)
         if not sub.is_active:
             return Response({'detail': 'This email is already unsubscribed.'})
 
@@ -102,9 +90,7 @@ class NewsletterListView(APIView):
             limit = min(max(int(request.query_params.get('limit', 100)), 1), 500)
         except ValueError:
             limit = 100
-        qs = DailyNewsletter.objects.filter(
-            status=DailyNewsletter.STATUS_SENT
-        ).order_by('-date')
+        qs = DailyNewsletter.objects.filter(status=DailyNewsletter.STATUS_SENT).order_by('-date')
         newsletters = qs[:limit]
         serializer = NewsletterListSerializer(newsletters, many=True)
         return Response({'results': serializer.data, 'count': qs.count()})
@@ -114,14 +100,9 @@ class NewsletterLatestView(APIView):
     """GET /api/newsletter/latest/ — retrieve the most recently sent newsletter"""
 
     def get(self, request):
-        newsletter = DailyNewsletter.objects.filter(
-            status=DailyNewsletter.STATUS_SENT
-        ).first()
+        newsletter = DailyNewsletter.objects.filter(status=DailyNewsletter.STATUS_SENT).first()
         if not newsletter:
-            return Response(
-                {'detail': 'No newsletter available.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            return Response({'detail': 'No newsletter available.'}, status=status.HTTP_404_NOT_FOUND)
         return Response(NewsletterDetailSerializer(newsletter).data)
 
 
@@ -132,9 +113,6 @@ class NewsletterDetailView(APIView):
         try:
             newsletter = DailyNewsletter.objects.get(date=date)
         except (DailyNewsletter.DoesNotExist, ValueError):
-            return Response(
-                {'detail': 'Newsletter not found.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            return Response({'detail': 'Newsletter not found.'}, status=status.HTTP_404_NOT_FOUND)
         return Response(NewsletterDetailSerializer(newsletter).data)
 

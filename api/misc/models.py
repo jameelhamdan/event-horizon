@@ -5,17 +5,11 @@ from django_mongodb_backend.managers import MongoManager
 class EmailLog(models.Model):
     TYPE_CONFIRMATION = 'confirmation'
     TYPE_NEWSLETTER = 'newsletter'
-    TYPE_CHOICES = [
-        (TYPE_CONFIRMATION, 'Confirmation'),
-        (TYPE_NEWSLETTER, 'Newsletter'),
-    ]
+    TYPE_CHOICES = [(TYPE_CONFIRMATION, 'Confirmation'), (TYPE_NEWSLETTER, 'Newsletter')]
 
     STATUS_SENT = 'sent'
     STATUS_FAILED = 'failed'
-    STATUS_CHOICES = [
-        (STATUS_SENT, 'Sent'),
-        (STATUS_FAILED, 'Failed'),
-    ]
+    STATUS_CHOICES = [(STATUS_SENT, 'Sent'), (STATUS_FAILED, 'Failed')]
 
     to = models.CharField(max_length=254)
     subject = models.CharField(max_length=255)

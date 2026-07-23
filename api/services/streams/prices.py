@@ -171,10 +171,7 @@ class PriceStream(BaseStream):
 
         # CoinGecko id → (symbol, name) from the DB (fallback to hardcoded).
         cg_ids = get_coingecko_ids()
-        id_to_symbol = {
-            cg_id: (sym, meta.get(sym, ('crypto', sym))[1])
-            for sym, cg_id in cg_ids.items()
-        } or None
+        id_to_symbol = {cg_id: (sym, meta.get(sym, ('crypto', sym))[1]) for sym, cg_id in cg_ids.items()} or None
         records.extend(r for r in _coingecko_quotes(id_to_symbol) if r.get('value') is not None)
         return records
 

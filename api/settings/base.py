@@ -30,9 +30,7 @@ DEBUG = config('DEBUG', default=False)
 
 APP_NAME = config('APP_NAME', default='eventhorizonai.dev')
 
-ADMINS = (
-    ('admin', f'contact@{APP_NAME}'),
-)
+ADMINS = (('admin', f'contact@{APP_NAME}'),)
 
 ALLOWED_HOSTS = ['*']
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
@@ -300,7 +298,7 @@ EGRESS_PROXY_POOL = config('EGRESS_PROXY_POOL', default='')
 # of being stranded — see analyze_live_articles' docstring.
 # BACKFILL_LLM_ENABLED gates historical backfill annotation. When off,
 # backfill_day_chunk_task fetches + saves and defers annotation
-# (annotation_deferred=True) for a later annotate_deferred_articles_task pass.
+# (annotation_deferred=True) for a later reprocess_corpus_task (scope=deferred) pass.
 # Backfill articles never reach 'analyze' regardless of this flag — see
 # ANALYZER_BACKEND note below, 'analyze' is live-only by design (cost/rate
 # limits don't scale to the historical corpus).
@@ -470,7 +468,7 @@ CELERY_QUEUE_TIME_LIMITS = {
 # should render instantly even when a queue's workers are down.
 CELERY_QUEUE_WORKERS = {
     'default': 4,
-    'heavy': 1,
+    'heavy': 2,  # keep in sync with worker-heavy --concurrency in docker-compose.yml
     'bulk': 1,
 }
 

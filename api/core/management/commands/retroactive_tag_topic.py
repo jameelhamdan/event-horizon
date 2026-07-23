@@ -5,14 +5,8 @@ class Command(BaseTaskCommand):
     help = 'Retroactively tag historical events with a single topic slug'
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            'slug',
-            help='The Topic slug to retroactively apply',
-        )
-        parser.add_argument(
-            '--hours', type=int, default=72,
-            help='Lookback window in hours (default: 72)',
-        )
+        parser.add_argument('slug', help='The Topic slug to retroactively apply')
+        parser.add_argument('--hours', type=int, default=72, help='Lookback window in hours (default: 72)')
         parser.add_argument(
             '--background', action='store_true',
             help='Enqueue as a background Celery task instead of running directly',
@@ -26,12 +20,8 @@ class Command(BaseTaskCommand):
         if kwargs['background']:
             from services.queue import enqueue
             enqueue(retroactive_tag_topic_task, **task_kwargs)
-            self.stdout.write(self.style.SUCCESS(
-                f"Enqueued retroactive_tag_topic_task for '{kwargs['slug']}'"
-            ))
+            self.stdout.write(self.style.SUCCESS(f"Enqueued retroactive_tag_topic_task for '{kwargs['slug']}'"))
             return
 
         tagged = retroactive_tag_topic_task(**task_kwargs)
-        self.stdout.write(self.style.SUCCESS(
-            f"Done: {tagged} event(s) tagged with '{kwargs['slug']}'"
-        ))
+        self.stdout.write(self.style.SUCCESS(f"Done: {tagged} event(s) tagged with '{kwargs['slug']}'"))

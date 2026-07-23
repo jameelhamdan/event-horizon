@@ -234,8 +234,7 @@ def classify_zeroshot(
             # Incidental-health guard: a health verdict with no real disease/
             # care-delivery evidence takes the best non-health category instead.
             if category == 'health' and not _HEALTH_EVIDENCE.search(text):
-                best = max((lab for lab in agg if _ZEROSHOT_LABELS[lab] != 'health'),
-                           key=agg.get, default=None)
+                best = max((lab for lab in agg if _ZEROSHOT_LABELS[lab] != 'health'), key=agg.get, default=None)
                 if best:
                     category = _ZEROSHOT_LABELS[best]
             category = _apply_category_gates(category, text, downgrade_to_general)
@@ -309,10 +308,7 @@ class LLMRefiner:
         # exact category/gate/sub logic the annotate primary pass uses.
         texts = [f'{title}. {content}' for title, content in items]
         cls = classify_zeroshot(texts, single=False)
-        return [
-            {'category': c, 'sub_category': s, 'provider': 'zeroshot'} if c else None
-            for c, s, _conf in cls
-        ]
+        return [{'category': c, 'sub_category': s, 'provider': 'zeroshot'} if c else None for c, s, _conf in cls]
 
     def _judge_ollama(self, items: list[tuple[str, str]]) -> list[Verdict]:
         from services.llm import LLMError, get_provider, strip_code_fences

@@ -52,9 +52,7 @@ class ArticleStageFilter(admin.SimpleListFilter):
     def queryset(self, request, queryset):
         from core.models import Article
         if self.value() == "unlocated":
-            return queryset.filter(
-                stage__in=[Article.STAGE_ANNOTATED, Article.STAGE_REFINED], location__isnull=True,
-            )
+            return queryset.filter(stage__in=[Article.STAGE_ANNOTATED, Article.STAGE_REFINED], location__isnull=True)
         if self.value():
             return queryset.filter(stage=self.value())
         return queryset
@@ -150,12 +148,8 @@ class SourceAdmin(ImportExportModelAdmin):
             return redirect(request.path)
 
         try:
-            start_date = datetime.datetime(
-                *map(int, start_raw.split("-")), tzinfo=datetime.timezone.utc
-            )
-            end_date = datetime.datetime(
-                *map(int, end_raw.split("-")), tzinfo=datetime.timezone.utc
-            )
+            start_date = datetime.datetime(*map(int, start_raw.split("-")), tzinfo=datetime.timezone.utc)
+            end_date = datetime.datetime(*map(int, end_raw.split("-")), tzinfo=datetime.timezone.utc)
         except (ValueError, TypeError):
             self.message_user(request, "Invalid date format — use YYYY-MM-DD.", messages.ERROR)
             return redirect(request.path)
@@ -451,9 +445,7 @@ class TopicAdmin(admin.ModelAdmin):
 
     @admin.action(description="Pin selected topics (always shown in header)")
     def pin_topics(self, request, queryset):
-        count = queryset.update(
-            is_pinned=True, is_current=True, is_active=True, is_top_level=True
-        )
+        count = queryset.update(is_pinned=True, is_current=True, is_active=True, is_top_level=True)
         self.message_user(request, f"{count} topic(s) pinned.")
 
     @admin.action(description="Retroactively tag events for selected topics")
@@ -617,9 +609,8 @@ _orig_admin_get_urls = admin.site.get_urls
 def _admin_get_urls():
     from django.urls import path
     from .admin_dashboard import dashboard_view
-    return [
-        path('dashboard/', admin.site.admin_view(dashboard_view), name='ops_dashboard'),
-    ] + _orig_admin_get_urls()
+
+    return [path('dashboard/', admin.site.admin_view(dashboard_view), name='ops_dashboard')] + _orig_admin_get_urls()
 
 
 admin.site.get_urls = _admin_get_urls

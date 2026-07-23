@@ -62,6 +62,13 @@ def enqueue(func, *args, queue: str = 'default', job_timeout: int | None = None,
     return _run_sync(func, args, kwargs, queue)
 
 
+def enqueue_bulk(func, *args, **kwargs):
+    """Enqueue a long one-shot job on the 'bulk' queue with no time cap — the
+    shared shape for every backfill/train/aggregate/reprocess dispatcher (bulk +
+    job_timeout=-1). Extra kwargs pass through to the task."""
+    return enqueue(func, *args, queue='bulk', job_timeout=-1, **kwargs)
+
+
 # ── TaskRun tracking ─────────────────────────────────────────────────────────
 # Best-effort throughout: a Mongo hiccup while recording history must never
 # fail (or silently corrupt the return value of) the task it's tracking.
@@ -216,9 +223,7 @@ def reap_stale_task_runs() -> int:
                       'worker was killed mid-task (hard time limit / OOM / restart)',
             )
             reaped += 1
-    stale_queued = TaskRun.objects.filter(
-        status=TaskRun.Status.QUEUED, started_at__lt=now - timedelta(hours=24),
-    )
+    stale_queued = TaskRun.objects.filter(status=TaskRun.Status.QUEUED, started_at__lt=now - timedelta(hours=24))
     for run in stale_queued:
         _finish_task_run(run, TaskRun.Status.FAILED, error='reaped: never picked up within 24h')
         reaped += 1
@@ -291,8 +296,7 @@ def _on_task_failure(sender=None, task_id=None, exception=None, einfo=None, **kw
     (only once retries, if any, are exhausted — see _on_task_retry for the interim state)."""
     def _mark(run):
         error = f'{type(exception).__name__}: {exception}'
-        _finish_task_run(run, run.Status.FAILED, error=error,
-                          traceback_str=str(einfo) if einfo is not None else None)
+        _finish_task_run(run, run.Status.FAILED, error=error, traceback_str=str(einfo) if einfo is not None else None)
     _track_signal(task_id, 'task_failure', _mark)
 
 

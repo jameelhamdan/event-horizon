@@ -95,10 +95,7 @@ def generate_newsletter(date_str: str | None = None) -> str:
                 all_article_ids.append(_uuid.UUID(a))
             except (ValueError, AttributeError, TypeError):
                 logger.warning('Skipping malformed article id %r on event %s', a, ev.pk)
-    articles = (
-        list(core_models.Article.objects.filter(id__in=all_article_ids))
-        if all_article_ids else []
-    )
+    articles = list(core_models.Article.objects.filter(id__in=all_article_ids)) if all_article_ids else []
     article_dicts = [
         {
             'id': str(a.id),
@@ -120,10 +117,7 @@ def generate_newsletter(date_str: str | None = None) -> str:
         default=None,
     )
     cover_image_url = cover_article.banner_image_url if cover_article else None
-    cover_image_credit = (
-        f'{cover_article.source_code}: {cover_article.title[:80]}'
-        if cover_article else None
-    )
+    cover_image_credit = f'{cover_article.source_code}: {cover_article.title[:80]}' if cover_article else None
 
     # --- Group events by category ---
     events_by_category: dict[str, list] = defaultdict(list)

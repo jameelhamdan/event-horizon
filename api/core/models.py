@@ -70,9 +70,7 @@ class Source(models.Model):
 
     class Meta:
         ordering = ['-created_on']
-        indexes = [
-            models.Index(fields=['created_on']),
-        ]
+        indexes = [models.Index(fields=['created_on'])]
 
     def __str__(self):
         return self.name
@@ -197,8 +195,8 @@ class Article(models.Model):
     # Set on articles saved by a fetch-only backfill (BACKFILL_LLM_ENABLED=False):
     # they are fetched + stored but not annotated, and the live annotate pipeline
     # stage skips them (via .exclude(annotation_deferred=True)) so a large
-    # historical backfill doesn't flood the annotator. annotate_deferred_articles_task
-    # annotates them later and clears this flag.
+    # historical backfill doesn't flood the annotator. reprocess_corpus_task
+    # (scope=deferred) annotates them later and clears this flag.
     annotation_deferred = models.BooleanField(default=False)
 
     updated_on = models.DateTimeField(auto_now=True)
@@ -238,7 +236,7 @@ class Article(models.Model):
             models.Index(fields=['category']),
             models.Index(fields=['processed_on']),
             models.Index(fields=['location']),
-            # annotate_deferred_articles_task selects the (small) deferred set;
+            # reprocess_corpus_task (scope=deferred) selects the (small) deferred set;
             # the live annotate stage excludes it from its pending query.
             models.Index(fields=['annotation_deferred'], name='core_article_annot_defer_idx'),
             # aggregate_events' primary query filters processed_on + published_on range.
@@ -380,10 +378,7 @@ class PriceTick(models.Model):
 
     class Meta:
         ordering = ['-occurred_at']
-        indexes = [
-            models.Index(fields=['symbol', 'occurred_at']),
-            models.Index(fields=['stream_key']),
-        ]
+        indexes = [models.Index(fields=['symbol', 'occurred_at']), models.Index(fields=['stream_key'])]
 
     def __str__(self):
         return f'{self.symbol} {self.value} @ {self.occurred_at:%Y-%m-%d %H:%M}'
@@ -412,10 +407,7 @@ class PriceBar(models.Model):
 
     class Meta:
         ordering = ['-date']
-        indexes = [
-            models.Index(fields=['symbol', 'interval', 'date']),
-            models.Index(fields=['date']),
-        ]
+        indexes = [models.Index(fields=['symbol', 'interval', 'date']), models.Index(fields=['date'])]
 
     def __str__(self):
         return f'{self.symbol} {self.close} @ {self.date:%Y-%m-%d}'
@@ -519,10 +511,7 @@ class NotamZone(models.Model):
 
     class Meta:
         ordering = ['-effective_from']
-        indexes = [
-            models.Index(fields=['is_active']),
-            models.Index(fields=['effective_to']),
-        ]
+        indexes = [models.Index(fields=['is_active']), models.Index(fields=['effective_to'])]
 
     def __str__(self):
         return f'{self.notam_id} ({"active" if self.is_active else "inactive"})'
@@ -546,10 +535,7 @@ class EarthquakeRecord(models.Model):
 
     class Meta:
         ordering = ['-occurred_at']
-        indexes = [
-            models.Index(fields=['occurred_at']),
-            models.Index(fields=['magnitude']),
-        ]
+        indexes = [models.Index(fields=['occurred_at']), models.Index(fields=['magnitude'])]
 
     def __str__(self):
         return f'M{self.magnitude} {self.location_name} {self.occurred_at:%Y-%m-%d}'
@@ -584,10 +570,7 @@ class Topic(models.Model):
     is_active   = models.BooleanField(default=True)
 
     # Lifecycle (current topics)
-    started_at  = models.DateTimeField(
-        null=True, blank=True,
-        help_text='When this topic first appeared in the news',
-    )
+    started_at = models.DateTimeField(null=True, blank=True, help_text='When this topic first appeared in the news')
     ended_at    = models.DateTimeField(
         null=True, blank=True,
         help_text='When this topic resolved or faded. Null means still ongoing.',
@@ -652,10 +635,7 @@ class StaticPoint(models.Model):
 
     class Meta:
         ordering = ['point_type', 'name']
-        indexes = [
-            models.Index(fields=['point_type']),
-            models.Index(fields=['country_code']),
-        ]
+        indexes = [models.Index(fields=['point_type']), models.Index(fields=['country_code'])]
 
     def __str__(self):
         return f'{self.name} ({self.code})'
@@ -809,10 +789,7 @@ class RuntimeConfig(models.Model):
         return obj
 
     def __str__(self):
-        return (
-            f'RuntimeConfig(live_llm={self.live_llm_enabled}, '
-            f'backfill_llm={self.backfill_llm_enabled})'
-        )
+        return f'RuntimeConfig(live_llm={self.live_llm_enabled}, backfill_llm={self.backfill_llm_enabled})'
 
 
 # ---------------------------------------------------------------------------

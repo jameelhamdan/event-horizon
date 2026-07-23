@@ -5,8 +5,7 @@ class Command(BaseTaskCommand):
     help = 'Route recent events to market symbols (deterministic rules router)'
 
     def add_arguments(self, parser):
-        parser.add_argument('--hours', type=int, default=168,
-                            help='Lookback window in hours (default: 168 = 7 days)')
+        parser.add_argument('--hours', type=int, default=168, help='Lookback window in hours (default: 168 = 7 days)')
         parser.add_argument('--background', action='store_true',
                             help='Enqueue as a background Celery task instead of running directly')
 

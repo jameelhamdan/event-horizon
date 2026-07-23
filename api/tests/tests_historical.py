@@ -456,6 +456,35 @@ def test_is_non_article_url_keeps_real_articles():
     assert is_non_article_url('https://www.propublica.org/article/nike-cambodia-factory-heat') is False
 
 
+def test_is_junk_article_flags_hex_asset_titles():
+    from services.data.bodies import is_junk_article
+    # UUID/GUID asset filenames rendered title-cased by the slug-from-URL fallback
+    assert is_junk_article('12B8E10B B55D 4824 817F A3C9Cfe9F779', 'https://ex.com/a') is True
+    assert is_junk_article('B3Ae2589 0497 4534 8B8C 8Bf6Fabf53B0', 'https://ex.com/b') is True
+    assert is_junk_article('9D348C6E 833A 4A38 Ab67 Acb', 'https://ex.com/c') is True  # truncated tail
+    # real headlines with hex-looking words must NOT be flagged
+    assert is_junk_article('China Parade', 'https://ex.com/story/china-parade') is False
+    assert is_junk_article('Ace Beef Cafe Dead Feed', 'https://ex.com/story/x') is False  # all-hex words but wrong shape
+
+
+def test_is_good_quality_body_gates_length_and_paywall():
+    from services.data.bodies import is_good_quality_body, GOOD_BODY_MIN_CHARS
+    assert is_good_quality_body('x' * (GOOD_BODY_MIN_CHARS + 10)) is True   # substantial prose
+    assert is_good_quality_body('too short') is False                       # thin body
+    assert is_good_quality_body(None) is False
+    # long enough but a paywall interstitial → not good quality
+    wall = 'Subscribe to unlock this article. ' + 'x' * GOOD_BODY_MIN_CHARS
+    assert is_good_quality_body(wall) is False
+
+
+def test_always_fail_hydration_sources_are_known_paywalls():
+    from services.data.bodies import ALWAYS_FAIL_HYDRATION_SOURCES
+    assert 'ft-world' in ALWAYS_FAIL_HYDRATION_SOURCES
+    assert 'wsj-markets' in ALWAYS_FAIL_HYDRATION_SOURCES
+    # a normal source must NOT be in the skip/soft-delete set
+    assert 'bbc-world' not in ALWAYS_FAIL_HYDRATION_SOURCES
+
+
 # ── Egress proxy rotation ───────────────────────────────────────────────────────
 
 def test_proxy_pool_parses_and_defaults_empty():
@@ -544,6 +573,9 @@ _TESTS = [
     test_is_paywall_body_keeps_real_article_with_trailing_cta,
     test_is_non_article_url_image_asset_and_sections,
     test_is_non_article_url_keeps_real_articles,
+    test_is_junk_article_flags_hex_asset_titles,
+    test_is_good_quality_body_gates_length_and_paywall,
+    test_always_fail_hydration_sources_are_known_paywalls,
     test_proxy_pool_parses_and_defaults_empty,
     test_proxy_pool_attempt_order_direct_first_and_always_nonempty,
     test_proxy_pool_get_retries_proxy_on_block,

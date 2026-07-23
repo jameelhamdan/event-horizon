@@ -127,6 +127,27 @@ def _is_paywall_body(text: str | None) -> bool:
     return bool(m) and m.start() <= len(text) * _PAYWALL_MARKER_MAX_POSITION
 
 
+# ── Hydration policy ──────────────────────────────────────────────────────────
+# Source codes whose article bodies are never retrievable by an anonymous GET:
+# hard server-side paywalls that serve a "Subscribe to read" shell with NO
+# article body in the HTML at all (verified live — FT/WSJ return a 145 KB shell
+# with zero articleBody/<p> prose, identical for a browser UA). A hydration
+# attempt on these is pure wasted HTTP, so the caller skips the fetch entirely
+# and soft-deletes the (thin, unimprovable) row instead.
+ALWAYS_FAIL_HYDRATION_SOURCES = frozenset({
+    'ft-world', 'wsj-markets', 'economist-finance', 'project-syndicate',
+})
+# A stored body at/above this length that isn't a paywall stub is already good
+# enough — hydration leaves it untouched rather than re-fetching.
+GOOD_BODY_MIN_CHARS = 600
+
+
+def is_good_quality_body(content: str | None) -> bool:
+    """True if a stored ``content`` is already good enough to skip re-hydration:
+    substantial prose (≥ GOOD_BODY_MIN_CHARS) that isn't a paywall interstitial."""
+    return bool(content) and len(content) >= GOOD_BODY_MIN_CHARS and not _is_paywall_body(content)
+
+
 # URL path segments that mark a non-article page regardless of site/CMS —
 # staff bios, contact forms, tag/category indexes, author archives, homepages,
 # affiliate/advisor SEO hubs (Forbes /advisor/ listicles: "Personal Loan
@@ -147,6 +168,17 @@ _IMAGE_DIMENSION_SLUG_RE = re.compile(r'^\d+x\d+(?:[_-]|$)')
 # page never yielded a real <title> (observed: allafrica stories ingested with
 # title = "https://allafrica.com/stories/…").
 _RAW_URL_TITLE_RE = re.compile(r'^\s*https?://', re.I)
+# A title that is a UUID/GUID asset filename rendered title-cased — the same
+# slug-from-URL fallback firing on a CMS asset path (a /<uuid>.jpg image), never
+# an article (observed live: "12B8E10B B55D 4824 817F A3C9Cfe9F779",
+# "B3Ae2589 0497 4534 8B8C 8Bf6Fabf53B0"). The 8-4-4-4-N hyphen groups of a UUID
+# arrive space-separated after slugging; all-hex tokens in that shape never occur
+# in a real headline, so this stays conservative. Final group is 3–12 (truncated
+# UUIDs observed).
+_HEX_ASSET_TITLE_RE = re.compile(
+    r'^\s*[0-9A-Fa-f]{8}\s+[0-9A-Fa-f]{4}\s+[0-9A-Fa-f]{4}\s+'
+    r'[0-9A-Fa-f]{4}\s+[0-9A-Fa-f]{3,12}\s*$'
+)
 
 
 def is_non_article_url(source_url: str | None) -> bool:
@@ -172,7 +204,8 @@ def is_junk_article(title: str | None, source_url: str | None) -> bool:
     URL path. Detection is conservative — clear structural junk only, not
     thin-but-real articles — since it removes the row from every ordinary
     queryset."""
-    if not title or _RAW_URL_TITLE_RE.search(title) or is_junk_page_title(title):
+    if (not title or _RAW_URL_TITLE_RE.search(title)
+            or _HEX_ASSET_TITLE_RE.match(title) or is_junk_page_title(title)):
         return True
     return is_non_article_url(source_url)
 
@@ -211,9 +244,7 @@ def _extract_body_trafilatura(page_html: str) -> str | None:
         import trafilatura
     except ImportError:
         return None
-    extracted = trafilatura.extract(
-        page_html, include_comments=False, include_tables=False, favor_precision=True,
-    )
+    extracted = trafilatura.extract(page_html, include_comments=False, include_tables=False, favor_precision=True)
     if not extracted:
         return None
     return ' '.join(extracted.split()).strip() or None

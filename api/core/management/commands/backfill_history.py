@@ -127,9 +127,7 @@ class Command(BaseTaskCommand):
 
         if until is not None:
             if kwargs['start_date'] or kwargs['end_date']:
-                self.stderr.write(self.style.ERROR(
-                    '--until cannot be combined with --start-date/--end-date.'
-                ))
+                self.stderr.write(self.style.ERROR('--until cannot be combined with --start-date/--end-date.'))
                 return
             start_date = _parse_date(until)
             end_date = datetime.datetime.now(datetime.timezone.utc)
@@ -137,9 +135,7 @@ class Command(BaseTaskCommand):
             start_date = _parse_date(kwargs['start_date'])
             end_date = _parse_date(kwargs['end_date'])
         else:
-            self.stderr.write(self.style.ERROR(
-                'Either --until, or both --start-date and --end-date, are required.'
-            ))
+            self.stderr.write(self.style.ERROR('Either --until, or both --start-date and --end-date, are required.'))
             return
 
         top_n: int = kwargs['top_n']
@@ -157,9 +153,7 @@ class Command(BaseTaskCommand):
         if all_sources:
             # +1: the wikipedia-current-events source is always included
             # (created on demand by backfill_history_task).
-            count = m.Source.objects.filter(
-                type=m.SourceType.RSS, is_enabled=True,
-            ).count() + 1
+            count = m.Source.objects.filter(type=m.SourceType.RSS, is_enabled=True).count() + 1
         elif source_code == WIKIPEDIA_SOURCE_CODE:
             ensure_wikipedia_source()
         else:

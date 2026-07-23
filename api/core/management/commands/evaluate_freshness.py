@@ -11,8 +11,7 @@ class Command(BaseCommand):
             'article being fetched to its event first appearing (Event.created_on)')
 
     def add_arguments(self, parser):
-        parser.add_argument('--days', type=int, default=30,
-                            help='Look-back window in days (default 30)')
+        parser.add_argument('--days', type=int, default=30, help='Look-back window in days (default 30)')
         parser.add_argument('--output', type=str, default=None,
                             help='Report path (default <repo>/results/evaluate_freshness/freshness_report.json)')
 
@@ -21,8 +20,7 @@ class Command(BaseCommand):
         from core.models import Article, Event
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=kwargs['days'])
-        events = list(Event.objects.filter(created_on__gte=cutoff)
-                      .values('created_on', 'article_ids'))
+        events = list(Event.objects.filter(created_on__gte=cutoff).values('created_on', 'article_ids'))
 
         wanted = set()
         for ev in events:

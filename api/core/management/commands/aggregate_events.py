@@ -5,10 +5,7 @@ class Command(BaseTaskCommand):
     help = 'Aggregate processed articles into Events grouped by location and date'
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            '--hours', type=int, default=24,
-            help='Lookback window in hours (default: 24)',
-        )
+        parser.add_argument('--hours', type=int, default=24, help='Lookback window in hours (default: 24)')
         parser.add_argument(
             '--min-articles', type=int, default=1,
             help='Minimum articles required to create an event (default: 1)',
@@ -31,6 +28,4 @@ class Command(BaseTaskCommand):
             return
 
         created, updated = aggregate_events(**task_kwargs)
-        self.stdout.write(self.style.SUCCESS(
-            f'Aggregation complete: {created} created, {updated} updated'
-        ))
+        self.stdout.write(self.style.SUCCESS(f'Aggregation complete: {created} created, {updated} updated'))

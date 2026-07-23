@@ -122,7 +122,7 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
     from django.conf import settings
     from core import models as core_models
     from services.cache import KEY_BOOTSTRAP_INITIAL_DATA_DONE, cache_get, cache_set
-    from services.queue import enqueue
+    from services.queue import enqueue, enqueue_bulk
 
     log = logging.getLogger(__name__)
     if not force:
@@ -136,7 +136,7 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
     start = now - timedelta(days=365 * BOOTSTRAP_ARTICLE_YEARS)
 
     # Long one-shot seeds go on the bulk queue so they don't block the live pipeline.
-    enqueue(backfill_prices_task, years=10, queue='bulk', job_timeout=-1)
+    enqueue_bulk(backfill_prices_task, years=10)
     # source_code=None (wikipedia + all enabled RSS sources), top_n=None → each
     # source's per-day cap derives from its weight (2–6 by priority; 25 for
     # wikipedia). backfill_history_task does one bounded preflight probe per
@@ -144,8 +144,8 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
     # needed on the bulk queue.
     enqueue(backfill_history_task, start, now, None, queue='bulk')
     if settings.FORECAST_ENABLED:
-        enqueue(train_forecast_model_task, queue='bulk', job_timeout=-1)
-        enqueue(run_forecast_task, queue='bulk', job_timeout=-1)
+        enqueue_bulk(train_forecast_model_task)
+        enqueue_bulk(run_forecast_task)
     # Surface the backfilled range as Events (the live aggregate stage's 168h
     # lookback can never reach it). Bulk is a 1-worker FIFO queue, so this runs
     # after the price backfill + forecast training above — by then the heavy
@@ -153,7 +153,7 @@ def bootstrap_initial_data_task(force: bool = False) -> int:
     # only (bulk can't await heavy): aggregate_history_task is idempotent, so
     # any articles processed after it ran are picked up by re-running it
     # (manage.py run_task aggregate_history_task start_date=... end_date=...).
-    enqueue(aggregate_history_task, start, now, queue='bulk', job_timeout=-1)
+    enqueue_bulk(aggregate_history_task, start, now)
 
     cache_set(KEY_BOOTSTRAP_INITIAL_DATA_DONE, True, timeout=None)
     log.info('[bootstrap] initial data backfill enqueued (article window %dy)', BOOTSTRAP_ARTICLE_YEARS)
@@ -566,9 +566,7 @@ def aggregate_history_window_task(w_start: datetime, w_end: datetime, tag: bool 
 
     tagged = 0
     if tag and (created or updated):
-        qs = m.Event.objects.filter(
-            started_at__gte=w_start, started_at__lt=w_end,
-        ).only('pk', 'topics', 'topics_source')
+        qs = m.Event.objects.filter(started_at__gte=w_start, started_at__lt=w_end).only('pk', 'topics', 'topics_source')
         ids = [e.pk for e in qs if _needs_tagging(e.topics) or e.topics_source == 'keyword']
         if ids:
             tagged = tag_events_by_ids(ids)
@@ -637,11 +635,11 @@ def backfill_day_chunk_task(
     if not dry_run and not llm_enabled and result.saved_ids:
         # Flag them so the live annotate stage skips them too (they'd
         # otherwise annotate these on the next tick, since their created_on is
-        # recent). annotate_deferred_articles_task picks them up on demand.
+        # recent). reprocess_corpus_task (scope=deferred) picks them up on demand.
         m.Article.objects.filter(id__in=result.saved_ids).update(annotation_deferred=True)
         logger.info(
             '[backfill] backfill annotation switch OFF — saved %d article(s) for day=%s '
-            'with annotation deferred; run annotate_deferred_articles_task later',
+            'with annotation deferred; run reprocess_corpus_task (scope=deferred) later',
             len(result.saved_ids), day_start.date(),
         )
     if not dry_run and llm_enabled and result.saved_ids:
@@ -682,65 +680,8 @@ def _dispatch_batches(ids: list, batch_size: int, task, **task_kwargs) -> int:
 
 
 @shared_task(**_RETRY_KW)
-def annotate_deferred_articles_task(
-    limit: int = 1000, batch_size: int = 50,
-    start_date=None, end_date=None, rehydrate: bool = False,
-) -> dict:
-    """Dispatcher: select up to ``limit`` articles a fetch-only backfill deferred
-    (annotation_deferred=True, saved with BACKFILL_LLM_ENABLED=False), optionally
-    narrowed to ``[start_date, end_date)`` by ``published_on`` (pass both or
-    neither — same convention as aggregate_history_task/backfill_history_task),
-    and enqueue one annotate_deferred_batch_task per batch of ``batch_size``.
-    Does no annotation itself — that's NLP work (the same model stack the live
-    annotate stage uses) and belongs on the heavy queue, not this bulk-queue
-    orchestrator.
-
-    ``rehydrate=True`` re-fetches each article's body through the current
-    services/data/bodies.py extractor before annotating (workflow.rehydrate_
-    articles, direct HTTP only) — use it to re-annotate a corpus whose stored
-    content was extracted by an older/worse extractor, so the improved text,
-    not the stale body, is what gets classified. Adds ~0.5s/article of live
-    HTTP to each heavy batch.
-
-    Run this after a fetch-only backfill to annotate the saved articles, then
-    aggregate them with aggregate_history_task over the same date range.
-    Re-runnable — call again (or watch the Article states / Stages sections on
-    the dashboard) until no deferred articles remain:
-
-        python manage.py run_task annotate_deferred_articles_task limit=2000 --sync
-        python manage.py run_task annotate_deferred_articles_task \\
-            start_date=2022-03-01 end_date=2022-04-01 --sync
-        python manage.py run_task annotate_deferred_articles_task rehydrate=true --sync
-
-    Returns {'selected', 'batches_dispatched'}.
-    """
-    import core.models as m
-
-    if (start_date is None) != (end_date is None):
-        raise ValueError('annotate_deferred_articles_task: start_date and end_date must be given together')
-
-    window = {}
-    if start_date is not None:
-        window = {
-            'published_on__gte': _parse_backfill_date(start_date),
-            'published_on__lt': _parse_backfill_date(end_date),
-        }
-
-    ids = list(
-        m.Article.objects.filter(annotation_deferred=True, processed_on__isnull=True, **window)
-        .order_by('created_on').values_list('id', flat=True)[:limit]
-    )
-
-    batches = _dispatch_batches(ids, batch_size, annotate_deferred_batch_task, rehydrate=rehydrate)
-
-    logger.info('annotate_deferred_articles_task: selected=%d batches_dispatched=%d rehydrate=%s',
-                len(ids), batches, rehydrate)
-    return {'selected': len(ids), 'batches_dispatched': batches}
-
-
-@shared_task(**_RETRY_KW)
 def annotate_deferred_batch_task(ids: list, rehydrate: bool = False) -> int:
-    """Worker half of the deferred-annotation dispatcher: optionally re-fetch
+    """Worker half of reprocess_corpus_task's annotate pass: optionally rehydrate
     the batch's bodies through the current extractor (``rehydrate=True``), then
     run the on-prem annotate pass (services.processing.annotator, same as the
     live annotate stage) over one batch, then clear annotation_deferred. Runs
@@ -762,156 +703,119 @@ def annotate_deferred_batch_task(ids: list, rehydrate: bool = False) -> int:
 
 
 @shared_task(**_RETRY_KW)
-def healing_task(
-    start_date=None, end_date=None, week_days: int = 7, batch_size: int = 50,
-) -> dict:
-    """Dispatcher: walk a range week by week — defaulting to the earliest
-    article on record through now, i.e. the whole historical corpus — and for
-    each week, re-dispatch every article still short of a terminal stage
-    (stage='fetched', including anything annotation_deferred; stage='refine')
-    for annotation or the refine judge, then re-aggregate that week. A repair
-    tool for gaps anywhere in the corpus, not just a fresh backfill's range
-    (that's aggregate_history_task/annotate_deferred_articles_task above) —
-    run it manually from the dashboard after noticing articles or Events
-    missing; there's no cron entry for it. Does no NLP/aggregation itself,
-    same orchestrator-only rule as every other bulk-queue dispatcher here —
-    every batch below runs on heavy.
-
-    Best-effort ordering only (bulk can't await heavy, same tradeoff
-    bootstrap_initial_data_task accepts): a week's aggregate can dispatch
-    before that week's annotate/refine batches finish, and an article
-    promoted mid-run from 'fetched' to 'refine' by its annotate batch won't
-    be in *this* run's refine selection (computed up front). Both are
-    harmless — annotate/refine/aggregate are all safe to redo — so re-run
-    healing_task again if a pass doesn't fully settle, same as re-running
-    "Annotate deferred" until it hits 0.
-
-    Also skips the claim-lease annotate/analyze normally use to avoid
-    double-dispatching the same row (services.stages._claim_free_articles) —
-    acceptable here since this walks old weeks the live pipeline isn't
-    touching; annotate_articles is idempotent even in the rare case both do
-    pick up the same row.
-
-    Returns {'weeks', 'annotate_batches_dispatched', 'refine_batches_dispatched',
-    'aggregate_windows_dispatched'}.
-    """
-    import core.models as m
-    from services.queue import enqueue
-
-    if start_date is None:
-        earliest = m.Article.objects.order_by('published_on').values_list('published_on', flat=True).first()
-        if earliest is None:
-            return {
-                'weeks': 0, 'annotate_batches_dispatched': 0,
-                'refine_batches_dispatched': 0, 'aggregate_windows_dispatched': 0,
-            }
-        start_date = earliest
-    else:
-        start_date = _parse_backfill_date(start_date)
-    end_date = _parse_backfill_date(end_date) if end_date is not None else datetime.now(dt_timezone.utc)
-
-    step = timedelta(days=week_days)
-    weeks = annotate_batches = refine_batches = aggregate_windows = 0
-    w_start = start_date
-    while w_start < end_date:
-        w_end = min(w_start + step, end_date)
-        weeks += 1
-        window = {'published_on__gte': w_start, 'published_on__lt': w_end}
-
-        fetched_ids = list(
-            m.Article.objects.filter(stage=m.Article.STAGE_FETCHED, **window).values_list('id', flat=True)
-        )
-        annotate_batches += _dispatch_batches(fetched_ids, batch_size, annotate_deferred_batch_task)
-
-        refine_ids = list(
-            m.Article.objects.filter(stage=m.Article.STAGE_REFINE, **window).values_list('id', flat=True)
-        )
-        refine_batches += _dispatch_batches(refine_ids, batch_size, heal_refine_batch_task)
-
-        enqueue(aggregate_history_window_task, w_start, w_end, True, queue='heavy')
-        aggregate_windows += 1
-
-        w_start = w_end
-
-    result = {
-        'weeks': weeks, 'annotate_batches_dispatched': annotate_batches,
-        'refine_batches_dispatched': refine_batches, 'aggregate_windows_dispatched': aggregate_windows,
-    }
-    logger.info('healing_task: %s -> %s: %s', start_date.date(), end_date.date(), result)
-    return result
-
-
-@shared_task(**_RETRY_KW)
 def heal_refine_batch_task(ids: list) -> int:
-    """Worker half of healing_task's refine repair: run the configured refine
-    judge (services.processing.refiner, same as the live refine stage) over
-    one batch of still-'refine'-stage articles. Runs on the heavy queue."""
+    """Worker half of reprocess_corpus_task's refine repair (scope='unfinished'):
+    run the configured refine judge (services.processing.refiner, same as the
+    live refine stage) over one batch of still-'refine'-stage articles. Runs on
+    the heavy queue."""
     from services.workflow.articles import refine_articles
     return refine_articles(ids=ids)
 
 
+REPROCESS_SCOPES = ('deferred', 'unfinished', 'everything')
+
+
 @shared_task(**_RETRY_KW)
-def reprocess_articles_task(
-    start_date=None, end_date=None, week_days: int = 7, batch_size: int = 50,
+def reprocess_corpus_task(
+    scope: str = 'deferred', start_date=None, end_date=None,
+    week_days: int = 7, batch_size: int = 50, limit: int | None = None,
     source_code=None, rehydrate: bool = False,
 ) -> dict:
-    """Dispatcher: walk the corpus week by week — defaulting to the earliest
-    article on record through now, i.e. the whole historical corpus — and re-run
-    the on-prem annotate pass over EVERY article in each window, already-processed
-    rows included. Use it to roll a classifier/taxonomy upgrade across the
-    existing corpus without a fresh backfill.
+    """The one dispatcher behind the dashboard's "Re-process articles" card:
+    walk a range week by week (default: the whole corpus, earliest article →
+    now) and re-dispatch the on-prem annotate pass to the heavy queue for the
+    articles named by ``scope``. The three scopes are the same operation over a
+    different row set, so they share one task:
 
-    The distinction from the two adjacent walkers: annotate_deferred_articles_task
-    only touches never-annotated deferred rows; healing_task only re-dispatches
-    rows still short of a terminal stage. This one deliberately re-annotates
-    terminal ('annotated'/'refined') rows too — the only way to apply a model
-    change to already-classified articles. (Soft-deleted junk stays hidden: it
-    selects through the default manager.)
+      * ``'deferred'``   — never-annotated backfill only (annotation_deferred=True,
+                           processed_on unset). The step after a fetch-only
+                           backfill; pair with ``limit`` to cap a run.
+      * ``'unfinished'`` — anything still short of a terminal stage: ``fetched``
+                           rows go to annotate, ``refine`` rows to the refine
+                           judge, and each week is re-aggregated. Corpus repair.
+      * ``'everything'`` — every article, already-``annotated``/``refined`` rows
+                           included. Rolls a classifier/taxonomy change across
+                           the corpus. (Soft-deleted junk stays hidden — selects
+                           through the default manager.)
 
-    ``source_code`` narrows to one source; ``rehydrate=True`` also re-fetches each
-    body through the current extractor first (for an extraction change, not just a
-    classifier change — adds live HTTP per batch). Resumable and idempotent —
-    annotate_articles is safe to redo, so re-run any window or the whole range
-    freely. Orchestrator-only (bulk queue); every batch runs on heavy, reusing
-    annotate_deferred_batch_task (whose annotation_deferred clear is a harmless
-    no-op on already-processed rows).
+    Common to every scope: optional ``[start_date, end_date)`` range (pass both
+    or neither, filtered on ``published_on``), optional ``source_code`` filter,
+    ``rehydrate`` (re-fetch each body through the current extractor before
+    annotating — adds live HTTP), and an optional global ``limit`` on articles
+    dispatched for annotation. Orchestrator-only (bulk queue); all NLP/
+    aggregation runs on heavy, reusing annotate_deferred_batch_task (whose
+    annotation_deferred clear is a harmless no-op on already-processed rows) and
+    heal_refine_batch_task.
 
-        python manage.py run_task reprocess_articles_task --sync
-        python manage.py run_task reprocess_articles_task \\
-            start_date=2023-01-01 end_date=2023-02-01 source_code=bbc-world --sync
+    Idempotent — annotate/refine/aggregate are all safe to redo, so re-run any
+    window or the whole range freely. Best-effort ordering only (bulk can't await
+    heavy): a week's aggregate can dispatch before its annotate/refine batches
+    finish, and a row promoted mid-run isn't reconsidered this pass — both
+    harmless, re-run if a pass doesn't fully settle.
 
-    Returns {'weeks', 'batches_dispatched', 'articles_dispatched'}.
+        python manage.py run_task reprocess_corpus_task scope=deferred limit=2000 --sync
+        python manage.py run_task reprocess_corpus_task scope=unfinished --sync
+        python manage.py run_task reprocess_corpus_task scope=everything \\
+            start_date=2023-01-01 end_date=2023-02-01 source_code=bbc-world rehydrate=true --sync
+
+    Returns {'scope', 'weeks', 'annotate_batches', 'refine_batches',
+    'aggregate_windows', 'articles_annotated'}.
     """
     import core.models as m
+    from services.queue import enqueue
 
+    if scope not in REPROCESS_SCOPES:
+        raise ValueError(f'reprocess_corpus_task: unknown scope {scope!r} (expected one of {list(REPROCESS_SCOPES)})')
+    if (start_date is None) != (end_date is None):
+        raise ValueError('reprocess_corpus_task: start_date and end_date must be given together')
+
+    empty = {'scope': scope, 'weeks': 0, 'annotate_batches': 0, 'refine_batches': 0, 'aggregate_windows': 0, 'articles_annotated': 0}
     if start_date is None:
         earliest = m.Article.objects.order_by('published_on').values_list('published_on', flat=True).first()
         if earliest is None:
-            return {'weeks': 0, 'batches_dispatched': 0, 'articles_dispatched': 0}
+            return empty
         start_date = earliest
     else:
         start_date = _parse_backfill_date(start_date)
     end_date = _parse_backfill_date(end_date) if end_date is not None else datetime.now(dt_timezone.utc)
 
     source_filter = {'source_code': source_code} if source_code else {}
+    # Which rows this scope sends to *annotation* each week. 'unfinished' also
+    # sends its refine-stage rows to the judge and re-aggregates (handled below).
+    annotate_predicate = {
+        'deferred': {'annotation_deferred': True, 'processed_on__isnull': True},
+        'unfinished': {'stage': m.Article.STAGE_FETCHED},
+        'everything': {},
+    }[scope]
+
     step = timedelta(days=week_days)
-    weeks = batches = articles = 0
+    weeks = annotate_batches = refine_batches = aggregate_windows = annotated = 0
+    remaining = limit
     w_start = start_date
     while w_start < end_date:
         w_end = min(w_start + step, end_date)
         weeks += 1
-        ids = list(
-            m.Article.objects.filter(
-                published_on__gte=w_start, published_on__lt=w_end, **source_filter,
-            ).values_list('id', flat=True)
-        )
-        articles += len(ids)
-        batches += _dispatch_batches(ids, batch_size, annotate_deferred_batch_task, rehydrate=rehydrate)
+        window = {'published_on__gte': w_start, 'published_on__lt': w_end, **source_filter}
+
+        annotate_ids = list(m.Article.objects.filter(**window, **annotate_predicate).values_list('id', flat=True))
+        if remaining is not None:
+            annotate_ids = annotate_ids[:remaining]
+            remaining -= len(annotate_ids)
+        annotate_batches += _dispatch_batches(annotate_ids, batch_size, annotate_deferred_batch_task, rehydrate=rehydrate)
+        annotated += len(annotate_ids)
+
+        if scope == 'unfinished':
+            refine_ids = list(m.Article.objects.filter(**window, stage=m.Article.STAGE_REFINE).values_list('id', flat=True))
+            refine_batches += _dispatch_batches(refine_ids, batch_size, heal_refine_batch_task)
+            enqueue(aggregate_history_window_task, w_start, w_end, True, queue='heavy')
+            aggregate_windows += 1
+
+        if remaining is not None and remaining <= 0:
+            break
         w_start = w_end
 
-    result = {'weeks': weeks, 'batches_dispatched': batches, 'articles_dispatched': articles}
-    logger.info('reprocess_articles_task: %s -> %s src=%s rehydrate=%s: %s',
-                start_date.date(), end_date.date(), source_code, rehydrate, result)
+    result = {'scope': scope, 'weeks': weeks, 'annotate_batches': annotate_batches, 'refine_batches': refine_batches, 'aggregate_windows': aggregate_windows, 'articles_annotated': annotated}
+    logger.info('reprocess_corpus_task: %s -> %s scope=%s src=%s rehydrate=%s: %s', start_date.date(), end_date.date(), scope, source_code, rehydrate, result)
     return result
 
 
@@ -1060,10 +964,7 @@ def adjust_source_weights_task() -> int:
         if abs(new_weight - source.weight) > 0.001:
             source.weight = new_weight
             source.save(update_fields=['weight'])
-            logger.info(
-                '[weights] %s: yield=%.0f%% → weight %.2f',
-                source.code, yield_rate * 100, new_weight,
-            )
+            logger.info('[weights] %s: yield=%.0f%% → weight %.2f', source.code, yield_rate * 100, new_weight)
             adjusted += 1
 
     return adjusted

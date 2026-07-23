@@ -173,9 +173,7 @@ class ArticleAnalyzer:
 
     def _analyze_chunk(self, texts: list[str], service) -> list[ArticleAnalysis]:
         """Send one multi-article prompt (array-in, array-out) and parse it back."""
-        user = '\n\n'.join(
-            f'Article {i + 1}:\n{t[: self._BATCH_MAX_CHARS]}' for i, t in enumerate(texts)
-        )
+        user = '\n\n'.join(f'Article {i + 1}:\n{t[: self._BATCH_MAX_CHARS]}' for i, t in enumerate(texts))
         try:
             raw, usage = service.chat_with_usage(
                 messages=[

@@ -88,8 +88,7 @@ def _run_model_arm(frame, horizon, origins, train_window_days):
         # Leakage self-check: no training row may be dated at/after any test row.
         assert train['date'].max() <= t_o < test['date'].min(), 'LEAKAGE: train/test overlap'
 
-        clf = LGBMClassifier(n_estimators=200, learning_rate=0.05, num_leaves=31,
-                             min_child_samples=20, verbose=-1)
+        clf = LGBMClassifier(n_estimators=200, learning_rate=0.05, num_leaves=31, min_child_samples=20, verbose=-1)
         clf.fit(train[cols].astype(float).values, train[ycol].astype(int).values)
         p = clf.predict_proba(test[cols].astype(float).values)[:, 1]
         proba.extend(p.tolist())
@@ -133,8 +132,7 @@ def run_backtest(symbols=None, years=2, step_days=21, train_window_days=None,
     load_start = start - timedelta(days=train_window_days + 60)
 
     logger.info('[backtest] building frames %s … %s', load_start.date(), end.date())
-    frame_rules = feat.build_training_frame(symbols, load_start, end, horizons,
-                                            include_events=True, router='rules')
+    frame_rules = feat.build_training_frame(symbols, load_start, end, horizons, include_events=True, router='rules')
     frame_price = feat.build_training_frame(symbols, load_start, end, horizons, include_events=False)
 
     if frame_price.empty:
@@ -175,12 +173,9 @@ def run_backtest(symbols=None, years=2, step_days=21, train_window_days=None,
             else:
                 yt, pr, yp = _run_model_arm(fr, h, origins, train_window_days)
             report['results'][f'h{h}'][arm] = _metrics(yt, pr, yp) if yt else {'n': 0}
-            logger.info('[backtest] h%dd %s -> %s', h, arm,
-                        report['results'][f'h{h}'][arm].get('accuracy'))
+            logger.info('[backtest] h%dd %s -> %s', h, arm, report['results'][f'h{h}'][arm].get('accuracy'))
 
-    output_path = output_path or os.path.join(
-        os.getcwd(), f'forecast_backtest_{end.strftime("%Y%m%dT%H%M%S")}.json'
-    )
+    output_path = output_path or os.path.join(os.getcwd(), f'forecast_backtest_{end.strftime("%Y%m%dT%H%M%S")}.json')
     with open(output_path, 'w', encoding='utf-8') as fh:
         json.dump(report, fh, indent=2, default=str)
     report['_output_path'] = output_path

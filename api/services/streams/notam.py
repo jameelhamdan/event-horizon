@@ -84,10 +84,7 @@ def _circle_to_polygon(lat: float, lon: float, radius_nm: float, points: int = 3
     coords = []
     for i in range(points + 1):
         angle = math.radians(i * 360 / points)
-        coords.append([
-            round(lon + radius_deg * math.cos(angle), 6),
-            round(lat + radius_deg * math.sin(angle), 6),
-        ])
+        coords.append([round(lon + radius_deg * math.cos(angle), 6), round(lat + radius_deg * math.sin(angle), 6)])
     return {'type': 'Polygon', 'coordinates': [coords]}
 
 
@@ -245,9 +242,7 @@ class NotamStream(BaseStream):
 
         all_ids = [r['notam_id'] for r in records]
 
-        existing_ids = set(
-            NotamRecord.objects.filter(notam_id__in=all_ids).values_list('notam_id', flat=True)
-        )
+        existing_ids = set(NotamRecord.objects.filter(notam_id__in=all_ids).values_list('notam_id', flat=True))
 
         new_records = [r for r in records if r['notam_id'] not in existing_ids]
 

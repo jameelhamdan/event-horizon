@@ -274,10 +274,7 @@ class OpenAICompatLLMService(BaseLLMService):
         start = self._keys._incr() % n
         for i in range(n):
             key = self._keys._items[(start + i) % n]
-            available = [
-                m for m in models
-                if not _debounce.is_active(self._provider, f'{key}:{m}')
-            ]
+            available = [m for m in models if not _debounce.is_active(self._provider, f'{key}:{m}')]
             if available:
                 return key, available
         return None
@@ -452,10 +449,7 @@ class OllamaLLMService(BaseLLMService):
         # Ollama's internal queue for the full read timeout — Ollama is the last
         # tier in every route, so a fast reject just skips it for this call.
         slots = _get_ollama_slots()
-        token = slots.acquire(
-            float(getattr(settings, 'OLLAMA_ACQUIRE_SECONDS', 2.0)),
-            slot_ttl=int(self._timeout) + 10,
-        )
+        token = slots.acquire(float(getattr(settings, 'OLLAMA_ACQUIRE_SECONDS', 2.0)), slot_ttl=int(self._timeout) + 10)
         if token is None:
             _record_llm_call(self._provider, False, int((_time.monotonic() - t0) * 1000))
             raise LLMError(f'Ollama busy ({self._provider}): no free slot')
@@ -663,9 +657,7 @@ _backend_lock = threading.Lock()
 
 def _build_backend(name: str, spec: dict) -> BaseLLMService:
     if name.startswith('ollama'):
-        return OllamaLLMService(
-            spec['base_url'], spec['model'], timeout=spec.get('timeout'), provider_name=name,
-        )
+        return OllamaLLMService(spec['base_url'], spec['model'], timeout=spec.get('timeout'), provider_name=name)
     return OpenAICompatLLMService(
         spec['base_url'],
         spec['api_keys'],

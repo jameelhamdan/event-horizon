@@ -24,10 +24,7 @@ NER_MODEL_NAME = "Babelscape/wikineural-multilingual-ner"
 # non-English articles the English deberta would miss. Both run on CPU
 # (~0.3s + ~0.7s per item). Trim to one entry if latency matters more than the
 # last few points of accuracy.
-ZEROSHOT_MODEL_NAMES = [
-    "MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
-    "MoritzLaurer/bge-m3-zeroshot-v2.0",
-]
+ZEROSHOT_MODEL_NAMES = ["MoritzLaurer/deberta-v3-base-zeroshot-v2.0", "MoritzLaurer/bge-m3-zeroshot-v2.0"]
 # Back-compat single-name alias (first ensemble member) for any caller/preloader
 # that still expects one string.
 ZEROSHOT_MODEL_NAME = ZEROSHOT_MODEL_NAMES[0]

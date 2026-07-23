@@ -38,8 +38,7 @@ single registry (`services/stages.py`) executed by exactly two Celery tasks (see
 | `run_stage_chunk_task(stage_name, ids)` | The only fan-out worker — executes one stage's handler over one chunk of ids — runs on the stage's own queue (`default`/`heavy`) |
 | `dispatch_stage_task(stage_name)` | Force-dispatches one stage, skipping the cadence gate (admin buttons, manual repair) |
 | `backfill_history_task` → `backfill_day_chunk_task(day, source_codes)` | Historical backfill dispatcher (separate from the live-pipeline `fetch` stage) — one day × `BACKFILL_CHUNK_SIZE` sources, fetches+saves+annotates inline; see `services/data/historical.py` |
-| `healing_task` (manual, `bulk`) | Corpus repair — walks the whole history week by week, re-dispatching every article still short of a terminal stage (`fetched`/`refine`) to `heavy` for annotate/refine and re-aggregating each week. No cron entry; run from the dashboard Actions tab or `run_task healing_task --sync`. |
-| `reprocess_articles_task` (manual, `bulk`) | Classifier/taxonomy rollout — same week-by-week walk but re-annotates **every** article, terminal rows included, to apply a model change without a fresh backfill. `source_code=` narrows; `rehydrate=True` re-fetches bodies first. Dashboard Actions → "Re-annotate corpus", or `run_task reprocess_articles_task --sync`. |
+| `reprocess_corpus_task(scope=…)` (manual, `bulk`) | The one re-processing walker — walks a range week by week (default: the whole corpus) and re-dispatches the on-prem annotate pass to `heavy` for the rows named by `scope`: `deferred` (never-annotated backfill; the step after a fetch-only backfill), `unfinished` (anything stuck at `fetched`/`refine` — also refines and re-aggregates each week), or `everything` (all rows incl. terminal — a classifier/taxonomy rollout). `rehydrate=True` re-fetches bodies first; `deferred` honours `limit`; `source_code=` narrows. No cron entry; run from the dashboard's "Re-process articles" card or `run_task reprocess_corpus_task scope=deferred --sync`. |
 
 Each stage in the registry declares its own `chunk_size`/`limit`/`queue`/
 `every_minutes` — to change a stage's throughput, edit its entry in
@@ -101,9 +100,9 @@ coverage panel.
 - **LLM providers** — per-provider ok/err/avg-ms + active debounce cooldowns.
 - **Forecast model** — artifact mtimes, last forecast, live directional accuracy.
 - **Actions** — run full sync, backfill prices/articles (incl. "until date"),
-  **Re-annotate corpus** (`reprocess_articles_task`) and corpus **healing**
-  (`healing_task`), retrain forecast, re-run bootstrap, and **cancel a job** by
-  Celery task id (`app.control.revoke`).
+  **Re-process articles** (`reprocess_corpus_task` — scope: deferred / unfinished
+  / everything, with an optional rehydrate toggle), retrain forecast, re-run
+  bootstrap, and **cancel a job** by Celery task id (`app.control.revoke`).
 
 Per-record reprocessing is also available from the `Article`/`Event` changelists: the
 **"pipeline gap"** filter narrows to records stuck at a stage, and bulk actions

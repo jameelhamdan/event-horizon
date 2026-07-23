@@ -54,7 +54,7 @@
         <input type="hidden" name="flag" value="backfill">
         <input type="hidden" name="enabled" value="{% if llm_flags.backfill %}false{% else %}true{% endif %}">
         <button class="button" type="submit">{% if llm_flags.backfill %}Disable{% else %}Enable{% endif %} historical-backfill LLM</button>
-        <p class="ops-tile-desc">Currently <strong>{% if llm_flags.backfill %}ON{% else %}OFF{% endif %}</strong>. When OFF, historical backfill fetches + saves articles but defers annotation — including the in-flight backfill, on its next chunk. Annotate them later with <em>Annotate deferred</em> below.</p>
+        <p class="ops-tile-desc">Currently <strong>{% if llm_flags.backfill %}ON{% else %}OFF{% endif %}</strong>. When OFF, historical backfill fetches + saves articles but defers annotation — including the in-flight backfill, on its next chunk. Annotate them later with <em>Re-process articles</em> (scope: Deferred) below.</p>
       </form>
     </div>
 
@@ -80,14 +80,20 @@
       </form>
       <form method="post" class="ops-tile ops-tile-wide">
         {% csrf_token %}
-        <input type="hidden" name="dashboard_action" value="annotate_deferred">
+        <input type="hidden" name="dashboard_action" value="reprocess_corpus">
         <div class="ops-tile-row">
-          <input type="date" name="start_date" title="Range start (UTC) — optional, blank = every deferred article">
-          <input type="date" name="end_date" title="Range end (UTC, exclusive) — optional, blank = every deferred article">
-          <input type="number" name="limit" min="1" placeholder="Max articles (default 2000)" style="flex:1">
-          <button class="button" type="submit">2. Annotate deferred</button>
+          <input type="date" name="start_date" title="Range start (UTC) — optional, blank = the whole corpus">
+          <input type="date" name="end_date" title="Range end (UTC, exclusive) — optional, blank = the whole corpus">
+          <select name="scope" title="Which articles to annotate">
+            <option value="deferred">Deferred only</option>
+            <option value="unfinished">Unfinished (+ re-aggregate)</option>
+            <option value="everything">Everything, incl. annotated</option>
+          </select>
+          <input type="number" name="limit" min="1" placeholder="Max (deferred only, default 2000)" style="flex:1">
+          <label class="ops-muted" style="font-weight:normal" title="Re-fetch each article body through the current extractor before annotating"><input type="checkbox" name="rehydrate" value="1"> rehydrate</label>
+          <button class="button" type="submit">2. Re-process articles</button>
         </div>
-        <p class="ops-tile-desc">Equivalent to the <em>annotate</em> stage above: on-prem classification + geo + sentiment + importance, over articles the fetch above deferred (only needed if historical-backfill LLM was off). Leave the dates blank for every deferred article, or set both to target one month/period. Dispatches onto the heavy queue and returns immediately — watch the "Deferred" row in Article states below, re-run once it hits 0, then step 3.</p>
+        <p class="ops-tile-desc">Runs the on-prem <em>annotate</em> pass (category + geo + intensity + sentiment + importance) onto the heavy queue and returns immediately. Leave the dates blank for the whole corpus, or set both to target one period. <strong>Scope</strong> picks which rows: <em>Deferred only</em> — never-annotated backfill (the step after a fetch-only backfill; step 2 of this flow, then run step 3); <em>Unfinished</em> — anything stuck at <em>fetched</em> or <em>refine</em>, and re-aggregates each week (corpus repair); <em>Everything</em> — re-annotate all rows including already-<em>annotated</em>/<em>refined</em> ones (to roll out a classifier/taxonomy change). Tick <strong>rehydrate</strong> to re-fetch each body through the current extractor first (adds live HTTP; for an extraction change). Idempotent — watch Article states below and re-run freely.</p>
       </form>
       <form method="post" class="ops-tile ops-tile-wide">
         {% csrf_token %}
@@ -101,32 +107,6 @@
       </form>
     </div>
 
-    <h3 class="ops-group-title">Healing
-      <span class="ops-muted" style="font-weight:normal">— repair gaps anywhere in the corpus, not just a fresh backfill's range</span>
-    </h3>
-    <div class="ops-tiles">
-      <form method="post" class="ops-tile ops-tile-wide">
-        {% csrf_token %}
-        <input type="hidden" name="dashboard_action" value="heal_pipeline">
-        <div class="ops-tile-row">
-          <input type="date" name="start_date" title="Range start (UTC) — optional, blank = the earliest article on record">
-          <input type="date" name="end_date" title="Range end (UTC, exclusive) — optional, blank = now">
-          <button class="button" type="submit">Heal pipeline gaps</button>
-        </div>
-        <p class="ops-tile-desc">Walks the range week by week and re-dispatches every article still short of a terminal stage — stuck at <em>fetched</em> (including deferred) or <em>refine</em> — for annotation or the refine judge, then re-aggregates that week. Leave both dates blank to walk the entire history from the first article on record. No cron entry for this — trigger it manually after noticing a gap. Idempotent; re-run if a pass doesn't fully settle (an article promoted mid-run to a new stage is picked up on the next run).</p>
-      </form>
-      <form method="post" class="ops-tile ops-tile-wide">
-        {% csrf_token %}
-        <input type="hidden" name="dashboard_action" value="reannotate_corpus">
-        <div class="ops-tile-row">
-          <input type="date" name="start_date" title="Range start (UTC) — optional, blank = the earliest article on record">
-          <input type="date" name="end_date" title="Range end (UTC, exclusive) — optional, blank = now">
-          <label class="ops-muted" style="font-weight:normal"><input type="checkbox" name="rehydrate" value="1"> re-fetch bodies</label>
-          <button class="button" type="submit">Re-annotate corpus</button>
-        </div>
-        <p class="ops-tile-desc">Walks the range week by week and re-runs the annotate pass over <strong>every</strong> article — including already-classified <em>annotated</em>/<em>refined</em> rows — to roll a classifier/taxonomy upgrade across the whole corpus (unlike <em>Heal</em>, which only touches non-terminal rows). Leave dates blank to walk all history. Tick <em>re-fetch bodies</em> to also re-hydrate through the current extractor (adds live HTTP; for an extraction change, not just a model change). Idempotent; re-run freely.</p>
-      </form>
-    </div>
 
     <h3 class="ops-group-title">Topics</h3>
     <div class="ops-tiles">

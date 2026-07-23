@@ -39,10 +39,10 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
-from services.data.base import ArticleDatum
+from services.data.base import ArticleDatum, article_datum
 # No _block_source here on purpose: a Wayback failure is Wayback's fault, not
 # the news source's — pacing/backoff handles it; the source stays unblocked.
-from services.data.historical import _HTTP_HEADERS, _is_source_blocked
+from services.data.historical import BaseHistoricalService, _HTTP_HEADERS
 
 if TYPE_CHECKING:
     import core.models
@@ -199,9 +199,7 @@ def fetch_nearest_capture(
     returned timestamp is acceptably close: Wayback happily redirects to a
     capture months away when nothing nearer exists."""
     requested = around.strftime('%Y%m%d%H%M%S')
-    resp = _wayback_get(
-        f'https://web.archive.org/web/{requested}id_/{page_url}', deadline=deadline, retries=1,
-    )
+    resp = _wayback_get(f'https://web.archive.org/web/{requested}id_/{page_url}', deadline=deadline, retries=1)
     if resp is None:
         return None, None
     m = _SNAPSHOT_TS_RE.search(resp.url)
@@ -210,10 +208,13 @@ def fetch_nearest_capture(
 
 # ── Strategy ─────────────────────────────────────────────────────────────────
 
-class WaybackHistoricalService:
-    """Same fetch_day() interface as RSSHistoricalService/
-    WikipediaHistoricalService so HistoricalBackfillService can drive any of
-    them interchangeably (see _build_strategy there)."""
+class WaybackHistoricalService(BaseHistoricalService):
+    """Front-page-mining strategy: same fetch_day() interface as the other
+    BaseHistoricalService subclasses so HistoricalBackfillService can drive any
+    of them interchangeably (see _build_strategy there)."""
+
+    LOG_LABEL = 'WaybackHistorical'
+    LOG_NOUN = 'headline link'
 
     def __init__(
         self, source: 'core.models.Source', max_candidates: int | None = None,
@@ -224,32 +225,15 @@ class WaybackHistoricalService:
             raise HistoricalServiceError(
                 f'Source {source.code!r} has no Wayback front-page config.'
             )
-        self._source = source
+        super().__init__(source, max_candidates, first_match_only)
         self._config = FRONTPAGES[source.code]
-        self._max_candidates = max_candidates
-        self._first_match_only = first_match_only
 
-    def fetch_day(
-        self,
-        day_start: datetime.datetime,
-        day_end: datetime.datetime,
-        deadline: datetime.datetime | None = None,
-    ) -> list[ArticleDatum]:
-        if _is_source_blocked(self._source.code):
-            logger.info(
-                'WaybackHistorical source=%r day=%s: skipped (temporarily blocked)',
-                self._source.code, day_start.date(),
-            )
-            return []
-
+    def _discover(self, day_start, day_end, deadline) -> list[tuple]:
         page_html: str | None = None
         timestamps = cdx_snapshots(self._config['url'], day_start, day_end, deadline=deadline)
         if timestamps:
             ts = _nearest_noon(timestamps)
-            resp = _wayback_get(
-                f'https://web.archive.org/web/{ts}id_/{self._config["url"]}',
-                deadline=deadline, retries=1,
-            )
+            resp = _wayback_get(f'https://web.archive.org/web/{ts}id_/{self._config["url"]}', deadline=deadline, retries=1)
             page_html = resp.text if resp is not None else None
         else:
             # CDX empty — either genuinely no capture, or the domain is
@@ -266,35 +250,24 @@ class WaybackHistoricalService:
                 page_html = None
 
         if not page_html:
-            logger.info(
-                'WaybackHistorical source=%r day=%s: no usable front-page capture',
-                self._source.code, day_start.date(),
-            )
+            logger.info('WaybackHistorical source=%r day=%s: no usable front-page capture', self._source.code, day_start.date())
             return []
 
         links = extract_frontpage_links(self._config['url'], page_html, self._config['article_re'])
-        cap = 1 if self._first_match_only else self._max_candidates
-        if cap and len(links) > cap:
-            links = links[:cap]
-        datums = [
-            self._link_to_datum(url, anchor, ts, rank)
-            for rank, (anchor, url) in enumerate(links)
-        ]
-        logger.info(
-            'WaybackHistorical source=%r day=%s: %d headline link(s) from capture %s',
-            self._source.code, day_start.date(), len(datums), ts,
-        )
-        return datums
+        # Carry the capture timestamp + front-page rank with each link so the
+        # base's cap runs before conversion and _to_datum stays pure.
+        return [(link_url, anchor, ts, rank) for rank, (anchor, link_url) in enumerate(links)]
+
+    def _to_datum(self, item: tuple, day_start: datetime.datetime) -> ArticleDatum:
+        link_url, anchor, ts, rank = item
+        return self._link_to_datum(link_url, anchor, ts, rank)
 
     def _link_to_datum(self, url: str, anchor: str, ts: str, rank: int) -> ArticleDatum:
-        published = datetime.datetime.strptime(ts, '%Y%m%d%H%M%S').replace(
-            tzinfo=datetime.timezone.utc,
-        )
-        return ArticleDatum(
+        published = datetime.datetime.strptime(ts, '%Y%m%d%H%M%S').replace(tzinfo=datetime.timezone.utc)
+        return article_datum(
+            self._source,
             source_url=url,
-            author=self._source.name,
-            author_slug=self._source.author_slug or self._source.code,
-            title=anchor[:200],
+            title=anchor,
             content=anchor,
             published_on=published,
             extra_data={

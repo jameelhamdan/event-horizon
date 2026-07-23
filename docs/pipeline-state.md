@@ -29,7 +29,7 @@ provider name) if you need to know.
 
 `annotation_deferred=True` (fetch-only backfill) parks an article off the live
 pipeline regardless of stage — `Article.pipeline_state` surfaces it as
-`deferred`; `annotate_deferred_articles_task` picks those up on demand.
+`deferred`; `reprocess_corpus_task` (scope=`deferred`) picks those up on demand.
 
 **Location is an attribute, not a pipeline step.** A terminal article either
 has a `location` (→ aggregates into events) or doesn't (terminal, but kept —

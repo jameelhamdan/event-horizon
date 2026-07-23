@@ -144,27 +144,73 @@ def test_weighted_symbols_empty_when_no_symbols_routed():
     assert weighted == []
 
 
-def test_weighted_symbols_shape_and_sign_for_negative_sentiment():
+def test_weighted_symbols_shape_and_polarity_for_negative_conflict():
+    """A negative conflict event pushes equities DOWN but the safe-haven / fear
+    instruments (gold, oil, gas, VIX) UP — the signed-affinity inversion."""
     from services.forecasting.routing import route_event_to_weighted_symbols
     with _patch_panel():
         weighted = route_event_to_weighted_symbols(
             'conflict', 'Russia', ['ukraine-war'], sub_categories=['war'], sentiment=-0.8,
         )
     assert weighted
+    by_symbol = {}
     for row in weighted:
         assert set(row.keys()) == {'symbol', 'weight'}
-        assert row['weight'] < 0  # negative sentiment → negative-signed weight
         assert -1.0 <= row['weight'] <= 1.0
+        by_symbol[row['symbol']] = row['weight']
+    # Havens / supply-shock / fear gauge rise on a negative conflict event.
+    for haven in ('GC=F', 'CL=F', 'NG=F', '^VIX'):
+        assert by_symbol[haven] > 0, f'{haven} should be UP on negative conflict'
+    # Equities fall (SPY has positive affinity → moves with the news).
+    if 'SPY' in by_symbol:
+        assert by_symbol['SPY'] < 0
 
 
-def test_weighted_symbols_positive_sentiment_gives_positive_weight():
+def test_weighted_symbols_positive_economic_directions():
+    """Positive economic news: risk assets up (SPY, yields, dollar), inverse
+    instruments down (VIX fear gauge, gold haven)."""
     from services.forecasting.routing import route_event_to_weighted_symbols
     with _patch_panel():
         weighted = route_event_to_weighted_symbols(
             'economic', '', [], sub_categories=['monetary-policy'], sentiment=0.6,
         )
     assert weighted
-    assert all(row['weight'] > 0 for row in weighted)
+    by_symbol = {r['symbol']: r['weight'] for r in weighted}
+    assert by_symbol['SPY'] > 0                 # risk asset, moves with sentiment
+    assert by_symbol.get('GC=F', -1) < 0        # gold inverse on economic
+    if '^VIX' in by_symbol:
+        assert by_symbol['^VIX'] < 0            # fear gauge falls on good news
+
+
+def test_risk_off_category_damps_positive_but_not_direction():
+    """A positive sentiment on a conflict event is damped (likely a misread of
+    escalation words) — smaller magnitude, same direction; negative is not."""
+    from services.forecasting.routing import route_event_to_weighted_symbols
+    with _patch_panel():
+        pos = route_event_to_weighted_symbols('conflict', 'Russia', [], sub_categories=['war'], sentiment=0.6)
+        neg = route_event_to_weighted_symbols('conflict', 'Russia', [], sub_categories=['war'], sentiment=-0.6)
+        econ_pos = route_event_to_weighted_symbols('economic', '', [], sub_categories=['markets'], sentiment=0.6)
+    gc_pos = next(r['weight'] for r in pos if r['symbol'] == 'GC=F')   # haven, inverse
+    gc_neg = next(r['weight'] for r in neg if r['symbol'] == 'GC=F')
+    # Direction preserved: gold DOWN on positive conflict, UP on negative.
+    assert gc_pos < 0 and gc_neg > 0
+    # Positive conflict is damped (~half), so its magnitude is smaller than the
+    # equal-magnitude negative case.
+    assert abs(gc_pos) < abs(gc_neg)
+    # Non-risk-off category (economic) is NOT damped.
+    spy_econ = next(r['weight'] for r in econ_pos if r['symbol'] == 'SPY')
+    assert spy_econ > 0
+
+
+def test_vix_always_inverts_sentiment():
+    """^VIX must move opposite the news in every category it routes to."""
+    from services.forecasting.routing import route_event_to_weighted_symbols
+    with _patch_panel():
+        neg = route_event_to_weighted_symbols('political', 'US', [], sub_categories=['election'], sentiment=-0.7)
+        pos = route_event_to_weighted_symbols('political', 'US', [], sub_categories=['election'], sentiment=0.7)
+    vix_neg = next(r['weight'] for r in neg if r['symbol'] == '^VIX')
+    vix_pos = next(r['weight'] for r in pos if r['symbol'] == '^VIX')
+    assert vix_neg > 0 and vix_pos < 0  # bad news → VIX up, good news → VIX down
 
 
 def test_weighted_symbols_magnitude_never_exceeds_one():
@@ -214,8 +260,10 @@ _TESTS = [
     test_select_route_sentiment_keeps_neutral_zero_finbert,
     test_select_route_sentiment_falls_back_when_finbert_missing,
     test_weighted_symbols_empty_when_no_symbols_routed,
-    test_weighted_symbols_shape_and_sign_for_negative_sentiment,
-    test_weighted_symbols_positive_sentiment_gives_positive_weight,
+    test_weighted_symbols_shape_and_polarity_for_negative_conflict,
+    test_weighted_symbols_positive_economic_directions,
+    test_risk_off_category_damps_positive_but_not_direction,
+    test_vix_always_inverts_sentiment,
     test_weighted_symbols_magnitude_never_exceeds_one,
     test_weighted_symbols_higher_country_risk_increases_magnitude,
 ]

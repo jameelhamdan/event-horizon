@@ -46,10 +46,7 @@ def semantic_merge_topics(topics: list[TopicDict], threshold: float = 0.85) -> l
             continue
 
         # Canonical = entry with most keywords
-        canonical: TopicDict = max(
-            (p._topic for p in cluster),
-            key=lambda t: len(t.get('keywords') or []),
-        )
+        canonical: TopicDict = max((p._topic for p in cluster), key=lambda t: len(t.get('keywords') or []))
 
         # Union keywords and source_ids from all members (skip canonical to avoid duplication)
         all_keywords: list[str] = list(canonical.get('keywords') or [])

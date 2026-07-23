@@ -58,12 +58,9 @@ class Command(BaseCommand):
         parser.add_argument('params', nargs='*', help='key=value task kwargs')
         parser.add_argument('--queue', default=None, choices=['default', 'heavy', 'bulk'],
                             help='Override the auto-selected queue')
-        parser.add_argument('--require-flag', default=None,
-                            help='Skip the run unless this settings flag is truthy')
-        parser.add_argument('--job-timeout', type=int, default=None,
-                            help='Celery task time limit in seconds (-1 for no cap)')
-        parser.add_argument('--sync', action='store_true',
-                            help='Run inline instead of enqueueing (debugging)')
+        parser.add_argument('--require-flag', default=None, help='Skip the run unless this settings flag is truthy')
+        parser.add_argument('--job-timeout', type=int, default=None, help='Celery task time limit in seconds (-1 for no cap)')
+        parser.add_argument('--sync', action='store_true', help='Run inline instead of enqueueing (debugging)')
 
     def handle(self, *args, **options):
         name = options['task_name']

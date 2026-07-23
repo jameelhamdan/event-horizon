@@ -349,10 +349,7 @@ class NLPAnnotator:
                     # same-document signal the model saw it as part of a
                     # person's name; drop a LOC span whose word is also a
                     # token of a PER span rather than trusting it as a place.
-                    person_tokens = {
-                        tok for e in ents if e.get('entity_group') == 'PER'
-                        for tok in e['word'].strip().lower().split()
-                    }
+                    person_tokens = {tok for e in ents if e.get('entity_group') == 'PER' for tok in e['word'].strip().lower().split()}
                     raw_locs = [e for e in ents if e.get('entity_group') == 'LOC' and float(e.get('score', 0)) >= 0.5]
                     had_raw_loc[i] = bool(raw_locs)
                     entities[i] = [e['word'] for e in raw_locs if e['word'].strip().lower() not in person_tokens]

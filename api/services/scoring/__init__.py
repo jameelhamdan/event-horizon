@@ -56,10 +56,7 @@ class ImportanceScorer:
         from core import models as m
 
         source_codes = {a.source_code for a in articles}
-        source_weights: dict[str, float] = {
-            s.code: s.weight
-            for s in m.Source.objects.filter(code__in=source_codes)
-        }
+        source_weights: dict[str, float] = {s.code: s.weight for s in m.Source.objects.filter(code__in=source_codes)}
         bonuses = self._corroboration_bonuses(articles)
 
         results: dict[str, float] = {}
@@ -101,12 +98,8 @@ class ImportanceScorer:
             .exclude(id__in=article_ids)
             .values_list('title', 'source_code')[:2000]
         )
-        recent_tokensets: list[tuple[frozenset, str]] = [
-            (_tokenize(title), src) for title, src in recent_pairs
-        ]
-        batch_tokensets: list[tuple[frozenset, str, str]] = [
-            (_tokenize(a.title), a.source_code, str(a.id)) for a in articles
-        ]
+        recent_tokensets: list[tuple[frozenset, str]] = [(_tokenize(title), src) for title, src in recent_pairs]
+        batch_tokensets: list[tuple[frozenset, str, str]] = [(_tokenize(a.title), a.source_code, str(a.id)) for a in articles]
 
         bonuses: dict[str, float] = {}
         for my_tokens, my_source, my_id in batch_tokensets:
@@ -121,9 +114,6 @@ class ImportanceScorer:
                     continue
                 if _jaccard(my_tokens, tokens) >= _CORROBORATION_THRESHOLD:
                     corroborating.add(src)
-            bonuses[my_id] = min(
-                len(corroborating) * _CORROBORATION_BONUS,
-                _CORROBORATION_MAX,
-            )
+            bonuses[my_id] = min(len(corroborating) * _CORROBORATION_BONUS, _CORROBORATION_MAX)
 
         return bonuses

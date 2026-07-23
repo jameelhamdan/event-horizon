@@ -120,9 +120,7 @@ def refresh_topics() -> int:
         Topic.objects.bulk_create(to_create, batch_size=500)
 
     # Topics no longer in the scrape: mark is_current=False.
-    stale_qs = Topic.objects.filter(is_current=True, is_active=True).exclude(
-        slug__in=list(seen_slugs)
-    )
+    stale_qs = Topic.objects.filter(is_current=True, is_active=True).exclude(slug__in=list(seen_slugs))
     stale_topics = [
         t for t in list(stale_qs)
         if not getattr(t, 'is_pinned', False)
@@ -293,10 +291,7 @@ def _enrich_topics(topics: list) -> list:
             if ctx.lower().startswith('ongoing armed conflict. location:'):
                 loc = ctx[len('ongoing armed conflict. location:'):].strip().rstrip('.')
                 ctx = f'Location: {loc}'
-            line = (
-                f'{i + 1}. {t.get("name") or t["slug"]}'
-                f' ({t.get("category") or "general"}) [slug:{t["slug"]}]'
-            )
+            line = f'{i + 1}. {t.get("name") or t["slug"]} ({t.get("category") or "general"}) [slug:{t["slug"]}]'
             if ctx:
                 line += f' — {ctx[:80]}'
             lines.append(line)
@@ -345,10 +340,7 @@ def _enrich_topics(topics: list) -> list:
             )
 
         except Exception as exc:
-            logger.warning(
-                '[topics] LLM enrichment batch %d failed: %s',
-                batch_start // BATCH_SIZE + 1, exc,
-            )
+            logger.warning('[topics] LLM enrichment batch %d failed: %s', batch_start // BATCH_SIZE + 1, exc)
 
     return topics
 
@@ -477,10 +469,7 @@ def retroactive_tag_topic(slug: str, lookback_hours: int = 72) -> int:
         tagged_count += 1
         logger.info('[topics] Retroactively tagged "%s" → %s', event.title[:60], slug)
 
-    logger.info(
-        '[topics] retroactive_tag_topic(%s) done — %d/%d event(s) tagged',
-        slug, tagged_count, scanned,
-    )
+    logger.info('[topics] retroactive_tag_topic(%s) done — %d/%d event(s) tagged', slug, tagged_count, scanned)
     return tagged_count
 
 

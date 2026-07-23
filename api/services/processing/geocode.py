@@ -25,10 +25,7 @@ def _city_index() -> dict[str, tuple[float, float, str | None]]:
         name = c['name'].lower()
         pop = int(c.get('population') or 0)
         if name not in best or pop > best[name][0]:
-            best[name] = (
-                pop, float(c['latitude']), float(c['longitude']),
-                countries.get(c.get('countrycode', '')),
-            )
+            best[name] = (pop, float(c['latitude']), float(c['longitude']), countries.get(c.get('countrycode', '')))
     return {name: (lat, lon, country) for name, (_, lat, lon, country) in best.items()}
 
 
@@ -150,9 +147,7 @@ _DEMONYMS: dict[str, str] = {
 _US_STATE_COUNTRY_COLLISIONS = {'georgia'}
 # US context signal. "US" matched case-sensitively (uppercase) so the pronoun
 # "us" doesn't fire; the rest are case-insensitive.
-_US_CONTEXT_RE = re.compile(
-    r'\bUS\b|(?i:\bU\.S\.?A?\b|\bunited states\b|\bamerican\b|\bwashington\b)'
-)
+_US_CONTEXT_RE = re.compile(r'\bUS\b|(?i:\bU\.S\.?A?\b|\bunited states\b|\bamerican\b|\bwashington\b)')
 
 
 def _norm(name: str) -> str:
@@ -247,10 +242,7 @@ def _country_pattern() -> re.Pattern:
     longest names first so 'United Arab Emirates' beats 'UAE' beats 'U.S.'."""
     names = (set(_country_index()) | set(_COUNTRY_ALIASES) | set(_EXTRA_PLACES)) - _SCAN_EXCLUDED
     ordered = sorted(names, key=len, reverse=True)
-    return re.compile(
-        r'\b(' + '|'.join(re.escape(n) for n in ordered) + r')\b',
-        re.IGNORECASE,
-    )
+    return re.compile(r'\b(' + '|'.join(re.escape(n) for n in ordered) + r')\b', re.IGNORECASE)
 
 
 @functools.lru_cache(maxsize=1)
