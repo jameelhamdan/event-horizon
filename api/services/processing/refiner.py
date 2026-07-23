@@ -75,7 +75,13 @@ _CONFLICT_EVIDENCE = re.compile(
     r'\b(?:airstrike|air strike|attack\w*|missile|drone|troops|soldier\w*|army|military|militant\w*|'
     r'rebel\w*|insurgent\w*|gunmen|gunman|shelling|invasion|ceasefire|warplane\w*|'
     r'bomb\w*|explosion\w*|terror\w*|hostage\w*|casualt\w*|wounded|war\b|combat\b|'
-    r'shot dead|killed in|kills?\b\s+\d)',
+    # Unambiguous mass-violence markers — never present in a non-conflict story,
+    # so they only ever PREVENT the downgrade gate from destroying a real conflict
+    # verdict (measured: "Israel kills more than 80 in Gaza" and "committing
+    # genocide in Gaza" were flipped to general because the old count pattern only
+    # matched "kills 80", not "kills more than 80").
+    r'genocide|massacre\w*|ethnic cleansing|war crime\w*|atrocit\w*|death toll|'
+    r'shot dead|killed in|kill(?:s|ed|ing)?\b[\s\w]{0,12}\d)',
     re.I,
 )
 

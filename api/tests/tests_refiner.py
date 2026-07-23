@@ -62,6 +62,21 @@ def test_conflict_evidence_matches_real_conflict_vocabulary():
         assert _CONFLICT_EVIDENCE.search(text), text
 
 
+def test_conflict_evidence_matches_mass_violence_and_loose_counts():
+    # Regression: the refine downgrade gate flipped real conflict → general
+    # because the old count pattern only matched "kills 80", not "kills more
+    # than 80", and had no genocide/massacre/war-crime terms.
+    from services.processing.refiner import _CONFLICT_EVIDENCE
+    for text in (
+        'Israel kills more than 80 in Gaza as outrage grows',
+        'Two rights groups say their country is committing genocide in Gaza',
+        'Village massacre leaves dozens dead',
+        'UN documents war crimes in the region',
+        'Airstrike killed at least 20 people',
+    ):
+        assert _CONFLICT_EVIDENCE.search(text), text
+
+
 def test_conflict_evidence_rejects_violent_metaphors():
     from services.processing.refiner import _CONFLICT_EVIDENCE
     for text in (
@@ -203,6 +218,7 @@ _TESTS = [
     test_unknown_or_off_provider_yields_no_verdicts,
     test_zeroshot_unavailable_yields_none_per_item,
     test_conflict_evidence_matches_real_conflict_vocabulary,
+    test_conflict_evidence_matches_mass_violence_and_loose_counts,
     test_conflict_evidence_rejects_violent_metaphors,
     test_apply_sets_category_sub_and_refined_by,
     test_apply_re_refine_overwrites_previous_provider,
