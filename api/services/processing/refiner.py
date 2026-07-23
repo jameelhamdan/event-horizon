@@ -131,6 +131,31 @@ _ACCIDENT_EVIDENCE = re.compile(
     r'stampede|wreck\w*)\b',
     re.I,
 )
+# A deliberate human actor/attack framing — guards the conflict->disaster
+# lateral swap below from misreading a real (if lightly-worded) attack as an
+# accident just because it lacks hardware-specific _MILITARY_ACTION terms
+# (e.g. a market bombing blamed on "militants"/"terrorists" with no mention of
+# "attack"-adjacent hardware words).
+_DELIBERATE_ACTOR = re.compile(
+    r'\b(?:attack\w*|terror\w*|militant\w*|rebel\w*|insurgent\w*|gunmen|gunman|'
+    r'hostage\w*|genocide|massacre\w*|war crime\w*|atrocit\w*)\b',
+    re.I,
+)
+
+# Political<->conflict disambiguation. A diplomatic meeting ABOUT an ongoing
+# war ("Pope meets Russian Orthodox cleric to discuss Ukraine war") reads as
+# 'conflict' to the NLI model purely off the war mention, with no actual
+# hostility in the story — a real conflict verdict needs either military
+# action or a named perpetrator, not just proximity to a war topic (measured:
+# the ensemble scored 'conflict' at 0.65 confidence — not a low-confidence
+# fluke a threshold would catch — for a story that is entirely about a
+# diplomatic meeting).
+_DIPLOMATIC_MEETING_EVIDENCE = re.compile(
+    r'\b(?:meets?|met with|holds? talks|held talks|summit|discuss(?:es|ed|ion)?|'
+    r'envoy|ambassador|diplomat\w*|foreign minister|peace (?:talks|deal|plan|process)|'
+    r'\bpope\b|vatican|patriarch|archbishop|\bcleric\b)\b',
+    re.I,
+)
 
 def _build_zeroshot(names):
     """A zero-shot pipeline per model name."""
@@ -166,10 +191,12 @@ def _apply_category_gates(category: str, text: str, downgrade_to_general: bool =
     """Post-hoc evidence gates over a zero-shot category verdict.
 
     Two kinds of correction:
-      * *lateral* disaster⇄conflict swaps by physical cause (a natural disaster
-        with political fallout misread as conflict; a military strike misread as
-        an accident) — always applied, they only ever correct one specific
-        category to another.
+      * *lateral* swaps by concrete cause — disaster⇄conflict (a natural
+        disaster with political fallout misread as conflict; a military
+        strike misread as an accident) and conflict→political (a diplomatic
+        meeting that references an ongoing war, misread as the war itself) —
+        always applied, they only ever correct one specific category to
+        another.
       * *downgrade-to-general* (conflict/disaster with no concrete evidence) —
         a precision patch for the low-recall refine second opinion. It is
         DESTRUCTIVE: it flips real conflict/disaster stories that simply lack the
@@ -179,10 +206,24 @@ def _apply_category_gates(category: str, text: str, downgrade_to_general: bool =
         ``downgrade_to_general=False`` and trusts the 92% model's category;
         only refine keeps the downgrades.
     """
-    if category == 'conflict' and _NATURAL_DISASTER_EVIDENCE.search(text) and not _MILITARY_ACTION.search(text):
+    if (category == 'conflict' and not _MILITARY_ACTION.search(text) and not _DELIBERATE_ACTOR.search(text) and (_NATURAL_DISASTER_EVIDENCE.search(text) or _ACCIDENT_EVIDENCE.search(text))):
+        # No deliberate-actor language and no military hardware — a
+        # "conflict" verdict driven by explosion/blast/crash wording alone is
+        # almost always an accidental industrial/transport disaster, not an
+        # armed strike (measured: Beirut port ammonium-nitrate explosion ->
+        # conflict/airstrike; a sailor's account of "mishandled cargo" has no
+        # attacker, just an accident).
         category = 'disaster'
     elif category == 'disaster' and _MILITARY_ACTION.search(text) and _CONFLICT_EVIDENCE.search(text):
         category = 'conflict'
+    elif (category == 'conflict' and not _MILITARY_ACTION.search(text) and not _DELIBERATE_ACTOR.search(text)
+            and _DIPLOMATIC_MEETING_EVIDENCE.search(text)):
+        # Same idea, third pairing: no hostility evidence at all, just a
+        # diplomatic/religious meeting that happens to reference an ongoing
+        # war — the story is about the meeting, not a hostile act (measured:
+        # "Pope Leo meets Russian Orthodox cleric to discuss Ukraine war" ->
+        # conflict/other at 0.65 confidence, purely off the war mention).
+        category = 'political'
     if downgrade_to_general:
         if category == 'conflict' and not _CONFLICT_EVIDENCE.search(text):
             category = 'general'

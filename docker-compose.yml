@@ -186,21 +186,6 @@ services:
           memory: 256m
     memswap_limit: 256m
 
-  # Daily forced restart of api + the Celery workers — a backstop against slow
-  # memory growth the per-service `deploy.resources.limits.memory` caps alone
-  # don't prevent from recurring (a container that hits its limit gets
-  # OOM-killed and restarted, but a slow leak just climbs back up between
-  # kills). Restarts by compose-service label via the mounted Docker socket,
-  # so no host cron/systemd access is needed. See deploy/restarter/restart.sh.
-  restarter:
-    build: ./deploy/restarter
-    restart: always
-    environment:
-      - RESTART_HOUR_UTC=4
-      - RESTART_SERVICES=api worker-heavy worker-light worker-bulk
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-
   # redis usage is normally tiny (SSE pub/sub + broker), but a stuck
   # consumer letting a channel's backlog grow could still pressure the host.
   # maxmemory + noeviction makes redis itself refuse new writes (visible,
@@ -209,7 +194,18 @@ services:
   redis:
     image: redis:7-alpine
     restart: always
-    command: redis-server --maxmemory 384mb --maxmemory-policy noeviction
+    # AOF persistence (fsync every second) so the task broker survives a
+    # container restart or power cut. Without this, redis started with no
+    # volume/persistence at all — a crash lost every message still queued but
+    # not yet picked up by a worker outright, since CELERY_TASK_ACKS_LATE only
+    # protects messages already delivered to a worker, not ones that never
+    # survived the restart in the first place. That's the gap that mattered
+    # for the reprocess_corpus_task backfill actually resuming unattended
+    # after a power cut instead of needing someone to notice and re-dispatch
+    # it by hand.
+    command: redis-server --maxmemory 384mb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
     deploy:
       resources:
         limits:
@@ -247,3 +243,4 @@ services:
 
 volumes:
   static_data:
+  redis_data:

@@ -74,9 +74,10 @@
           <input type="date" name="start_date" value="{{ default_backfill_start }}" required title="Range start (UTC)">
           <input type="date" name="end_date" value="{{ default_backfill_end }}" required title="Range end (UTC, exclusive)">
           <input type="text" name="source_code" placeholder="Source code (blank = all)" style="flex:1">
+          <label class="ops-muted" style="font-weight:normal" title="Turns on the historical-backfill LLM flag as part of this submit, so each fetched chunk annotates itself immediately (fresh content, no rehydrate needed) instead of landing in the deferred backlog for a separate Re-process click"><input type="checkbox" name="annotate_inline" value="1"{% if llm_flags.backfill %} checked{% endif %}> annotate inline</label>
           <button class="button" type="submit">1. Fetch articles</button>
         </div>
-        <p class="ops-tile-desc">Pull articles over this range (defaults to the last 14 days), for one source or (if blank) every enabled RSS source. Equivalent to the <em>fetch</em> stage above, for a historical range.</p>
+        <p class="ops-tile-desc">Pull articles over this range (defaults to the last 14 days), for one source or (if blank) every enabled RSS source. Equivalent to the <em>fetch</em> stage above, for a historical range. Tick <strong>annotate inline</strong> to skip step 2 entirely — each fetched chunk annotates itself on the spot rather than deferring; leave unticked for a fetch-only backfill you'll annotate later with <em>Re-process articles</em>.</p>
       </form>
       <form method="post" class="ops-tile ops-tile-wide">
         {% csrf_token %}
@@ -89,11 +90,11 @@
             <option value="unfinished">Unfinished (+ re-aggregate)</option>
             <option value="everything">Everything, incl. annotated</option>
           </select>
-          <input type="number" name="limit" min="1" placeholder="Max (deferred only, default 2000)" style="flex:1">
-          <label class="ops-muted" style="font-weight:normal" title="Re-fetch each article body through the current extractor before annotating"><input type="checkbox" name="rehydrate" value="1"> rehydrate</label>
+          <input type="number" name="limit" min="1" placeholder="Max (deferred only, blank = whole backlog)" style="flex:1">
+          <label class="ops-muted" style="font-weight:normal" title="Re-fetch each article body through the current extractor before annotating — ON by default: stored content from before the current extractor was deployed is frequently nav-chrome boilerplate, not real article text"><input type="checkbox" name="rehydrate" value="1" checked> rehydrate</label>
           <button class="button" type="submit">2. Re-process articles</button>
         </div>
-        <p class="ops-tile-desc">Runs the on-prem <em>annotate</em> pass (category + geo + intensity + sentiment + importance) onto the heavy queue and returns immediately. Leave the dates blank for the whole corpus, or set both to target one period. <strong>Scope</strong> picks which rows: <em>Deferred only</em> — never-annotated backfill (the step after a fetch-only backfill; step 2 of this flow, then run step 3); <em>Unfinished</em> — anything stuck at <em>fetched</em> or <em>refine</em>, and re-aggregates each week (corpus repair); <em>Everything</em> — re-annotate all rows including already-<em>annotated</em>/<em>refined</em> ones (to roll out a classifier/taxonomy change). Tick <strong>rehydrate</strong> to re-fetch each body through the current extractor first (adds live HTTP; for an extraction change). Idempotent — watch Article states below and re-run freely.</p>
+        <p class="ops-tile-desc">Runs the on-prem <em>annotate</em> pass (category + geo + intensity + sentiment + importance) onto the heavy queue and returns immediately. Leave the dates blank for the whole corpus, or set both to target one period. <strong>Scope</strong> picks which rows: <em>Deferred only</em> — never-annotated backfill (the step after a fetch-only backfill; step 2 of this flow, then run step 3), blank <strong>Max</strong> processes the entire deferred backlog in one dispatch; <em>Unfinished</em> — anything stuck at <em>fetched</em> or <em>refine</em>, and re-aggregates each week (corpus repair); <em>Everything</em> — re-annotate all rows including already-<em>annotated</em>/<em>refined</em> ones (to roll out a classifier/taxonomy change). <strong>rehydrate</strong> (checked by default) re-fetches each body through the current extractor first — measured live: without it, several major sources classify off stale nav-menu boilerplate instead of real article text. Idempotent — watch Article states below and re-run freely.</p>
       </form>
       <form method="post" class="ops-tile ops-tile-wide">
         {% csrf_token %}

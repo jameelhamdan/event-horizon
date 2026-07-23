@@ -177,9 +177,19 @@ def canonical_country(name: str) -> str | None:
     return None
 
 
+# Continent names that also happen to be small towns in the gazetteer
+# (observed live: geonamescache lists a real but obscure town called "Asia" in
+# the Philippines) — in news text a bare continent name is virtually always
+# the continent, never that town, so it's excluded from city matching entirely
+# rather than resolved to a real-but-wrong place.
+_CONTINENT_NAMES = frozenset({'asia', 'africa', 'europe', 'oceania', 'antarctica'})
+
+
 def is_city(name: str) -> bool:
     """True if *name* resolves via the city index (aliases included)."""
     n = _norm(name)
+    if n in _CONTINENT_NAMES:
+        return False
     return n in _city_index() or _CITY_ALIASES.get(n, n) in _city_index()
 
 

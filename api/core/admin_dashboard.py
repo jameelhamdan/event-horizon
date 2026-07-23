@@ -178,7 +178,13 @@ def _handle_backfill_until(request):
     """Backfill articles over an explicit [start_date, end_date) range.
 
     Mirrors ``manage.py backfill_history``. ``source_code`` is optional —
-    blank means all enabled RSS sources.
+    blank means all enabled RSS sources. ``annotate_inline`` folds the
+    separate "Enable historical-backfill LLM" toggle into this same submit —
+    each fetched chunk annotates itself immediately (on fresh, just-fetched
+    content — no rehydrate needed) instead of landing in the deferred
+    backlog for a later ``Re-process articles`` click. Only ever turns the
+    flag ON here; leaving it unticked doesn't turn an already-on flag off,
+    since this form isn't the intended off-switch for that shared setting.
     """
     from services.queue import enqueue
     from services import tasks as T
@@ -188,6 +194,10 @@ def _handle_backfill_until(request):
         return
     start_date, end_date = date_range
     source_code = request.POST.get('source_code', '').strip()
+
+    if request.POST.get('annotate_inline') in ('1', 'true', 'on'):
+        from services.runtime_config import set_llm_flag
+        set_llm_flag('backfill', True)
 
     if source_code:
         import core.models as m
@@ -217,7 +227,10 @@ def _handle_reprocess_corpus(request):
     behind all re-processing (deferred / unfinished / everything). Every scope
     takes the same optional date range (blank = whole corpus) and ``rehydrate``
     toggle (re-fetch each article body through the current extractor first);
-    'deferred' also honours an optional ``limit``."""
+    'deferred' also honours an optional ``limit`` — blank means uncapped (the
+    whole deferred backlog in one dispatch), matching how 'unfinished'/
+    'everything' already behave with no limit field at all; a number is only
+    for deliberately capping a test run smaller."""
     from services.queue import enqueue_bulk
     from services import tasks as T
 
@@ -233,7 +246,9 @@ def _handle_reprocess_corpus(request):
 
     kwargs = {'scope': scope, 'start_date': start_date, 'end_date': end_date, 'rehydrate': rehydrate}
     if scope == 'deferred':
-        kwargs['limit'] = _int_or(request.POST.get('limit'), 2000)
+        limit = _int_or(request.POST.get('limit'), None)
+        if limit is not None:
+            kwargs['limit'] = limit
     enqueue_bulk(T.reprocess_corpus_task, **kwargs)
 
     period = _period_phrase(start_date, end_date, ' across the whole corpus')
@@ -323,7 +338,7 @@ def _ok(request, msg):
     messages.success(request, msg)
 
 
-def _int_or(value, default: int) -> int:
+def _int_or(value, default: int | None) -> int | None:
     try:
         return int(value)
     except (TypeError, ValueError):

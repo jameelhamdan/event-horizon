@@ -238,6 +238,11 @@ STREAM_PRICES_ENABLED = config('STREAM_PRICES_ENABLED', default=True, cast=bool)
 STREAM_NOTAM_ENABLED = config('STREAM_NOTAM_ENABLED', default=False, cast=bool)
 STREAM_EARTHQUAKE_ENABLED = config('STREAM_EARTHQUAKE_ENABLED', default=True, cast=bool)
 STREAM_FOREX_ENABLED = config('STREAM_FOREX_ENABLED', default=True, cast=bool)
+# Default False: resume_deferred_backfill_task (api/crontab) is a watchdog for a
+# large one-off scope='deferred' backfill, not steady-state behavior — turn on
+# only while such a backfill is in flight, off again once the deferred count
+# reaches 0, so it isn't silently re-dispatching reprocess_corpus_task forever.
+AUTO_RESUME_DEFERRED_BACKFILL = config('AUTO_RESUME_DEFERRED_BACKFILL', default=False, cast=bool)
 
 # ── DRF throttling — rate-limit anonymous traffic on the public read API.
 REST_FRAMEWORK = {

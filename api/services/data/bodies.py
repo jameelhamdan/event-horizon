@@ -165,7 +165,7 @@ def is_good_quality_body(content: str | None) -> bool:
 _NON_ARTICLE_PATH_SEGMENTS = frozenset({
     'people', 'staff', 'contact', 'contact-us', 'author', 'authors',
     'tag', 'tags', 'category', 'categories', 'about', 'about-us', 'topic', 'topics',
-    'advisor',
+    'advisor', 'for-media', 'press', 'media-center',
 })
 # An image/asset URL whose final path segment is a pixel-dimension slug
 # ("205x205_property-1the-checkup-mail-icon") — a CMS asset, never an article

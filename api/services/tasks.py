@@ -819,6 +819,43 @@ def reprocess_corpus_task(
     return result
 
 
+@shared_task(**_RETRY_KW)
+def resume_deferred_backfill_task() -> dict:
+    """Auto-resume watchdog for a large ``scope='deferred'`` backfill: if any
+    articles are still ``annotation_deferred=True`` (unprocessed) and no
+    ``reprocess_corpus_task`` run is currently queued/running, re-dispatch one
+    with ``rehydrate=True``. Gated by ``AUTO_RESUME_DEFERRED_BACKFILL`` (off by
+    default) — meant to be scheduled (api/crontab) only while a large deferred
+    backfill is in flight, so an interrupted run (worker/broker crash, power
+    cut) finishes unattended instead of silently stalling until someone
+    notices the deferred count stopped shrinking and manually re-clicks
+    "Re-process articles". Redis persistence (docker-compose redis --appendonly)
+    already recovers most in-flight Celery state across a restart; this covers
+    the remaining edge case where the crash landed in the narrow window before
+    a week's work made it into the broker at all, so nothing was left to
+    redeliver. A no-op (skips dispatch) whenever a reprocess_corpus_task run is
+    already queued/running, so this can't pile up overlapping full-corpus
+    scans on top of one that's simply still working through 100k+ articles.
+    """
+    import core.models as m
+    from services.queue import enqueue_bulk
+
+    remaining = m.Article.objects.filter(annotation_deferred=True, processed_on__isnull=True).count()
+    if remaining == 0:
+        return {'remaining': 0, 'dispatched': False}
+
+    already_in_flight = m.TaskRun.objects.filter(
+        task_name=getattr(reprocess_corpus_task, 'name', None) or reprocess_corpus_task.__name__,
+        status__in=[m.TaskRun.Status.QUEUED, m.TaskRun.Status.RUNNING],
+    ).exists()
+    if already_in_flight:
+        return {'remaining': remaining, 'dispatched': False, 'reason': 'already in flight'}
+
+    enqueue_bulk(reprocess_corpus_task, scope='deferred', rehydrate=True)
+    logger.info('resume_deferred_backfill_task: re-dispatched reprocess_corpus_task(scope=deferred) — %d article(s) remaining', remaining)
+    return {'remaining': remaining, 'dispatched': True}
+
+
 def _parse_backfill_date(value) -> datetime:
     """Normalize a backfill bound to a UTC datetime (accepts YYYY-MM-DD strings)."""
     if isinstance(value, datetime):
