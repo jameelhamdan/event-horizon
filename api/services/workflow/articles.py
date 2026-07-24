@@ -137,7 +137,11 @@ def analyze_live_articles(ids: list) -> int:
     window) the on-prem 'annotate' stage picks it up for free instead. A live
     article is therefore never stranded by an LLM outage or a disabled
     LIVE_LLM_ENABLED switch — coverage only ever gets worse in analysis
-    *quality*, never in whether an article gets analyzed at all.
+    *quality*, never in whether an article gets analyzed at all. A
+    *successful* analysis stamps ``annotator_version`` with
+    ``settings.ANNOTATOR_VERSION``, same as annotate_articles — NOT
+    ``refined_by``, which is reserved for the refine stage's judge and stays
+    NULL here since this article was never refined.
     """
     from core.models import Article
     from services.processing.analyzer import ArticleAnalyzer
@@ -181,7 +185,7 @@ def analyze_live_articles(ids: list) -> int:
     update_fields = [
         'sentiment', 'finbert_sentiment', 'location', 'latitude', 'longitude',
         'event_intensity', 'category', 'sub_category', 'processed_on', 'stage',
-        'importance_score', 'importance_source',
+        'importance_score', 'importance_source', 'annotator_version',
         'extra_data', 'translations', 'llm_usage', 'stage_status',
     ]
     to_save = []
@@ -201,6 +205,7 @@ def analyze_live_articles(ids: list) -> int:
         if analysis.error is None:
             article.processed_on = timezone.now()
             article.stage = Article.STAGE_ANNOTATED
+            article.annotator_version = settings.ANNOTATOR_VERSION
             score = importance.get(str(article.id))
             if score is not None:
                 article.importance_score = score
@@ -486,7 +491,7 @@ def refine_articles(ids: list) -> int:
 
     update_fields = [
         'category', 'sub_category', 'location', 'latitude', 'longitude',
-        'event_intensity', 'translations', 'extra_data',
+        'event_intensity', 'translations', 'extra_data', 'llm_usage',
         'stage', 'refined_on', 'refined_by', 'annotator_version', 'stage_status',
     ]
     to_save, refined = [], 0

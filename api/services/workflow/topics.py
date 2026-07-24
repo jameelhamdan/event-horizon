@@ -465,7 +465,13 @@ def retroactive_tag_topic(slug: str, lookback_hours: int = 72) -> int:
         except Exception:
             pass  # routing is best-effort; topic tags are still saved
 
-        event.save(update_fields=['topics', 'topic_slugs', 'topics_source', 'affected_indicators', 'is_routed'])
+        # Same bookkeeping the main tag stage (_apply_topic_tags) writes on
+        # every touched event, so pipeline_coverage()'s tag error_sample and
+        # the dashboard's coverage table see retroactive-tag activity too —
+        # this reached here only after a real match, so always ok=True.
+        from services.utils import mark_stage
+        mark_stage(event, 'tag', ok=True)
+        event.save(update_fields=['topics', 'topic_slugs', 'topics_source', 'affected_indicators', 'is_routed', 'stage_status'])
         tagged_count += 1
         logger.info('[topics] Retroactively tagged "%s" → %s', event.title[:60], slug)
 

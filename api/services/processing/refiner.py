@@ -418,7 +418,10 @@ class LLMRefiner:
         new category; summary merged only for non-lite articles when the judge
         produced one (cloud provider); refined_by always overwritten with this
         verdict's provider, so a re-refine (see refine_articles) correctly
-        reflects whichever judge most recently decided the article's fields.
+        reflects whichever judge most recently decided the article's fields;
+        llm_usage overwritten when the verdict carries one (cloud provider
+        only — zeroshot/ollama verdicts have no 'llm_usage' key, so a prior
+        annotate/analyze pass's usage is left as-is rather than cleared).
         """
         from services.processing.annotator import rate_intensity
         from services.processing.geocode import geocode
@@ -444,6 +447,8 @@ class LLMRefiner:
             article.translations = translations
 
         article.refined_by = verdict['provider']
+        if verdict.get('llm_usage') is not None:
+            article.llm_usage = verdict['llm_usage']
 
         llm_block = dict((article.extra_data or {}).get('llm') or {})
         llm_block.update({'category': article.category, 'sub_category': article.sub_category})

@@ -207,7 +207,7 @@ class ArticleAdmin(ImportExportModelAdmin):
         "created_on",
     ]
     date_hierarchy = "published_on"
-    list_filter = ["source_type", "source_code", "category", ArticleStageFilter, "refined_by", ImportanceFilter]
+    list_filter = ["source_type", "source_code", "category", ArticleStageFilter, "refined_by", "annotator_version", ImportanceFilter]
     search_fields = ["title", "location", "category"]
     autocomplete_fields = ["related"]
     actions = ["reannotate_selected", "rerefine_selected"]
