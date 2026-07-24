@@ -92,6 +92,13 @@ services:
       # in case anything ever loads an HF tokenizer in the parent (its background
       # thread pool can deadlock a forked child otherwise).
       - TOKENIZERS_PARALLELISM=false
+      # PyTorch/BLAS default to using every visible core per process. With
+      # --concurrency=2 that's 2 processes each trying to claim all 12 host
+      # cores, fighting over threads instead of splitting them. Cap each
+      # child at host_cores / concurrency (6) so the pair covers the host
+      # exactly once instead of oversubscribing it ~2x.
+      - OMP_NUM_THREADS=6
+      - MKL_NUM_THREADS=6
     depends_on:
       mongo:
         condition: service_started

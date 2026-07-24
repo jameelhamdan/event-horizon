@@ -252,6 +252,16 @@ class Article(models.Model):
             # Dashboard activity chart: month-range filter on published_on, then
             # sort+limit by importance_score to fetch the top N per month.
             models.Index(fields=['published_on', 'importance_score'], name='core_article_pub_imp_idx'),
+            # id's only other index is the auto-generated unique constraint,
+            # which is a *partial* index (partialFilterExpression id:$type
+            # string — django-mongodb-backend's standard null-handling for a
+            # unique field). Mongo's planner can't turn an id__in(...) query
+            # into tight bounds against a partial index — confirmed locally
+            # that even .hint()-forcing it produces an unbounded [MinKey,
+            # MaxKey] index scan, no better than COLLSCAN. This plain,
+            # non-partial index is what id__in batch lookups (e.g.
+            # annotate_deferred_batch_task) actually seek against.
+            models.Index(fields=['id'], name='core_article_id_plain_idx'),
         ]
 
     def __str__(self):
@@ -750,6 +760,10 @@ class TaskRun(models.Model):
             models.Index(fields=['task_name', 'started_at']),
             models.Index(fields=['status']),
             models.Index(fields=['started_at']),
+            # resume_deferred_backfill_task's in-flight dedupe check and admin
+            # job-status lookups both filter by job_id — without this, every
+            # such lookup COLLSCANs the whole collection.
+            models.Index(fields=['job_id'], name='core_taskrun_job_id_idx'),
         ]
 
     def __str__(self):
