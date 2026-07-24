@@ -150,6 +150,14 @@ class Article(models.Model):
     # article's PRESENT fields, not necessarily the first judge it ever saw.
     refined_by = models.CharField(max_length=16, null=True, blank=True)
 
+    # Which settings.ANNOTATOR_VERSION produced this article's current
+    # category/sub_category/geo/intensity — stamped by annotate_articles and
+    # refine_articles alongside stage/processed_on/refined_on. Lets
+    # annotate_deferred_batch_task skip articles that are already terminal
+    # AND already current, so overlapping/re-run reprocess_corpus_task passes
+    # become cheap no-ops instead of redundant NLP.
+    annotator_version = models.CharField(max_length=64, null=True, blank=True)
+
     # Set by the 'annotate' pipeline stage (services/stages.py) when a job is
     # enqueued for this article; not cleared explicitly — once the stage
     # advances past 'fetched' the article is excluded from selection regardless

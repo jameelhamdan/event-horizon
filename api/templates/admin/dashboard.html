@@ -380,6 +380,26 @@
     {% else %}
     <p class="ops-muted">Flower unreachable at its internal URL — TaskRun counts above are the fallback. Check the <code>flower</code> compose service.</p>
     {% endif %}
+
+    <h3 style="margin:16px 0 8px">Queue backlog</h3>
+    <p class="ops-muted" style="margin:0 0 10px">Messages waiting in Redis per queue — i.e. work queued for each worker type, not yet picked up. A large <code>heavy</code> backlog is expected while a corpus reprocess is in flight (single worker); a growing <code>default</code>/<code>bulk</code> backlog usually means a stuck dispatcher.</p>
+    {% if queue_depths.available %}
+    <table class="ops-table">
+      <thead><tr><th>Queue</th><th>Queued</th></tr></thead>
+      <tbody>
+      {% for q in queue_depths.rows %}
+        <tr>
+          <td>{{ q.label }}</td>
+          <td class="{% if q.messages > 0 %}ops-warn{% else %}ops-muted{% endif %}">{{ q.messages }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="2" class="ops-muted">Flower reports no queues — are the worker containers running?</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="ops-muted">Flower unreachable — queue backlog unavailable.</p>
+    {% endif %}
   </section>
 
   {# ── LLM provider status ─────────────────────────────────────────── #}

@@ -180,6 +180,13 @@ services:
     depends_on:
       - redis
     env_file: .env.app
+    environment:
+      # Flower gates its REST /api/* endpoints (e.g. /api/queues/length, used
+      # by the dashboard's queue-backlog panel) behind this even with no auth
+      # configured. Safe here: same trust boundary as the rest of Flower — no
+      # published port, reachable only through the staff-authenticated Django
+      # proxy at /flower/ (app/views.py).
+      - FLOWER_UNAUTHENTICATED_API=true
     deploy:
       resources:
         limits:

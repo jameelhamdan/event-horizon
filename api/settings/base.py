@@ -25,6 +25,12 @@ else:
 ENV_NAME = config('ENV_NAME', default='development')
 VERSION = f'{ENV_NAME}-{app.__build__}'
 
+# Stamped onto Article.annotator_version by annotate_articles/refine_articles;
+# compared against by annotate_deferred_batch_task's self-healing skip so a
+# new deploy's classification changes supersede rows annotated under an
+# older commit, instead of maintaining a second, separately-bumped constant.
+ANNOTATOR_VERSION = VERSION
+
 SECRET_KEY = config('SECRET_KEY')
 DEBUG = config('DEBUG', default=False)
 

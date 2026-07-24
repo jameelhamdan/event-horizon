@@ -16,6 +16,7 @@ import re
 import requests
 from datetime import datetime, timedelta, timezone as dt_timezone
 
+from django.conf import settings
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -328,8 +329,10 @@ def annotate_articles(ids: list) -> int:
     retries it, rather than a degraded 'general'/no-location result
     masquerading as done. A *successful* annotation advances stage to
     'annotated' (confident) or 'refine' (queued for the judge — see
-    services/processing/refiner.py); either is processed, and an article that
-    resolves no location is simply terminal (never aggregates into an event).
+    services/processing/refiner.py) and stamps ``annotator_version`` with
+    ``settings.ANNOTATOR_VERSION`` (see annotate_deferred_batch_task's
+    self-healing skip); either is processed, and an article that resolves no
+    location is simply terminal (never aggregates into an event).
     """
     from core.models import Article, ArticleDocument
     from services.data.bodies import is_junk_article
@@ -399,7 +402,7 @@ def annotate_articles(ids: list) -> int:
     update_fields = [
         'entities', 'sentiment', 'finbert_sentiment', 'location', 'latitude', 'longitude',
         'event_intensity', 'category', 'sub_category', 'processed_on', 'stage',
-        'importance_score', 'importance_source',
+        'importance_score', 'importance_source', 'annotator_version',
         'extra_data', 'translations', 'llm_usage', 'stage_status',
     ]
     to_save = []
@@ -421,6 +424,7 @@ def annotate_articles(ids: list) -> int:
         if features.llm_error is None:
             article.processed_on = timezone.now()
             article.stage = Article.STAGE_ANNOTATED if features.confidence >= ESCALATE_BELOW else Article.STAGE_REFINE
+            article.annotator_version = settings.ANNOTATOR_VERSION
             score = importance.get(str(article.id))
             if score is not None:
                 article.importance_score = score
@@ -483,7 +487,7 @@ def refine_articles(ids: list) -> int:
     update_fields = [
         'category', 'sub_category', 'location', 'latitude', 'longitude',
         'event_intensity', 'translations', 'extra_data',
-        'stage', 'refined_on', 'refined_by', 'stage_status',
+        'stage', 'refined_on', 'refined_by', 'annotator_version', 'stage_status',
     ]
     to_save, refined = [], 0
     for article, verdict in zip(articles, verdicts):
@@ -499,6 +503,7 @@ def refine_articles(ids: list) -> int:
         refiner.apply(article, verdict)
         article.stage = Article.STAGE_REFINED
         article.refined_on = timezone.now()
+        article.annotator_version = settings.ANNOTATOR_VERSION
         mark_stage(article, 'refine', ok=True)
         to_save.append(article)
         refined += 1

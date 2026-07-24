@@ -3,7 +3,8 @@
 A single page under ``/admin/dashboard/`` summarizing pipeline operations and
 offering POST actions. Data sources: ``api/crontab`` (upcoming runs),
 Flower's ``/workers?json=1`` API (live worker ground truth — individual task
-detail lives in the task browser at ``/admin/core/taskrun/``),
+detail lives in the task browser at ``/admin/core/taskrun/``), Flower's
+``/api/queues/length`` API (per-queue backlog depth off the Redis broker),
 ``pipeline_coverage()`` (per-stage gaps), and forecast artifacts/rows.
 Registered via a ``get_urls`` shim in ``core/admin.py``.
 """
@@ -393,6 +394,49 @@ def _flower_status():
     ]
     workers.sort(key=lambda w: w['hostname'])
     return {'available': True, 'workers': workers}
+
+
+# Friendly label for each queue — mirrors the worker-type split documented in
+# CLAUDE.md (default = light I/O, heavy = NLP/LLM model stack, bulk = long
+# one-shot jobs + pure dispatchers).
+_QUEUE_LABELS = {
+    'default': 'default — light I/O (fetch, stream collectors, stage dispatch)',
+    'heavy': 'heavy — NLP/LLM (annotate/refine/aggregate/tag)',
+    'bulk': 'bulk — long jobs + dispatchers (backfills, reprocess, forecast)',
+}
+
+
+def _queue_depths():
+    """Backlog depth per Celery queue — how many messages are sitting in Redis
+    waiting for a worker, as opposed to ``_flower_status``'s per-worker
+    "active" count (currently executing). This is what actually tells you
+    whether e.g. the heavy queue is backed up (single worker, easy to
+    saturate — see reprocess_corpus_task's double-dispatch risk).
+
+    ``GET {FLOWER_INTERNAL_URL}/flower/api/queues/length`` returns
+    ``{"active_queues": [{"name": "heavy", "messages": 1234}, ...]}`` — Flower
+    reads this straight off the Redis broker, so it reflects reality even if
+    a worker container is down.
+    """
+    from django.conf import settings
+
+    try:
+        import requests
+
+        resp = requests.get(f'{settings.FLOWER_INTERNAL_URL}/flower/api/queues/length', timeout=4)
+        resp.raise_for_status()
+        queues = resp.json().get('active_queues', [])
+    except Exception as exc:  # noqa: BLE001
+        logger.debug('[dashboard] flower queue depth unavailable: %s', exc)
+        return {'available': False}
+
+    rows = [
+        {'name': q.get('name', '?'), 'label': _QUEUE_LABELS.get(q.get('name'), q.get('name', '?')),
+         'messages': q.get('messages') or 0}
+        for q in queues
+    ]
+    rows.sort(key=lambda r: r['name'])
+    return {'available': True, 'rows': rows}
 
 
 # Health report is written every 30 min (crontab) — older than 2× that means
@@ -915,6 +959,7 @@ def dashboard_view(request):
         'health': _health_status,
         'upcoming': _upcoming,
         'flower': _flower_status,
+        'queue_depths': _queue_depths,
         'coverage': _coverage,
         'article_states': _article_states,
         'forecast': _forecast_status,

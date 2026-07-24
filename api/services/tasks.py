@@ -680,7 +680,7 @@ def _dispatch_batches(ids: list, batch_size: int, task, **task_kwargs) -> int:
 
 
 @shared_task(**_RETRY_KW)
-def annotate_deferred_batch_task(ids: list, rehydrate: bool = False) -> int:
+def annotate_deferred_batch_task(ids: list, rehydrate: bool = False) -> dict:
     """Worker half of reprocess_corpus_task's annotate pass: optionally rehydrate
     the batch's bodies through the current extractor (``rehydrate=True``), then
     run the on-prem annotate pass (services.processing.annotator, same as the
@@ -688,18 +688,38 @@ def annotate_deferred_batch_task(ids: list, rehydrate: bool = False) -> int:
     on the heavy queue, same as the live annotate/analyze stages, since it
     loads the same model stack.
 
+    Self-healing: any id already at a terminal stage (annotated/refined) and
+    already stamped with the current settings.ANNOTATOR_VERSION is skipped
+    without touching NLPAnnotator — it's genuinely already correct under
+    current classification logic. This makes reprocess_corpus_task safe to
+    re-run or double-dispatch freely: overlapping scopes (e.g. 'everything'
+    and 'unfinished' back-to-back) become cheap no-ops on the overlap instead
+    of a redundant annotate pass.
+
     Clears the flag for the whole batch — including any article whose
     annotation failed (it retries via the live annotate stage) — so re-runs of
-    the dispatcher make forward progress. Returns the processed count.
+    the dispatcher make forward progress. Returns {'skipped': int, 'processed': int}.
     """
     import core.models as m
-    from services.workflow.articles import rehydrate_articles
+    from django.conf import settings
+    from services.workflow.articles import _article_uuids, rehydrate_articles
 
-    if rehydrate:
-        rehydrate_articles(ids)
-    processed = annotate_articles(ids=ids)
+    ids = _article_uuids(ids)
+    current_ids = set(m.Article.all_objects.filter(
+        id__in=ids,
+        stage__in=[m.Article.STAGE_ANNOTATED, m.Article.STAGE_REFINED],
+        annotator_version=settings.ANNOTATOR_VERSION,
+    ).values_list('id', flat=True))
+    todo_ids = [i for i in ids if i not in current_ids]
+
+    if rehydrate and todo_ids:
+        rehydrate_articles(todo_ids)
+    processed = annotate_articles(ids=todo_ids) if todo_ids else 0
     m.Article.objects.filter(id__in=ids).update(annotation_deferred=False)
-    return processed
+
+    result = {'skipped': len(current_ids), 'processed': processed}
+    logger.info('[annotate_deferred_batch] skipped %d already-current, processed %d', result['skipped'], processed)
+    return result
 
 
 @shared_task(**_RETRY_KW)
