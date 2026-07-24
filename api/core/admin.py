@@ -11,6 +11,21 @@ from . import models
 logger = logging.getLogger(__name__)
 
 
+def _enqueue_stage_for_selected(modeladmin, request, queryset, stage: str, noun: str, verb: str) -> None:
+    """Shared body of the admin's "re-run this pipeline stage on the selected
+    rows" actions (reannotate/rerefine on Article, retag/reroute on Event):
+    collect ids, dispatch run_stage_chunk_task on the heavy queue, report the
+    count. *stage* is a services/stages.py registry name; *noun*/*verb* only
+    change the user-facing message.
+    """
+    from services.queue import enqueue
+    from services.tasks import run_stage_chunk_task
+    ids = [obj.pk for obj in queryset]
+    if ids:
+        enqueue(run_stage_chunk_task, stage, ids, queue="heavy")
+    modeladmin.message_user(request, f"{verb} enqueued for {len(ids)} {noun}(s).", messages.SUCCESS)
+
+
 class ImportanceFilter(admin.SimpleListFilter):
     title = "importance"
     parameter_name = "importance"
@@ -214,12 +229,7 @@ class ArticleAdmin(ImportExportModelAdmin):
 
     @admin.action(description="Re-annotate selected (on-prem NLP, importance included)")
     def reannotate_selected(self, request, queryset):
-        from services.queue import enqueue
-        from services.tasks import run_stage_chunk_task
-        ids = [a.id for a in queryset]
-        if ids:
-            enqueue(run_stage_chunk_task, 'annotate', ids, queue="heavy")
-        self.message_user(request, f"Re-annotation enqueued for {len(ids)} article(s).", messages.SUCCESS)
+        _enqueue_stage_for_selected(self, request, queryset, 'annotate', 'article', 'Re-annotation')
 
     @admin.action(description="Re-refine selected (judge again with the current REFINE_PROVIDER)")
     def rerefine_selected(self, request, queryset):
@@ -229,12 +239,7 @@ class ArticleAdmin(ImportExportModelAdmin):
         to re-judge with a newly-configured REFINE_PROVIDER, or to redo a
         judgment now considered wrong; Article.refined_by is overwritten with
         whichever provider produced the new verdict."""
-        from services.queue import enqueue
-        from services.tasks import run_stage_chunk_task
-        ids = [a.id for a in queryset]
-        if ids:
-            enqueue(run_stage_chunk_task, 'refine', ids, queue="heavy")
-        self.message_user(request, f"Re-refine enqueued for {len(ids)} article(s).", messages.SUCCESS)
+        _enqueue_stage_for_selected(self, request, queryset, 'refine', 'article', 'Re-refine')
 
     readonly_fields = [
         "id",
@@ -352,21 +357,11 @@ class EventAdmin(admin.ModelAdmin):
 
     @admin.action(description="Re-tag topics for selected events")
     def retag_selected(self, request, queryset):
-        from services.queue import enqueue
-        from services.tasks import run_stage_chunk_task
-        ids = [e.pk for e in queryset]
-        if ids:
-            enqueue(run_stage_chunk_task, 'tag', ids, queue="heavy")
-        self.message_user(request, f"Re-tag enqueued for {len(ids)} event(s).", messages.SUCCESS)
+        _enqueue_stage_for_selected(self, request, queryset, 'tag', 'event', 'Re-tag')
 
     @admin.action(description="Re-route selected events to symbols")
     def reroute_selected(self, request, queryset):
-        from services.queue import enqueue
-        from services.tasks import run_stage_chunk_task
-        ids = [e.pk for e in queryset]
-        if ids:
-            enqueue(run_stage_chunk_task, 'route', ids, queue="heavy")
-        self.message_user(request, f"Re-route enqueued for {len(ids)} event(s).", messages.SUCCESS)
+        _enqueue_stage_for_selected(self, request, queryset, 'route', 'event', 'Re-route')
 
 
 @admin.register(models.PriceTick)

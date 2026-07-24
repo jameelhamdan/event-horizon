@@ -115,6 +115,31 @@ def _fetch_og_image(url: str) -> str | None:
         return None
 
 
+def _scrape_banners(articles: list, eligible: list[bool] | None = None) -> dict[int, str]:
+    """og:image for articles that don't already have one, keyed by index into
+    *articles* — independent HTTP fetches, run concurrently instead of
+    serially (was up to chunk_size * 5s of blocking HTTP in the caller's
+    loop; one slow/unresponsive source could stall the entire chunk).
+    Shared by analyze_live_articles and annotate_articles.
+
+    ``eligible`` (same length as *articles*, default all True) lets a caller
+    exclude some articles up front — annotate_articles skips lite/backfill
+    rows, which get no banner scrape at all.
+    """
+    if eligible is None:
+        eligible = [True] * len(articles)
+    targets = [
+        (i, article.source_url)
+        for i, (article, ok) in enumerate(zip(articles, eligible))
+        if ok and not article.banner_image_url and article.source_url.startswith('https://')
+    ]
+    if not targets:
+        return {}
+    from services.utils import map_concurrent
+    ogs = map_concurrent(targets, lambda t: _fetch_og_image(t[1]), max_workers=8)
+    return {targets[k][0]: og for k, og in enumerate(ogs) if og}
+
+
 def analyze_live_articles(ids: list) -> int:
     """Full cloud-LLM analysis for exactly these article ids — the 'analyze'
     stage's executor. Uses services.processing.analyzer.ArticleAnalyzer
@@ -169,18 +194,7 @@ def analyze_live_articles(ids: list) -> int:
         for article, analysis in zip(articles, analyses) if analysis.error is None
     })
 
-    # Banner scrapes are independent HTTP fetches (og:image) — run the whole
-    # chunk's fetches concurrently instead of serially, same as annotate_articles.
-    banner_targets = [
-        (i, article.source_url)
-        for i, article in enumerate(articles)
-        if not article.banner_image_url and article.source_url.startswith('https://')
-    ]
-    banner_results: dict[int, str] = {}
-    if banner_targets:
-        from services.utils import map_concurrent
-        ogs = map_concurrent(banner_targets, lambda t: _fetch_og_image(t[1]), max_workers=8)
-        banner_results = {banner_targets[k][0]: og for k, og in enumerate(ogs) if og}
+    banner_results = _scrape_banners(articles)
 
     update_fields = [
         'sentiment', 'finbert_sentiment', 'location', 'latitude', 'longitude',
@@ -386,20 +400,8 @@ def annotate_articles(ids: list) -> int:
         for a, f in zip(articles, feature_list) if f.llm_error is None
     })
 
-    # Banner scrapes are independent HTTP fetches (og:image) — run the whole
-    # chunk's fetches concurrently instead of serially (was up to chunk_size *
-    # 5s of blocking HTTP inside this loop, one slow/unresponsive source could
-    # stall the entire chunk).
-    banner_targets = [
-        (i, article.source_url)
-        for i, (article, lite) in enumerate(zip(articles, lite_flags))
-        if not lite and not article.banner_image_url and article.source_url.startswith('https://')
-    ]
-    banner_results: dict[int, str] = {}
-    if banner_targets:
-        from services.utils import map_concurrent
-        ogs = map_concurrent(banner_targets, lambda t: _fetch_og_image(t[1]), max_workers=8)
-        banner_results = {banner_targets[k][0]: og for k, og in enumerate(ogs) if og}
+    # Lite/backfill rows get no banner scrape at all.
+    banner_results = _scrape_banners(articles, eligible=[not lite for lite in lite_flags])
 
     # Base field set written for every article; banner_image_url is added to the
     # bulk_update field list only when at least one article in the chunk got a
